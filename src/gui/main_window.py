@@ -107,7 +107,24 @@ class DownloadWorker(QThread):
 
         # Initialize downloaders
         self._initialize_downloaders()
-    
+
+    def update_timeout(self, new_timeout_seconds: int):
+        """
+        Update timeout for all downloaders and their async managers
+
+        Args:
+            new_timeout_seconds: New timeout value in seconds
+        """
+        self.timeout_seconds = new_timeout_seconds
+        self.config.download_settings.timeout_seconds = new_timeout_seconds
+
+        # Update timeout for all downloaders
+        for downloader in self.downloaders.values():
+            if hasattr(downloader, 'config'):
+                downloader.config.download_settings.timeout_seconds = new_timeout_seconds
+
+        self.logger.info(f"Updated timeout to {new_timeout_seconds}s for all downloaders")
+
     def _initialize_downloaders(self):
         """Initialize downloader instances"""
         downloader_classes = {
@@ -210,6 +227,10 @@ class DownloadWorker(QThread):
                 return False
 
             self.status_updated.emit(exchange, "Starting download...")
+
+            # Update downloader timeout to match current setting
+            if hasattr(downloader, 'config'):
+                downloader.config.download_settings.timeout_seconds = self.timeout_seconds
 
             # Get date range
             start_date, end_date = downloader.get_date_range()

@@ -354,14 +354,29 @@ class BaseDownloader(ABC):
             # Always cleanup temp files
             self.cleanup_temp_files()
     
+    async def update_async_session_timeout(self, async_manager, new_timeout_seconds: int):
+        """
+        Update timeout for async download manager session
+
+        Args:
+            async_manager: AsyncDownloadManager instance
+            new_timeout_seconds: New timeout value in seconds
+        """
+        try:
+            if hasattr(async_manager, 'update_session_timeout'):
+                await async_manager.update_session_timeout(new_timeout_seconds)
+                self.logger.info(f"Updated async session timeout to {new_timeout_seconds}s for {self.exchange_segment}")
+        except Exception as e:
+            self.logger.warning(f"Failed to update async session timeout: {e}")
+
     @abstractmethod
     async def _download_implementation(self, working_days: List[date]) -> bool:
         """
         Implement actual download logic (to be implemented by concrete classes)
-        
+
         Args:
             working_days: List of dates to download
-            
+
         Returns:
             True if successful, False otherwise
         """

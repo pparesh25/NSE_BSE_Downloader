@@ -132,6 +132,9 @@ class NSEIndexDownloader(BaseDownloader):
                     
                     # Download file
                     async with AsyncDownloadManager(self.config) as download_manager:
+                        # Update session timeout to current config value
+                        await self.update_async_session_timeout(download_manager, self.config.download_settings.timeout_seconds)
+
                         results = await download_manager.download_multiple([task])
                         
                         if results and results[0].success:

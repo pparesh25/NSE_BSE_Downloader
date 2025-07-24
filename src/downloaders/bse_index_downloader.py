@@ -271,6 +271,9 @@ class BSEIndexDownloader(BaseDownloader):
                     # Download file
                     self.logger.info(f"  Starting download...")
                     async with AsyncDownloadManager(self.config) as download_manager:
+                        # Update session timeout to current config value
+                        await self.update_async_session_timeout(download_manager, self.config.download_settings.timeout_seconds)
+
                         results = await download_manager.download_multiple([task])
 
                         self.logger.info(f"  Download completed. Results: {len(results) if results else 0}")

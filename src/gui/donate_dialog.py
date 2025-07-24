@@ -45,9 +45,9 @@ class DonateDialog(QDialog):
         """Setup the donate dialog UI"""
         self.setWindowTitle("💝 Support Development")
         # Make dialog resizable and set reasonable size
-        self.resize(400, 550)
-        self.setMinimumSize(350, 500)
-        self.setMaximumSize(500, 700)
+        self.resize(450, 650)
+        self.setMinimumSize(400, 600)
+        self.setMaximumSize(600, 800)
         self.setModal(True)
 
         # Main layout with reduced spacing
@@ -121,7 +121,7 @@ class DonateDialog(QDialog):
         # QR Code image
         self.qr_label = QLabel()
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_label.setFixedSize(200, 200)
+        self.qr_label.setFixedSize(250, 250)
         self.qr_label.setStyleSheet("""
             QLabel {
                 border: 1px solid #bdc3c7;
@@ -167,7 +167,7 @@ class DonateDialog(QDialog):
         # UPI ID and copy button
         upi_row = QHBoxLayout()
         
-        self.upi_input = QLineEdit("developer@paytm")  # Replace with actual UPI ID
+        self.upi_input = QLineEdit("manishashah@paytm")  # Real UPI ID from QR image
         self.upi_input.setReadOnly(True)
         self.upi_input.setFont(QFont("Courier", 12, QFont.Weight.Bold))
         self.upi_input.setStyleSheet("""
@@ -267,10 +267,49 @@ class DonateDialog(QDialog):
         layout.addLayout(button_layout)
         
     def generate_qr_code(self):
-        """Generate QR code for UPI payment"""
+        """Load real QR code image for UPI payment"""
         try:
+            # Try to load the real QR image first
+            qr_image_path = Path(__file__).parent.parent.parent / "QR_UPI.jpeg"
+
+            print(f"🔍 Looking for QR image at: {qr_image_path}")  # Debug
+
+            if qr_image_path.exists():
+                print("✅ Found real QR image, loading...")  # Debug
+
+                # Load the real QR image
+                pixmap = QPixmap(str(qr_image_path))
+
+                if not pixmap.isNull():
+                    # Scale the image to fit the label
+                    scaled_pixmap = pixmap.scaled(
+                        240, 240,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+
+                    # Clear any previous styling and set pixmap
+                    self.qr_label.setStyleSheet("""
+                        QLabel {
+                            border: 1px solid #bdc3c7;
+                            border-radius: 5px;
+                            background-color: white;
+                        }
+                    """)
+                    self.qr_label.setPixmap(scaled_pixmap)
+                    self.qr_label.setScaledContents(False)
+
+                    print("✅ Real QR image loaded successfully")  # Debug
+                    self.logger.info("Real QR image loaded successfully")
+                    return
+                else:
+                    print("❌ Failed to load QR image file")  # Debug
+            else:
+                print("❌ QR image file not found, generating dynamic QR code...")  # Debug
+
+            # Fallback: Generate dynamic QR code if image not found
             if not QR_AVAILABLE:
-                self.qr_label.setText("QR Code library not available\nPlease install: pip install qrcode[pil]")
+                self.qr_label.setText("QR Code not available\nReal QR image not found\nQR library not installed")
                 self.qr_label.setStyleSheet("""
                     QLabel {
                         color: #dc3545;
@@ -284,13 +323,12 @@ class DonateDialog(QDialog):
                 """)
                 return
 
-            # UPI payment URL - Use actual UPI ID
-            upi_id = "developer@paytm"  # Replace with your actual UPI ID
+            # Generate dynamic QR code as fallback
+            upi_id = "manishashah@paytm"  # Real UPI ID
             upi_url = f"upi://pay?pa={upi_id}&pn=NSE BSE Data Downloader&cu=INR"
 
-            print(f"Generating QR code for: {upi_url}")  # Debug
+            print(f"🔄 Generating dynamic QR code for: {upi_url}")  # Debug
 
-            # Generate QR code with better settings
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -300,15 +338,11 @@ class DonateDialog(QDialog):
             qr.add_data(upi_url)
             qr.make(fit=True)
 
-            # Create QR code image with better quality
             qr_img = qr.make_image(fill_color="black", back_color="white")
-
-            # Convert PIL image to QPixmap with proper sizing
-            qr_img = qr_img.resize((180, 180), Image.Resampling.LANCZOS)
+            qr_img = qr_img.resize((240, 240), Image.Resampling.LANCZOS)
             qt_img = ImageQt.ImageQt(qr_img)
             pixmap = QPixmap.fromImage(qt_img)
 
-            # Clear any previous styling and set pixmap
             self.qr_label.setStyleSheet("""
                 QLabel {
                     border: 1px solid #bdc3c7;
@@ -319,13 +353,13 @@ class DonateDialog(QDialog):
             self.qr_label.setPixmap(pixmap)
             self.qr_label.setScaledContents(False)
 
-            print("QR code generated successfully")  # Debug
-            self.logger.info("QR code generated successfully")
+            print("✅ Dynamic QR code generated successfully")  # Debug
+            self.logger.info("Dynamic QR code generated successfully")
 
         except Exception as e:
             error_msg = f"QR Code Error:\n{str(e)}"
-            print(f"QR Code generation error: {e}")  # Debug
-            self.logger.error(f"Error generating QR code: {e}")
+            print(f"❌ QR Code error: {e}")  # Debug
+            self.logger.error(f"Error loading/generating QR code: {e}")
             self.qr_label.setText(error_msg)
             self.qr_label.setStyleSheet("""
                 QLabel {

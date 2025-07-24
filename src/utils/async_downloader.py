@@ -115,17 +115,11 @@ class AsyncDownloadManager:
             'Upgrade-Insecure-Requests': '1',
         }
 
-        # Create SSL context for BSE servers (disable verification for BSE)
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
         connector = aiohttp.TCPConnector(
             limit=self.download_settings.max_concurrent_downloads * 2,
             limit_per_host=self.download_settings.max_concurrent_downloads,
             ttl_dns_cache=300,
             use_dns_cache=True,
-            ssl=ssl_context  # Use custom SSL context for BSE compatibility
         )
         
         self.session = aiohttp.ClientSession(
@@ -288,8 +282,15 @@ class AsyncDownloadManager:
                 self.logger.info(f"  Timeout: {self.download_settings.timeout_seconds}s")
                 self.logger.info(f"  SSL Verification: Disabled (BSE compatibility)")
 
-            # Make HTTP request
-            async with self.session.get(task.url) as response:
+            # Make HTTP request with SSL handling for BSE
+            ssl_context = None
+            if is_bse_request:
+                # Disable SSL verification for BSE servers
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+            async with self.session.get(task.url, ssl=ssl_context) as response:
                 if is_bse_request:
                     request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                     self.logger.info(f"  {request_type} Response Status: {response.status}")

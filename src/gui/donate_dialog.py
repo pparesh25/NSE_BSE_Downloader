@@ -44,13 +44,16 @@ class DonateDialog(QDialog):
     def setup_ui(self):
         """Setup the donate dialog UI"""
         self.setWindowTitle("💝 Support Development")
-        self.setFixedSize(450, 600)
+        # Make dialog resizable and set reasonable size
+        self.resize(400, 550)
+        self.setMinimumSize(350, 500)
+        self.setMaximumSize(500, 700)
         self.setModal(True)
-        
-        # Main layout
+
+        # Main layout with reduced spacing
         layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Header section
         self.create_header_section(layout)
@@ -78,15 +81,15 @@ class DonateDialog(QDialog):
         # Title
         title = QLabel("💝 Support NSE/BSE Data Downloader")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-        title.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
+        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setStyleSheet("color: #2c3e50; margin-bottom: 8px;")
         layout.addWidget(title)
-        
+
         # Description
         desc = QLabel("Help keep this project free and open source!")
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc.setFont(QFont("Arial", 11))
-        desc.setStyleSheet("color: #7f8c8d; margin-bottom: 20px;")
+        desc.setFont(QFont("Arial", 10))
+        desc.setStyleSheet("color: #7f8c8d; margin-bottom: 15px;")
         layout.addWidget(desc)
         
         # Separator
@@ -102,8 +105,8 @@ class DonateDialog(QDialog):
             QFrame {
                 background-color: white;
                 border: 2px solid #ecf0f1;
-                border-radius: 10px;
-                padding: 20px;
+                border-radius: 8px;
+                padding: 15px;
             }
         """)
         qr_layout = QVBoxLayout(qr_frame)
@@ -111,14 +114,14 @@ class DonateDialog(QDialog):
         # QR Code label
         qr_title = QLabel("📱 Scan QR Code to Donate")
         qr_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        qr_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        qr_title.setStyleSheet("color: #34495e; margin-bottom: 15px;")
+        qr_title.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        qr_title.setStyleSheet("color: #34495e; margin-bottom: 10px;")
         qr_layout.addWidget(qr_title)
         
         # QR Code image
         self.qr_label = QLabel()
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_label.setMinimumSize(250, 250)
+        self.qr_label.setFixedSize(200, 200)
         self.qr_label.setStyleSheet("""
             QLabel {
                 border: 1px solid #bdc3c7;
@@ -149,8 +152,8 @@ class DonateDialog(QDialog):
             QFrame {
                 background-color: #f8f9fa;
                 border: 1px solid #e9ecef;
-                border-radius: 8px;
-                padding: 15px;
+                border-radius: 6px;
+                padding: 12px;
             }
         """)
         upi_layout = QVBoxLayout(upi_frame)
@@ -212,8 +215,8 @@ class DonateDialog(QDialog):
             QFrame {
                 background-color: #e8f5e8;
                 border: 1px solid #c3e6c3;
-                border-radius: 8px;
-                padding: 15px;
+                border-radius: 6px;
+                padding: 12px;
             }
         """)
         thanks_layout = QVBoxLayout(thanks_frame)
@@ -301,7 +304,7 @@ class DonateDialog(QDialog):
             qr_img = qr.make_image(fill_color="black", back_color="white")
 
             # Convert PIL image to QPixmap with proper sizing
-            qr_img = qr_img.resize((220, 220), Image.Resampling.LANCZOS)
+            qr_img = qr_img.resize((180, 180), Image.Resampling.LANCZOS)
             qt_img = ImageQt.ImageQt(qr_img)
             pixmap = QPixmap.fromImage(qt_img)
 

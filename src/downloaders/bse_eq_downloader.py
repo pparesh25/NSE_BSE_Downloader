@@ -198,6 +198,9 @@ class BSEEQDownloader(BaseDownloader):
 
                     # Create download task
                     url = self.build_url(target_date)
+                    self.logger.info(f"🔍 BSE EQ Download Debug for {target_date}:")
+                    self.logger.info(f"  URL: {url}")
+
                     task = DownloadTask(
                         url=url,
                         date_str=target_date.strftime('%Y-%m-%d'),

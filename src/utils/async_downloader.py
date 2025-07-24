@@ -10,6 +10,7 @@ Provides concurrent download capabilities with:
 
 import asyncio
 import aiohttp
+import ssl
 import logging
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any, Tuple
@@ -113,12 +114,18 @@ class AsyncDownloadManager:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
-        
+
+        # Create SSL context for BSE servers (disable verification for BSE)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         connector = aiohttp.TCPConnector(
             limit=self.download_settings.max_concurrent_downloads * 2,
             limit_per_host=self.download_settings.max_concurrent_downloads,
             ttl_dns_cache=300,
             use_dns_cache=True,
+            ssl=ssl_context  # Use custom SSL context for BSE compatibility
         )
         
         self.session = aiohttp.ClientSession(
@@ -269,24 +276,32 @@ class AsyncDownloadManager:
             if not self.session:
                 raise NetworkError("Session not initialized")
             
-            # Debug for BSE INDEX
-            is_bse_index = "bseindia.com" in task.url and "INDEXSummary" in task.url
-            if is_bse_index:
-                self.logger.info(f"🔍 BSE INDEX HTTP Request Debug:")
+            # Debug for BSE requests
+            is_bse_request = "bseindia.com" in task.url
+            is_bse_index = is_bse_request and "INDEXSummary" in task.url
+            is_bse_eq = is_bse_request and "BhavCopy_BSE_CM" in task.url
+
+            if is_bse_request:
+                request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
+                self.logger.info(f"🔍 {request_type} HTTP Request Debug:")
                 self.logger.info(f"  URL: {task.url}")
                 self.logger.info(f"  Timeout: {self.download_settings.timeout_seconds}s")
+                self.logger.info(f"  SSL Verification: Disabled (BSE compatibility)")
 
             # Make HTTP request
             async with self.session.get(task.url) as response:
-                if is_bse_index:
-                    self.logger.info(f"  Response Status: {response.status}")
-                    self.logger.info(f"  Response Reason: {response.reason}")
-                    self.logger.info(f"  Response Headers: {dict(response.headers)}")
+                if is_bse_request:
+                    request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
+                    self.logger.info(f"  {request_type} Response Status: {response.status}")
+                    self.logger.info(f"  {request_type} Response Reason: {response.reason}")
+                    if response.status != 200:
+                        self.logger.info(f"  {request_type} Response Headers: {dict(response.headers)}")
 
                 # Check response status
                 if response.status != 200:
-                    if is_bse_index:
-                        self.logger.error(f"❌ BSE INDEX HTTP Error: {response.status} - {response.reason}")
+                    if is_bse_request:
+                        request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
+                        self.logger.error(f"❌ {request_type} HTTP Error: {response.status} - {response.reason}")
                     raise NetworkError(
                         f"HTTP {response.status}: {response.reason}",
                         url=task.url,
@@ -302,8 +317,9 @@ class AsyncDownloadManager:
 
                 download_time = time.time() - start_time
 
-                if is_bse_index:
-                    self.logger.info(f"  ✅ BSE INDEX Download Success:")
+                if is_bse_request:
+                    request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
+                    self.logger.info(f"  ✅ {request_type} Download Success:")
                     self.logger.info(f"    File Size: {file_size} bytes")
                     self.logger.info(f"    Download Time: {download_time:.2f}s")
                     # Preview first 100 characters

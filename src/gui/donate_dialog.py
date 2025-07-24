@@ -252,38 +252,39 @@ class DonateDialog(QDialog):
         try:
             if not QR_AVAILABLE:
                 self.qr_label.setText("QR Code generation not available\n(qrcode library not installed)")
-                self.qr_label.setStyleSheet("color: #dc3545; text-align: center;")
+                self.qr_label.setStyleSheet("color: #dc3545; text-align: center; font-size: 12px;")
                 return
-                
-            # UPI payment URL
-            upi_id = self.upi_input.text() if hasattr(self, 'upi_input') else "developer@paytm"
+
+            # UPI payment URL - Use actual UPI ID
+            upi_id = "developer@paytm"  # Replace with your actual UPI ID
             upi_url = f"upi://pay?pa={upi_id}&pn=NSE BSE Data Downloader&cu=INR"
-            
-            # Generate QR code
+
+            # Generate QR code with better settings
             qr = qrcode.QRCode(
                 version=1,
-                error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=8,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=10,
                 border=4,
             )
             qr.add_data(upi_url)
             qr.make(fit=True)
-            
-            # Create QR code image
+
+            # Create QR code image with better quality
             qr_img = qr.make_image(fill_color="black", back_color="white")
-            
-            # Convert PIL image to QPixmap
-            qr_img = qr_img.resize((220, 220), Image.Resampling.LANCZOS)
+
+            # Convert PIL image to QPixmap with proper sizing
+            qr_img = qr_img.resize((200, 200), Image.Resampling.LANCZOS)
             qt_img = ImageQt.ImageQt(qr_img)
             pixmap = QPixmap.fromImage(qt_img)
-            
+
             self.qr_label.setPixmap(pixmap)
+            self.qr_label.setScaledContents(True)
             self.logger.info("QR code generated successfully")
-            
+
         except Exception as e:
             self.logger.error(f"Error generating QR code: {e}")
-            self.qr_label.setText(f"Error generating QR code:\n{str(e)}")
-            self.qr_label.setStyleSheet("color: #dc3545; text-align: center;")
+            self.qr_label.setText(f"QR Code Error:\n{str(e)}")
+            self.qr_label.setStyleSheet("color: #dc3545; text-align: center; font-size: 11px; padding: 20px;")
             
     def copy_upi_id(self):
         """Copy UPI ID to clipboard"""

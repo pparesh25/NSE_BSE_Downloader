@@ -399,13 +399,6 @@ class MainWindow(QMainWindow):
         about_action = QAction('About', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
-
-        # Donate menu
-        donate_menu = menubar.addMenu('💝 Donate')
-
-        donate_action = QAction('💝 Support Development', self)
-        donate_action.triggered.connect(self.show_donate_dialog)
-        donate_menu.addAction(donate_action)
     
     def create_exchange_selection(self) -> QGroupBox:
         """Create exchange selection area"""
@@ -619,16 +612,16 @@ class MainWindow(QMainWindow):
         layout.addStretch()  # Add stretch to push buttons to left
 
         # Donate button (right side)
-        donate_button = QPushButton("💝 Donate")
-        donate_button.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        donate_button = QPushButton("🤍 Donate")
+        donate_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         donate_button.setStyleSheet("""
             QPushButton {
                 background-color: #ff6b6b;
                 color: white;
                 border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                min-width: 100px;
+                padding: 10px 20px;
+                border-radius: 5px;
+                min-width: 120px;
             }
             QPushButton:hover {
                 background-color: #ff5252;

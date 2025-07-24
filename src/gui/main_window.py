@@ -41,6 +41,7 @@ from ..downloaders.bse_eq_downloader import BSEEQDownloader
 from ..downloaders.bse_index_downloader import BSEIndexDownloader
 from ..utils.update_checker import UpdateChecker
 from .update_dialog import UpdateDialog
+from .donate_dialog import DonateDialog
 from ..utils.user_preferences import UserPreferences
 from ..core.base_downloader import ProgressCallback
 from ..core.exceptions import GUIError
@@ -394,10 +395,17 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu('Help')
-        
+
         about_action = QAction('About', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+        # Donate menu
+        donate_menu = menubar.addMenu('💝 Donate')
+
+        donate_action = QAction('💝 Support Development', self)
+        donate_action.triggered.connect(self.show_donate_dialog)
+        donate_menu.addAction(donate_action)
     
     def create_exchange_selection(self) -> QGroupBox:
         """Create exchange selection area"""
@@ -607,8 +615,30 @@ class MainWindow(QMainWindow):
         refresh_button = QPushButton("Refresh Status")
         refresh_button.clicked.connect(self.load_data_summary)
         layout.addWidget(refresh_button)
-        
+
         layout.addStretch()  # Add stretch to push buttons to left
+
+        # Donate button (right side)
+        donate_button = QPushButton("💝 Donate")
+        donate_button.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        donate_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff6b6b;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
+            }
+            QPushButton:pressed {
+                background-color: #e53935;
+            }
+        """)
+        donate_button.clicked.connect(self.show_donate_dialog)
+        layout.addWidget(donate_button)
         
         return layout
 
@@ -1085,3 +1115,18 @@ class MainWindow(QMainWindow):
         """
 
         QMessageBox.about(self, "About NSE/BSE Data Downloader", about_text)
+
+    def show_donate_dialog(self):
+        """Show donate dialog"""
+        try:
+            dialog = DonateDialog(self)
+            dialog.exec()
+            self.logger.info("Donate dialog shown")
+        except Exception as e:
+            self.logger.error(f"Error showing donate dialog: {e}")
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Could not open donate dialog: {str(e)}",
+                QMessageBox.StandardButton.Ok
+            )

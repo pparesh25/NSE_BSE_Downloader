@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.core.config import Config
 from src.core.data_manager import DataManager
 from src.gui.main_window import MainWindow
+from src.cli.cli_interface import CLIInterface
 
 try:
     from PyQt6.QtWidgets import QApplication
@@ -117,28 +118,26 @@ async def run_cli_mode(args):
     try:
         # Initialize configuration
         config = Config(args.config)
-        data_manager = DataManager(config)
-        
-        print("NSE/BSE Data Downloader - CLI Mode")
-        print("=" * 40)
-        
+
         if args.exchange:
-            # Download specific exchange
+            # Direct command mode - download specific exchange
             exchange, segment = args.exchange.split("_")
+            print(f"NSE/BSE Data Downloader - Direct Mode")
+            print("=" * 40)
             print(f"Downloading {exchange} {segment} data...")
-            
-            # TODO: Implement CLI download logic
-            print("CLI download functionality will be implemented in next phase.")
-            
+
+            # TODO: Implement direct download logic
+            print("Direct CLI download functionality will be implemented in next phase.")
+
         else:
-            # Interactive mode
-            print("Interactive CLI mode will be implemented in next phase.")
-            print("For now, please use GUI mode: python main.py")
-            
+            # Interactive CLI mode
+            cli_interface = CLIInterface(config)
+            return await cli_interface.run()
+
     except Exception as e:
         print(f"Error in CLI mode: {e}")
         return 1
-        
+
     return 0
 
 

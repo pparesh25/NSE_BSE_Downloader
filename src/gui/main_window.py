@@ -16,7 +16,7 @@ try:
         QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
         QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
         QGroupBox, QFrame, QSplitter, QMessageBox, QApplication,
-        QStatusBar, QMenuBar, QMenu
+        QStatusBar, QMenuBar, QMenu, QSizePolicy
     )
     from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
     from PyQt6.QtGui import QFont, QIcon, QAction
@@ -334,6 +334,7 @@ class MainWindow(QMainWindow):
 
             # Load window size from user preferences
             width, height = self.user_prefs.get_window_size()
+            self.logger.info(f"Loading window size from preferences: {width}x{height}")
             self.setGeometry(100, 100, width, height)
             
             # Create central widget
@@ -621,6 +622,10 @@ class MainWindow(QMainWindow):
         self.status_text.setMinimumHeight(100)  # Minimum height
         # Remove maximum height to allow expansion
         self.status_text.setReadOnly(True)
+
+        # Set size policy to expand vertically
+        self.status_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
         self.status_text.setStyleSheet("""
             QTextEdit {
                 background-color: #f5f5f5;
@@ -911,6 +916,7 @@ class MainWindow(QMainWindow):
 
             # Save window size to preferences
             size = self.size()
+            self.logger.info(f"Current window size before saving: {size.width()}x{size.height()}")
             self.user_prefs.set_window_size(size.width(), size.height())
 
             # Save current download options

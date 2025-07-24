@@ -172,9 +172,9 @@ class AsyncDownloadManager:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 
-                # Fast download strategy - single attempt only
+                # Fast download strategy - single attempt with full timeout wait
                 if hasattr(self.download_settings, 'fast_mode') and self.download_settings.fast_mode:
-                    # Fast mode: single attempt, no retry for unavailable files
+                    # Fast mode: single attempt but wait for full timeout before giving up
                     try:
                         result = await self._attempt_download(task)
                         if result.success:
@@ -184,9 +184,20 @@ class AsyncDownloadManager:
                             self.download_stats['failed_downloads'] += 1
                         return result
 
+                    except asyncio.TimeoutError:
+                        # Timeout occurred - this is expected behavior, not an error
+                        error_msg = f"Server timeout after {self.download_settings.timeout_seconds}s (expected for unavailable files)"
+                        self.download_stats['failed_downloads'] += 1
+
+                        return DownloadResult(
+                            task=task,
+                            success=False,
+                            error_message=error_msg,
+                            download_time=time.time() - start_time
+                        )
                     except Exception as e:
-                        # Fast mode: no retry, quick failure for unavailable files
-                        error_msg = f"File not available: {e}"
+                        # Other errors (network issues, etc.)
+                        error_msg = f"Download error: {e}"
                         self.download_stats['failed_downloads'] += 1
 
                         return DownloadResult(

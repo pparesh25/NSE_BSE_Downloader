@@ -348,23 +348,23 @@ class MainWindow(QMainWindow):
             
             # Create exchange selection area
             exchange_group = self.create_exchange_selection()
-            main_layout.addWidget(exchange_group)
+            main_layout.addWidget(exchange_group, 0)  # No stretch
 
             # Create options area
             options_group = self.create_options_area()
-            main_layout.addWidget(options_group)
-            
+            main_layout.addWidget(options_group, 0)  # No stretch
+
             # Create progress tracking area
             progress_group = self.create_progress_tracking()
-            main_layout.addWidget(progress_group)
-            
+            main_layout.addWidget(progress_group, 0)  # No stretch
+
             # Create control buttons
             button_layout = self.create_control_buttons()
-            main_layout.addLayout(button_layout)
-            
-            # Create status area
+            main_layout.addLayout(button_layout, 0)  # No stretch
+
+            # Create status area (expandable)
             status_group = self.create_status_area()
-            main_layout.addWidget(status_group)
+            main_layout.addWidget(status_group, 1)  # Stretch factor 1 - will expand
             
             # Create status bar
             self.create_status_bar()
@@ -618,7 +618,8 @@ class MainWindow(QMainWindow):
 
         # Status text area
         self.status_text = QTextEdit()
-        self.status_text.setMaximumHeight(150)
+        self.status_text.setMinimumHeight(100)  # Minimum height
+        # Remove maximum height to allow expansion
         self.status_text.setReadOnly(True)
         self.status_text.setStyleSheet("""
             QTextEdit {
@@ -890,6 +891,24 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event"""
         try:
+            # Check if download is in progress
+            if self.download_worker and self.download_worker.isRunning():
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Exit",
+                    "Download is in progress. Are you sure you want to exit?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+
+                if reply == QMessageBox.StandardButton.No:
+                    event.ignore()
+                    return
+                else:
+                    # User confirmed exit, stop download
+                    self.download_worker.terminate()
+                    self.download_worker.wait()
+
             # Save window size to preferences
             size = self.size()
             self.user_prefs.set_window_size(size.width(), size.height())
@@ -901,7 +920,7 @@ class MainWindow(QMainWindow):
             }
             self.user_prefs.set_download_options(download_options)
 
-            self.logger.info("Saved user preferences on exit")
+            self.logger.info(f"Saved user preferences on exit - Window size: {size.width()}x{size.height()}")
 
         except Exception as e:
             self.logger.error(f"Error saving preferences on exit: {e}")
@@ -1060,23 +1079,3 @@ class MainWindow(QMainWindow):
         """
 
         QMessageBox.about(self, "About NSE/BSE Data Downloader", about_text)
-
-    def closeEvent(self, event):
-        """Handle window close event"""
-        if self.download_worker and self.download_worker.isRunning():
-            reply = QMessageBox.question(
-                self,
-                "Confirm Exit",
-                "Download is in progress. Are you sure you want to exit?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-
-            if reply == QMessageBox.StandardButton.Yes:
-                self.download_worker.terminate()
-                self.download_worker.wait()
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()

@@ -203,9 +203,11 @@ class UserPreferences:
     
     def set_window_size(self, width: int, height: int) -> None:
         """Set window size"""
+        self.logger.debug(f"Saving window size: {width}x{height}")
         self.preferences["gui_settings"]["window_width"] = width
         self.preferences["gui_settings"]["window_height"] = height
         self.save_preferences()
+        self.logger.debug(f"Window size saved successfully")
     
     def get_last_download_location(self) -> str:
         """Get last download location"""

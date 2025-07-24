@@ -17,7 +17,7 @@ data_paths:
 download_settings:
   max_concurrent_downloads: 1  # Sequential downloads for fast response
   retry_attempts: 1  # No retry for unavailable files (fast strategy)
-  timeout_seconds: 3  # Fast timeout like original (2 seconds + buffer)
+  timeout_seconds: 5  # Wait for server response (user configurable)
   chunk_size: 8192
   rate_limit_delay: 0.1  # Minimal delay for fast progression
   request_delay: 0.1  # Minimal delay between requests

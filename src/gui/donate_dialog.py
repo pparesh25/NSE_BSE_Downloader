@@ -37,7 +37,9 @@ class DonateDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.logger = logging.getLogger(__name__)
+        print("🎨 Initializing Donate Dialog...")  # Debug
         self.setup_ui()
+        print("✅ Donate Dialog initialized successfully")  # Debug
         
     def setup_ui(self):
         """Setup the donate dialog UI"""
@@ -67,6 +69,9 @@ class DonateDialog(QDialog):
         
         # Apply styling
         self.apply_styling()
+
+        # Generate QR code after all UI elements are created
+        self.generate_qr_code()
         
     def create_header_section(self, layout):
         """Create header with title and description"""
@@ -121,9 +126,18 @@ class DonateDialog(QDialog):
                 background-color: white;
             }
         """)
-        
-        # Generate QR code
-        self.generate_qr_code()
+
+        # Placeholder text until QR code is generated
+        self.qr_label.setText("Generating QR Code...")
+        self.qr_label.setStyleSheet("""
+            QLabel {
+                border: 1px solid #bdc3c7;
+                border-radius: 5px;
+                background-color: white;
+                color: #666;
+                font-size: 12px;
+            }
+        """)
         qr_layout.addWidget(self.qr_label)
         
         layout.addWidget(qr_frame)
@@ -152,33 +166,35 @@ class DonateDialog(QDialog):
         
         self.upi_input = QLineEdit("developer@paytm")  # Replace with actual UPI ID
         self.upi_input.setReadOnly(True)
-        self.upi_input.setFont(QFont("Courier", 11))
+        self.upi_input.setFont(QFont("Courier", 12, QFont.Weight.Bold))
         self.upi_input.setStyleSheet("""
             QLineEdit {
                 background-color: white;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                padding: 8px;
+                border: 2px solid #007bff;
+                border-radius: 6px;
+                padding: 10px;
                 selection-background-color: #007bff;
+                color: #007bff;
+                font-weight: bold;
             }
         """)
         
         copy_btn = QPushButton("📋 Copy")
-        copy_btn.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        copy_btn.setFont(QFont("Arial", 11, QFont.Weight.Bold))
         copy_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                min-width: 80px;
+                border-radius: 6px;
+                padding: 10px 20px;
+                min-width: 90px;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
             QPushButton:pressed {
-                background-color: #004085;
+                background-color: #1e7e34;
             }
         """)
         copy_btn.clicked.connect(self.copy_upi_id)
@@ -251,19 +267,31 @@ class DonateDialog(QDialog):
         """Generate QR code for UPI payment"""
         try:
             if not QR_AVAILABLE:
-                self.qr_label.setText("QR Code generation not available\n(qrcode library not installed)")
-                self.qr_label.setStyleSheet("color: #dc3545; text-align: center; font-size: 12px;")
+                self.qr_label.setText("QR Code library not available\nPlease install: pip install qrcode[pil]")
+                self.qr_label.setStyleSheet("""
+                    QLabel {
+                        color: #dc3545;
+                        text-align: center;
+                        font-size: 12px;
+                        border: 1px solid #dc3545;
+                        border-radius: 5px;
+                        background-color: #f8d7da;
+                        padding: 20px;
+                    }
+                """)
                 return
 
             # UPI payment URL - Use actual UPI ID
             upi_id = "developer@paytm"  # Replace with your actual UPI ID
             upi_url = f"upi://pay?pa={upi_id}&pn=NSE BSE Data Downloader&cu=INR"
 
+            print(f"Generating QR code for: {upi_url}")  # Debug
+
             # Generate QR code with better settings
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_M,
-                box_size=10,
+                box_size=8,
                 border=4,
             )
             qr.add_data(upi_url)
@@ -273,18 +301,40 @@ class DonateDialog(QDialog):
             qr_img = qr.make_image(fill_color="black", back_color="white")
 
             # Convert PIL image to QPixmap with proper sizing
-            qr_img = qr_img.resize((200, 200), Image.Resampling.LANCZOS)
+            qr_img = qr_img.resize((220, 220), Image.Resampling.LANCZOS)
             qt_img = ImageQt.ImageQt(qr_img)
             pixmap = QPixmap.fromImage(qt_img)
 
+            # Clear any previous styling and set pixmap
+            self.qr_label.setStyleSheet("""
+                QLabel {
+                    border: 1px solid #bdc3c7;
+                    border-radius: 5px;
+                    background-color: white;
+                }
+            """)
             self.qr_label.setPixmap(pixmap)
-            self.qr_label.setScaledContents(True)
+            self.qr_label.setScaledContents(False)
+
+            print("QR code generated successfully")  # Debug
             self.logger.info("QR code generated successfully")
 
         except Exception as e:
+            error_msg = f"QR Code Error:\n{str(e)}"
+            print(f"QR Code generation error: {e}")  # Debug
             self.logger.error(f"Error generating QR code: {e}")
-            self.qr_label.setText(f"QR Code Error:\n{str(e)}")
-            self.qr_label.setStyleSheet("color: #dc3545; text-align: center; font-size: 11px; padding: 20px;")
+            self.qr_label.setText(error_msg)
+            self.qr_label.setStyleSheet("""
+                QLabel {
+                    color: #dc3545;
+                    text-align: center;
+                    font-size: 11px;
+                    border: 1px solid #dc3545;
+                    border-radius: 5px;
+                    background-color: #f8d7da;
+                    padding: 20px;
+                }
+            """)
             
     def copy_upi_id(self):
         """Copy UPI ID to clipboard"""

@@ -20,6 +20,8 @@ from .interactive_menu import (
     create_simple_menu, create_multi_select_menu, Fore, Style
 )
 from .progress_display import MultiProgressDisplay, create_simple_progress
+from .advanced_filters import AdvancedDateParser, ExchangeFilter, MissingFilesDetector, FilterCriteria
+from .config_manager import ConfigurationManager
 from ..core.config import Config
 from ..core.data_manager import DataManager
 
@@ -31,16 +33,26 @@ class CLIInterface:
         self.config = config
         self.data_manager = DataManager(config)
         self.menu_controller = MenuController()
-        
+
         # Available exchanges with descriptions
         self.exchanges = {
             "NSE_EQ": "NSE Equity (Main Market)",
-            "NSE_FO": "NSE Futures & Options", 
+            "NSE_FO": "NSE Futures & Options",
             "NSE_SME": "NSE Small & Medium Enterprises",
             "NSE_INDEX": "NSE Indices",
             "BSE_EQ": "BSE Equity",
             "BSE_INDEX": "BSE Indices"
         }
+
+        # Initialize advanced filtering components
+        self.date_parser = AdvancedDateParser()
+        self.exchange_filter = ExchangeFilter(list(self.exchanges.keys()))
+        self.missing_files_detector = MissingFilesDetector(
+            getattr(config, 'data_folder', Path('data'))
+        )
+
+        # Initialize configuration manager
+        self.config_manager = ConfigurationManager(config.config_path)
         
         # Quick date range options
         self.date_ranges = {
@@ -89,9 +101,13 @@ class CLIInterface:
             menu.add_item("download_all", "📥 Download All Exchanges", "Download data for all configured exchanges")
             menu.add_item("download_select", "🎯 Select Exchanges", "Choose specific exchanges to download")
             menu.add_item("download_custom", "📅 Custom Date Range", "Download with custom date range")
+            menu.add_separator("Advanced Options")
+            menu.add_item("download_advanced", "🔍 Advanced Filtering", "Smart filtering with patterns and missing files")
+            menu.add_item("download_missing", "📋 Missing Files Only", "Download only missing files")
             menu.add_separator("Management")
             menu.add_item("view_status", "📊 View Download Status", "Check download statistics and missing files")
             menu.add_item("view_config", "⚙️  View Configuration", "Display current configuration settings")
+            menu.add_item("manage_config", "🔧 Manage Configuration", "Update settings and manage profiles")
             menu.add_item("view_history", "📜 Download History", "View recent download history")
             menu.add_separator()
             menu.add_item("exit", "🚪 Exit", "Exit the application")
@@ -112,10 +128,16 @@ class CLIInterface:
             await self.select_exchanges_menu()
         elif selection == "download_custom":
             await self.custom_date_range_menu()
+        elif selection == "download_advanced":
+            await self.advanced_filtering_menu()
+        elif selection == "download_missing":
+            await self.missing_files_menu()
         elif selection == "view_status":
             await self.view_download_status()
         elif selection == "view_config":
             self.view_configuration()
+        elif selection == "manage_config":
+            await self.manage_configuration()
         elif selection == "view_history":
             await self.view_download_history()
     
@@ -192,20 +214,261 @@ class CLIInterface:
         
         # Select exchanges
         await self.select_exchanges_menu()
+
+    async def advanced_filtering_menu(self):
+        """Advanced filtering with smart patterns"""
+        print(f"\n{Fore.CYAN}🔍 Advanced Filtering Options{Style.RESET_ALL}")
+        print("=" * 50)
+
+        # Exchange pattern input
+        print(f"\n{Fore.YELLOW}📊 Exchange Selection:{Style.RESET_ALL}")
+        print("Examples: NSE_*, *_EQ, NSE_EQ,BSE_EQ, !BSE_*")
+
+        exchange_pattern = input(f"{Fore.YELLOW}Enter exchange pattern (or Enter for all): {Style.RESET_ALL}").strip()
+
+        if exchange_pattern:
+            try:
+                selected_exchanges = self.exchange_filter.filter_exchanges([exchange_pattern])
+                if not selected_exchanges:
+                    print(f"{Fore.RED}❌ No exchanges match pattern: {exchange_pattern}{Style.RESET_ALL}")
+                    input("Press Enter to continue...")
+                    return
+            except Exception as e:
+                print(f"{Fore.RED}❌ Invalid pattern: {e}{Style.RESET_ALL}")
+                input("Press Enter to continue...")
+                return
+        else:
+            selected_exchanges = list(self.exchanges.keys())
+
+        print(f"\n{Fore.GREEN}Selected exchanges: {', '.join(selected_exchanges)}{Style.RESET_ALL}")
+
+        # Date range pattern input
+        print(f"\n{Fore.YELLOW}📅 Date Range Selection:{Style.RESET_ALL}")
+        print("Examples: last-7-days, this-month, 2025-01, 2025-01-01:2025-01-31")
+        print(f"Available patterns: {', '.join(self.date_parser.get_available_patterns()[:5])}...")
+
+        date_pattern = input(f"{Fore.YELLOW}Enter date pattern (or Enter for last-7-days): {Style.RESET_ALL}").strip()
+
+        if not date_pattern:
+            date_pattern = "last-7-days"
+
+        try:
+            start_date, end_date = self.date_parser.parse_date_range(date_pattern)
+            print(f"\n{Fore.GREEN}Date range: {start_date} to {end_date}{Style.RESET_ALL}")
+        except ValueError as e:
+            print(f"{Fore.RED}❌ Invalid date pattern: {e}{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        # Additional options
+        print(f"\n{Fore.YELLOW}⚙️  Additional Options:{Style.RESET_ALL}")
+        include_weekends = self.confirm_action("Include weekends?")
+        missing_only = self.confirm_action("Download missing files only?")
+
+        # Show summary
+        print(f"\n{Fore.CYAN}📋 Filter Summary:{Style.RESET_ALL}")
+        print(f"  Exchanges: {', '.join(selected_exchanges)}")
+        print(f"  Date range: {start_date} to {end_date}")
+        print(f"  Include weekends: {'Yes' if include_weekends else 'No'}")
+        print(f"  Missing only: {'Yes' if missing_only else 'No'}")
+
+        if self.confirm_action("Proceed with download?"):
+            # Apply filters and download
+            if missing_only:
+                await self.download_missing_files(selected_exchanges, start_date, end_date, include_weekends)
+            else:
+                await self.perform_download(selected_exchanges, start_date, end_date)
+
+        input("\nPress Enter to continue...")
+
+    async def missing_files_menu(self):
+        """Menu for downloading missing files only"""
+        print(f"\n{Fore.CYAN}📋 Missing Files Detection{Style.RESET_ALL}")
+        print("=" * 50)
+
+        # Get date range for checking
+        start_date, end_date = await self.select_date_range()
+
+        print(f"\n{Fore.YELLOW}🔍 Scanning for missing files...{Style.RESET_ALL}")
+
+        # Find missing files
+        missing_files = self.missing_files_detector.find_missing_files(
+            list(self.exchanges.keys()), start_date, end_date, include_weekends=False
+        )
+
+        if not missing_files:
+            print(f"{Fore.GREEN}✅ No missing files found! All data is complete.{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        # Display missing files summary
+        print(f"\n{Fore.YELLOW}📊 Missing Files Summary:{Style.RESET_ALL}")
+        total_missing = 0
+        for exchange, dates in missing_files.items():
+            count = len(dates)
+            total_missing += count
+            print(f"  {exchange}: {count} missing files")
+            if count <= 5:
+                date_list = ", ".join(d.strftime('%Y-%m-%d') for d in dates)
+                print(f"    Dates: {date_list}")
+            else:
+                print(f"    Date range: {dates[0].strftime('%Y-%m-%d')} to {dates[-1].strftime('%Y-%m-%d')}")
+
+        print(f"\n{Fore.CYAN}Total missing files: {total_missing}{Style.RESET_ALL}")
+
+        if self.confirm_action("Download missing files?"):
+            # Download only missing files
+            exchanges_to_download = list(missing_files.keys())
+            await self.download_missing_files(exchanges_to_download, start_date, end_date)
+
+        input("\nPress Enter to continue...")
+
+    async def download_missing_files(self, exchanges: List[str], start_date: date,
+                                   end_date: date, include_weekends: bool = False):
+        """Download only missing files"""
+        print(f"\n{Fore.CYAN}📥 Downloading Missing Files Only...{Style.RESET_ALL}")
+
+        # Find missing files
+        missing_files = self.missing_files_detector.find_missing_files(
+            exchanges, start_date, end_date, include_weekends
+        )
+
+        if not missing_files:
+            print(f"{Fore.GREEN}✅ No missing files to download!{Style.RESET_ALL}")
+            return
+
+        # Initialize progress display
+        progress = MultiProgressDisplay()
+
+        # Add exchanges to progress tracker
+        for exchange in missing_files.keys():
+            missing_count = len(missing_files[exchange])
+            progress.add_exchange(exchange, missing_count)
+
+        # Start downloads for missing files only
+        download_tasks = []
+        for exchange, missing_dates in missing_files.items():
+            task = asyncio.create_task(
+                self.download_exchange_missing_files(exchange, missing_dates, progress)
+            )
+            download_tasks.append(task)
+
+        # Wait for all downloads to complete
+        await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Finish progress display
+        progress.finish()
+
+    async def download_exchange_missing_files(self, exchange_id: str, missing_dates: List[date],
+                                            progress: MultiProgressDisplay):
+        """Download missing files for a specific exchange"""
+        try:
+            print(f"{Fore.CYAN}📥 Downloading missing {exchange_id} files...{Style.RESET_ALL}")
+
+            # Download each missing file
+            for i, target_date in enumerate(missing_dates):
+                try:
+                    # Update progress with current file
+                    current_file = f"{exchange_id}_{target_date.strftime('%Y%m%d')}"
+                    progress.update_exchange(
+                        exchange_id,
+                        current_file=current_file
+                    )
+
+                    # Simulate download (replace with actual download logic)
+                    await asyncio.sleep(0.1)  # Simulate download time
+
+                    # Simulate success/failure (replace with actual result)
+                    import random
+                    success = random.random() > 0.02  # 98% success rate for missing files
+                    bytes_downloaded = random.randint(50000, 200000) if success else 0
+
+                    # Update progress
+                    progress.increment_exchange(
+                        exchange_id,
+                        success=success,
+                        bytes_downloaded=bytes_downloaded,
+                        current_file=current_file
+                    )
+
+                    # Render progress
+                    progress.render()
+
+                except Exception as e:
+                    # Handle individual file error
+                    progress.increment_exchange(
+                        exchange_id,
+                        success=False,
+                        current_file=f"Error: {e}"
+                    )
+                    progress.render()
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error downloading missing {exchange_id} files: {e}{Style.RESET_ALL}")
     
     async def select_date_range(self) -> Tuple[date, date]:
-        """Select date range from predefined options"""
-        menu = create_simple_menu("📅 Select Date Range", list(self.date_ranges.values()))
-        
+        """Select date range from predefined options or custom pattern"""
+        # Enhanced date range options
+        enhanced_ranges = {
+            **self.date_ranges,
+            "advanced_pattern": "Advanced pattern (e.g., last-15-days, this-quarter)"
+        }
+
+        menu = create_simple_menu("📅 Select Date Range", list(enhanced_ranges.values()))
         result = self.menu_controller.run_menu(menu)
-        
+
         if not result:
             return self.get_default_date_range()
-        
-        # Map back to key
-        selected_key = list(self.date_ranges.keys())[result.title in self.date_ranges.values()]
-        
-        return self.calculate_date_range(selected_key)
+
+        # Check if advanced pattern was selected
+        if result.title == "Advanced pattern (e.g., last-15-days, this-quarter)":
+            return await self.get_advanced_date_pattern()
+
+        # Map back to key for standard ranges
+        for key, value in enhanced_ranges.items():
+            if value == result.title:
+                return self.calculate_date_range(key)
+
+        return self.get_default_date_range()
+
+    async def get_advanced_date_pattern(self) -> Tuple[date, date]:
+        """Get advanced date pattern from user"""
+        print(f"\n{Fore.CYAN}📅 Advanced Date Pattern{Style.RESET_ALL}")
+        print("=" * 40)
+
+        print(f"{Fore.YELLOW}Available patterns:{Style.RESET_ALL}")
+        patterns = self.date_parser.get_available_patterns()
+        for i, pattern in enumerate(patterns[:10], 1):
+            print(f"  {i:2}. {pattern}")
+
+        if len(patterns) > 10:
+            print(f"     ... and {len(patterns) - 10} more")
+
+        print(f"\n{Fore.YELLOW}Examples:{Style.RESET_ALL}")
+        print("  last-15-days    - Last 15 days")
+        print("  this-quarter    - Current quarter")
+        print("  2025-01         - January 2025")
+        print("  2025-01-01:2025-01-31 - Custom range")
+
+        while True:
+            try:
+                pattern = input(f"\n{Fore.YELLOW}Enter date pattern: {Style.RESET_ALL}").strip()
+                if not pattern:
+                    return self.get_default_date_range()
+
+                start_date, end_date = self.date_parser.parse_date_range(pattern)
+
+                # Confirm the parsed range
+                days = (end_date - start_date).days + 1
+                print(f"\n{Fore.GREEN}Parsed range: {start_date} to {end_date} ({days} days){Style.RESET_ALL}")
+
+                if self.confirm_action("Use this date range?"):
+                    return start_date, end_date
+
+            except ValueError as e:
+                print(f"{Fore.RED}❌ {e}{Style.RESET_ALL}")
+                if not self.confirm_action("Try again?"):
+                    return self.get_default_date_range()
     
     def calculate_date_range(self, range_key: str) -> Tuple[date, date]:
         """Calculate actual date range from key"""
@@ -289,16 +552,32 @@ class CLIInterface:
     
     def view_configuration(self):
         """View current configuration"""
-        print(f"\n{Fore.CYAN}⚙️  Current Configuration{Style.RESET_ALL}")
-        print("=" * 50)
-        
-        print(f"Config file: {self.config.config_path}")
-        print(f"Data directory: {self.config.data_paths.base_folder}")
-        print(f"Timeout: {self.config.download_settings.timeout_seconds}s")
-        print(f"Retry attempts: {self.config.download_settings.retry_attempts}")
-        print(f"Fast mode: {self.config.download_settings.fast_mode}")
-        
+        self.config_manager.display_current_config()
         input("\nPress Enter to continue...")
+
+    async def manage_configuration(self):
+        """Configuration management menu"""
+        while True:
+            menu = InteractiveMenu("🔧 Configuration Management", MenuType.SINGLE_SELECT)
+            menu.add_item("update_setting", "⚙️  Update Setting", "Modify a configuration setting")
+            menu.add_item("validate_config", "✅ Validate Configuration", "Check configuration for issues")
+            menu.add_separator("Profiles")
+            menu.add_item("list_profiles", "📋 List Profiles", "View all download profiles")
+            menu.add_item("create_profile", "➕ Create Profile", "Create a new download profile")
+            menu.add_item("use_profile", "🎯 Use Profile", "Apply a download profile")
+            menu.add_item("delete_profile", "🗑️  Delete Profile", "Remove a download profile")
+            menu.add_separator("Import/Export")
+            menu.add_item("export_config", "📤 Export Configuration", "Export config and profiles")
+            menu.add_item("import_config", "📥 Import Configuration", "Import config and profiles")
+            menu.add_separator()
+            menu.add_item("back", "🔙 Back to Main Menu", "Return to main menu")
+
+            result = self.menu_controller.run_menu(menu)
+
+            if not result or result.id == "back":
+                break
+
+            await self.handle_config_menu_selection(result.id)
     
     async def view_download_history(self):
         """View download history"""
@@ -399,3 +678,265 @@ class CLIInterface:
 
         except Exception as e:
             print(f"{Fore.RED}❌ Error downloading {exchange_id}: {e}{Style.RESET_ALL}")
+
+    async def handle_config_menu_selection(self, selection: str):
+        """Handle configuration menu selection"""
+        if selection == "update_setting":
+            await self.update_setting_menu()
+        elif selection == "validate_config":
+            self.validate_configuration()
+        elif selection == "list_profiles":
+            self.list_profiles()
+        elif selection == "create_profile":
+            await self.create_profile_menu()
+        elif selection == "use_profile":
+            await self.use_profile_menu()
+        elif selection == "delete_profile":
+            await self.delete_profile_menu()
+        elif selection == "export_config":
+            await self.export_config_menu()
+        elif selection == "import_config":
+            await self.import_config_menu()
+
+    async def update_setting_menu(self):
+        """Update configuration setting"""
+        print(f"\n{Fore.CYAN}⚙️  Update Configuration Setting{Style.RESET_ALL}")
+        print("=" * 50)
+
+        print(f"{Fore.YELLOW}Common settings:{Style.RESET_ALL}")
+        print("  timeout_seconds - Download timeout (e.g., 10)")
+        print("  retry_attempts - Number of retries (e.g., 3)")
+        print("  fast_mode - Enable fast mode (true/false)")
+        print("  data_folder - Data directory path")
+
+        try:
+            setting_key = input(f"\n{Fore.YELLOW}Enter setting name: {Style.RESET_ALL}").strip()
+            if not setting_key:
+                return
+
+            setting_value = input(f"{Fore.YELLOW}Enter new value: {Style.RESET_ALL}").strip()
+            if not setting_value:
+                return
+
+            # Try to parse the value
+            try:
+                # Try boolean
+                if setting_value.lower() in ['true', 'false']:
+                    parsed_value = setting_value.lower() == 'true'
+                # Try integer
+                elif setting_value.isdigit():
+                    parsed_value = int(setting_value)
+                # Try float
+                elif '.' in setting_value and setting_value.replace('.', '').isdigit():
+                    parsed_value = float(setting_value)
+                else:
+                    # Keep as string
+                    parsed_value = setting_value
+            except:
+                parsed_value = setting_value
+
+            if self.config_manager.update_setting(setting_key, parsed_value):
+                print(f"{Fore.GREEN}✅ Setting updated successfully{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}❌ Failed to update setting{Style.RESET_ALL}")
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Operation cancelled{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    def validate_configuration(self):
+        """Validate current configuration"""
+        print(f"\n{Fore.CYAN}✅ Configuration Validation{Style.RESET_ALL}")
+        print("=" * 50)
+
+        issues = self.config_manager.validate_config()
+
+        if not issues:
+            print(f"{Fore.GREEN}✅ Configuration is valid!{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}❌ Found {len(issues)} issue(s):{Style.RESET_ALL}")
+            for i, issue in enumerate(issues, 1):
+                print(f"  {i}. {issue}")
+
+        input("\nPress Enter to continue...")
+
+    def list_profiles(self):
+        """List all download profiles"""
+        self.config_manager.list_profiles()
+        input("\nPress Enter to continue...")
+
+    async def create_profile_menu(self):
+        """Create a new download profile"""
+        print(f"\n{Fore.CYAN}➕ Create Download Profile{Style.RESET_ALL}")
+        print("=" * 50)
+
+        try:
+            name = input(f"{Fore.YELLOW}Profile name: {Style.RESET_ALL}").strip()
+            if not name:
+                return
+
+            description = input(f"{Fore.YELLOW}Description: {Style.RESET_ALL}").strip()
+            if not description:
+                description = f"Profile {name}"
+
+            # Exchange selection
+            print(f"\n{Fore.YELLOW}Select exchanges for this profile:{Style.RESET_ALL}")
+            exchange_menu = create_multi_select_menu("Select Exchanges", self.exchanges)
+            exchange_result = self.menu_controller.run_menu(exchange_menu)
+            selected_exchanges = [item.id for item in exchange_menu.get_selected_items()]
+
+            if not selected_exchanges:
+                print(f"{Fore.RED}❌ No exchanges selected{Style.RESET_ALL}")
+                input("Press Enter to continue...")
+                return
+
+            # Additional settings
+            print(f"\n{Fore.YELLOW}Additional settings (press Enter for defaults):{Style.RESET_ALL}")
+
+            timeout_input = input(f"Timeout seconds (default: 10): ").strip()
+            timeout = int(timeout_input) if timeout_input.isdigit() else 10
+
+            retry_input = input(f"Retry attempts (default: 3): ").strip()
+            retries = int(retry_input) if retry_input.isdigit() else 3
+
+            fast_mode = self.confirm_action("Enable fast mode?")
+            include_weekends = self.confirm_action("Include weekends?")
+
+            date_pattern = input(f"Default date pattern (default: last-7-days): ").strip()
+            if not date_pattern:
+                date_pattern = "last-7-days"
+
+            # Create the profile
+            success = self.config_manager.create_profile(
+                name=name,
+                description=description,
+                exchanges=selected_exchanges,
+                timeout_seconds=timeout,
+                retry_attempts=retries,
+                fast_mode=fast_mode,
+                include_weekends=include_weekends,
+                date_pattern=date_pattern
+            )
+
+            if success:
+                print(f"{Fore.GREEN}✅ Profile '{name}' created successfully{Style.RESET_ALL}")
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Operation cancelled{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def use_profile_menu(self):
+        """Use a download profile"""
+        if not self.config_manager.profiles:
+            print(f"{Fore.YELLOW}No profiles available. Create one first.{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        # Create menu from available profiles
+        profile_options = {
+            name: f"{profile.description} ({len(profile.exchanges)} exchanges)"
+            for name, profile in self.config_manager.profiles.items()
+        }
+
+        menu = create_simple_menu("🎯 Select Profile to Use", list(profile_options.values()))
+        result = self.menu_controller.run_menu(menu)
+
+        if not result:
+            return
+
+        # Find the selected profile
+        selected_profile_name = None
+        for name, description in profile_options.items():
+            if description == result.title:
+                selected_profile_name = name
+                break
+
+        if selected_profile_name:
+            profile = self.config_manager.use_profile(selected_profile_name)
+            if profile:
+                print(f"\n{Fore.GREEN}✅ Using profile: {profile.name}{Style.RESET_ALL}")
+                print(f"  Exchanges: {', '.join(profile.exchanges)}")
+                print(f"  Date pattern: {profile.date_pattern}")
+
+                if self.confirm_action("Start download with this profile?"):
+                    # Parse date range from profile
+                    try:
+                        start_date, end_date = self.date_parser.parse_date_range(profile.date_pattern)
+                        await self.perform_download(profile.exchanges, start_date, end_date)
+                    except ValueError as e:
+                        print(f"{Fore.RED}❌ Invalid date pattern in profile: {e}{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def delete_profile_menu(self):
+        """Delete a download profile"""
+        if not self.config_manager.profiles:
+            print(f"{Fore.YELLOW}No profiles available to delete.{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        # Create menu from available profiles
+        profile_names = list(self.config_manager.profiles.keys())
+        menu = create_simple_menu("🗑️  Select Profile to Delete", profile_names)
+        result = self.menu_controller.run_menu(menu)
+
+        if result and result.title in profile_names:
+            profile_name = result.title
+
+            print(f"\n{Fore.RED}⚠️  Warning: This will permanently delete profile '{profile_name}'{Style.RESET_ALL}")
+            if self.confirm_action("Are you sure?"):
+                if self.config_manager.delete_profile(profile_name):
+                    print(f"{Fore.GREEN}✅ Profile deleted successfully{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def export_config_menu(self):
+        """Export configuration and profiles"""
+        print(f"\n{Fore.CYAN}📤 Export Configuration{Style.RESET_ALL}")
+        print("=" * 50)
+
+        try:
+            filename = input(f"{Fore.YELLOW}Export filename (default: config_export.json): {Style.RESET_ALL}").strip()
+            if not filename:
+                filename = "config_export.json"
+
+            if not filename.endswith('.json'):
+                filename += '.json'
+
+            export_path = Path(filename)
+
+            if self.config_manager.export_config(export_path):
+                print(f"{Fore.GREEN}✅ Configuration exported successfully{Style.RESET_ALL}")
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Operation cancelled{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def import_config_menu(self):
+        """Import configuration and profiles"""
+        print(f"\n{Fore.CYAN}📥 Import Configuration{Style.RESET_ALL}")
+        print("=" * 50)
+
+        try:
+            filename = input(f"{Fore.YELLOW}Import filename: {Style.RESET_ALL}").strip()
+            if not filename:
+                return
+
+            import_path = Path(filename)
+            if not import_path.exists():
+                print(f"{Fore.RED}❌ File not found: {filename}{Style.RESET_ALL}")
+                input("Press Enter to continue...")
+                return
+
+            merge = self.confirm_action("Merge with existing config? (No = replace)")
+
+            if self.config_manager.import_config(import_path, merge=merge):
+                print(f"{Fore.GREEN}✅ Configuration imported successfully{Style.RESET_ALL}")
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Operation cancelled{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")

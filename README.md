@@ -13,9 +13,18 @@ A comprehensive, high-performance data downloader for NSE and BSE market data wi
 
 ### User Interface
 - **PyQt6 GUI**: Modern, responsive interface
+- **CLI Mode**: Advanced command-line interface with interactive menus
 - **Real-time Progress**: Individual progress tracking per exchange
 - **One-Click Download**: Select exchanges and click download
 - **Status Updates**: Live download status and error reporting
+
+### 🖥️ CLI Features (New!)
+- **Interactive Menus**: Rich terminal interface with navigation
+- **Advanced Filtering**: Smart date patterns and exchange wildcards
+- **Data Quality Assurance**: Completeness validation and integrity checking
+- **Automated Recovery**: Missing files detection and gap recovery
+- **Configuration Profiles**: Save and reuse download configurations
+- **Export Capabilities**: CSV, JSON, and text report generation
 
 ### Technical Features
 - **Async Architecture**: Non-blocking downloads with aiohttp
@@ -43,9 +52,16 @@ NSE_BSE_Data_Downloader/
 │   │   ├── memory_optimizer.py
 │   │   ├── file_utils.py
 │   │   └── date_utils.py
-│   └── gui/                   # PyQt6 interface
-│       ├── main_window.py
-│       └── widgets/
+│   ├── gui/                   # PyQt6 interface
+│   │   ├── main_window.py
+│   │   └── widgets/
+│   └── cli/                   # Command Line Interface
+│       ├── cli_interface.py   # Main CLI controller
+│       ├── interactive_menu.py # Menu system
+│       ├── progress_display.py # Progress visualization
+│       ├── advanced_filters.py # Smart filtering
+│       ├── config_manager.py  # Configuration management
+│       └── data_quality.py    # Quality validation
 ├── data/                      # Data storage
 │   ├── NSE/
 │   │   ├── EQ/
@@ -82,17 +98,39 @@ pip install PyQt6 PyQt6-tools
 python main.py
 ```
 
-### Command Line Mode
+### Command Line Mode (Enhanced)
 ```bash
-# Interactive CLI
+# Interactive CLI with rich menus
 python main.py --cli
 
-# Download specific exchange
+# Direct download commands
 python main.py --cli --exchange NSE_EQ
-
-# Custom date range
 python main.py --cli --exchange NSE_EQ --start-date 2025-01-01 --end-date 2025-01-31
+
+# Advanced filtering
+python main.py --cli --exchanges "NSE_*" --date-range "last-30-days"
+python main.py --cli --exchanges "*_EQ" --missing-only
+
+# Data quality operations
+python main.py --cli --quality-report --export csv
+python main.py --cli --validate-data --date-range "last-week"
+python main.py --cli --gap-analysis
+
+# Profile management
+python main.py --cli --profile "daily_trading"
+python main.py --cli --create-profile "my_setup"
 ```
+
+#### 📖 CLI Features Guide
+For comprehensive CLI documentation, see: **[CLI Features Presentation](CLI_Features_Presentation.md)**
+
+Key CLI capabilities:
+- 🎮 **Interactive Menus**: Navigate with arrow keys
+- 🔍 **Smart Filtering**: Use patterns like `NSE_*`, `last-15-days`
+- 📊 **Data Quality**: Automated completeness and integrity checking
+- 🔄 **Gap Recovery**: Automatic missing files detection and download
+- ⚙️ **Profiles**: Save and reuse configurations
+- 📤 **Export**: Generate reports in CSV, JSON, or text formats
 
 ### Custom Configuration
 ```bash

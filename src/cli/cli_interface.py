@@ -11,8 +11,10 @@ Provides the primary command-line interface with:
 
 import asyncio
 import sys
+import csv
+import json
 from datetime import date, datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
 from .interactive_menu import (
@@ -22,6 +24,7 @@ from .interactive_menu import (
 from .progress_display import MultiProgressDisplay, create_simple_progress
 from .advanced_filters import AdvancedDateParser, ExchangeFilter, MissingFilesDetector, FilterCriteria
 from .config_manager import ConfigurationManager
+from .data_quality import DataQualityValidator, QualityReport, FileStatus, QualityLevel
 from ..core.config import Config
 from ..core.data_manager import DataManager
 
@@ -53,6 +56,11 @@ class CLIInterface:
 
         # Initialize configuration manager
         self.config_manager = ConfigurationManager(config.config_path)
+
+        # Initialize data quality validator
+        self.quality_validator = DataQualityValidator(
+            getattr(config, 'data_folder', Path('data'))
+        )
         
         # Quick date range options
         self.date_ranges = {
@@ -104,6 +112,10 @@ class CLIInterface:
             menu.add_separator("Advanced Options")
             menu.add_item("download_advanced", "🔍 Advanced Filtering", "Smart filtering with patterns and missing files")
             menu.add_item("download_missing", "📋 Missing Files Only", "Download only missing files")
+            menu.add_separator("Data Quality")
+            menu.add_item("quality_report", "📋 Data Quality Report", "Generate comprehensive data quality analysis")
+            menu.add_item("validate_data", "🔍 Validate Data Integrity", "Check file integrity and completeness")
+            menu.add_item("gap_analysis", "📊 Gap Analysis", "Identify and analyze missing data")
             menu.add_separator("Management")
             menu.add_item("view_status", "📊 View Download Status", "Check download statistics and missing files")
             menu.add_item("view_config", "⚙️  View Configuration", "Display current configuration settings")
@@ -132,6 +144,12 @@ class CLIInterface:
             await self.advanced_filtering_menu()
         elif selection == "download_missing":
             await self.missing_files_menu()
+        elif selection == "quality_report":
+            await self.data_quality_report_menu()
+        elif selection == "validate_data":
+            await self.validate_data_integrity_menu()
+        elif selection == "gap_analysis":
+            await self.gap_analysis_menu()
         elif selection == "view_status":
             await self.view_download_status()
         elif selection == "view_config":
@@ -940,3 +958,471 @@ class CLIInterface:
             print(f"\n{Fore.YELLOW}Operation cancelled{Style.RESET_ALL}")
 
         input("\nPress Enter to continue...")
+
+    async def data_quality_report_menu(self):
+        """Generate comprehensive data quality report"""
+        print(f"\n{Fore.CYAN}📋 Data Quality Report Generation{Style.RESET_ALL}")
+        print("=" * 50)
+
+        # Exchange selection
+        print(f"\n{Fore.YELLOW}Select exchanges for quality analysis:{Style.RESET_ALL}")
+        exchange_menu = create_multi_select_menu("Select Exchanges", self.exchanges)
+        exchange_menu.selected_items = list(self.exchanges.keys())  # Pre-select all
+
+        result = self.menu_controller.run_menu(exchange_menu)
+        selected_exchanges = [item.id for item in exchange_menu.get_selected_items()]
+
+        if not selected_exchanges:
+            print(f"{Fore.RED}❌ No exchanges selected{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        # Date range selection
+        start_date, end_date = await self.select_date_range()
+
+        print(f"\n{Fore.CYAN}📊 Generating quality report...{Style.RESET_ALL}")
+        print(f"  Exchanges: {', '.join(selected_exchanges)}")
+        print(f"  Period: {start_date} to {end_date}")
+
+        try:
+            # Generate quality reports
+            reports = self.quality_validator.generate_completeness_report(
+                selected_exchanges, start_date, end_date
+            )
+
+            # Display reports
+            self.display_quality_reports(reports)
+
+            # Ask if user wants to export
+            if self.confirm_action("Export report to file?"):
+                await self.export_quality_reports(reports)
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error generating quality report: {e}{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    def display_quality_reports(self, reports: List[QualityReport]):
+        """Display quality reports in formatted way"""
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}📊 Data Quality Analysis Results{Style.RESET_ALL}")
+        print("=" * 70)
+
+        # Overall summary
+        total_expected = sum(r.total_expected for r in reports)
+        total_present = sum(r.total_present for r in reports)
+        total_missing = sum(r.total_missing for r in reports)
+        total_corrupted = sum(r.total_corrupted for r in reports)
+        overall_completeness = (total_present / total_expected * 100) if total_expected > 0 else 0
+
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}📈 Overall Summary:{Style.RESET_ALL}")
+        print(f"  Total Expected Files: {total_expected}")
+        print(f"  Files Present: {total_present} ({overall_completeness:.1f}%)")
+        print(f"  Missing Files: {total_missing}")
+        print(f"  Corrupted Files: {total_corrupted}")
+
+        # Quality level color
+        if overall_completeness >= 98:
+            quality_color = Fore.GREEN
+            quality_icon = "🎉"
+        elif overall_completeness >= 95:
+            quality_color = Fore.YELLOW
+            quality_icon = "✅"
+        elif overall_completeness >= 90:
+            quality_color = Fore.YELLOW
+            quality_icon = "⚠️"
+        else:
+            quality_color = Fore.RED
+            quality_icon = "❌"
+
+        print(f"  {quality_color}Overall Quality: {quality_icon} {overall_completeness:.1f}%{Style.RESET_ALL}")
+
+        # Individual exchange reports
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}📊 Exchange-wise Analysis:{Style.RESET_ALL}")
+
+        for report in reports:
+            # Quality level formatting
+            if report.quality_level == QualityLevel.EXCELLENT:
+                level_color = Fore.GREEN
+                level_icon = "🎉"
+            elif report.quality_level == QualityLevel.GOOD:
+                level_color = Fore.YELLOW
+                level_icon = "✅"
+            elif report.quality_level == QualityLevel.FAIR:
+                level_color = Fore.YELLOW
+                level_icon = "⚠️"
+            else:
+                level_color = Fore.RED
+                level_icon = "❌"
+
+            print(f"\n{Fore.CYAN}{Style.BRIGHT}{report.exchange}:{Style.RESET_ALL}")
+            print(f"  Completeness: {level_color}{level_icon} {report.completeness_rate:.1f}% ({report.total_present}/{report.total_expected}){Style.RESET_ALL}")
+
+            if report.total_missing > 0:
+                print(f"  {Fore.RED}Missing: {report.total_missing} files{Style.RESET_ALL}")
+                if len(report.missing_dates) <= 5:
+                    dates_str = ", ".join(d.strftime('%Y-%m-%d') for d in report.missing_dates)
+                    print(f"    Dates: {dates_str}")
+                else:
+                    print(f"    Date range: {report.missing_dates[0].strftime('%Y-%m-%d')} to {report.missing_dates[-1].strftime('%Y-%m-%d')}")
+
+            if report.total_corrupted > 0:
+                print(f"  {Fore.RED}Corrupted: {report.total_corrupted} files{Style.RESET_ALL}")
+
+            # Show recommendations
+            if report.recommendations:
+                print(f"  {Fore.YELLOW}Recommendations:{Style.RESET_ALL}")
+                for rec in report.recommendations:
+                    print(f"    {rec}")
+
+        # Critical issues summary
+        critical_exchanges = [r for r in reports if r.quality_level in [QualityLevel.FAIR, QualityLevel.POOR]]
+        if critical_exchanges:
+            print(f"\n{Fore.RED}{Style.BRIGHT}⚠️  Exchanges Needing Attention:{Style.RESET_ALL}")
+            for report in critical_exchanges:
+                print(f"  {report.exchange}: {report.completeness_rate:.1f}% completeness")
+
+    async def validate_data_integrity_menu(self):
+        """Validate data integrity for specific files"""
+        print(f"\n{Fore.CYAN}🔍 Data Integrity Validation{Style.RESET_ALL}")
+        print("=" * 50)
+
+        # Quick validation options
+        menu = InteractiveMenu("🔍 Validation Options", MenuType.SINGLE_SELECT)
+        menu.add_item("recent", "📅 Recent Files (Last 7 days)", "Validate recently downloaded files")
+        menu.add_item("custom", "📊 Custom Range", "Validate specific date range")
+        menu.add_item("all_exchanges", "🌐 All Exchanges (Last 30 days)", "Quick validation of all exchanges")
+        menu.add_item("back", "🔙 Back", "Return to main menu")
+
+        result = self.menu_controller.run_menu(menu)
+
+        if not result or result.id == "back":
+            return
+
+        if result.id == "recent":
+            end_date = date.today()
+            start_date = end_date - timedelta(days=7)
+            exchanges = list(self.exchanges.keys())
+        elif result.id == "all_exchanges":
+            end_date = date.today()
+            start_date = end_date - timedelta(days=30)
+            exchanges = list(self.exchanges.keys())
+        else:  # custom
+            start_date, end_date = await self.select_date_range()
+            # Exchange selection
+            exchange_menu = create_multi_select_menu("Select Exchanges", self.exchanges)
+            self.menu_controller.run_menu(exchange_menu)
+            exchanges = [item.id for item in exchange_menu.get_selected_items()]
+
+        if not exchanges:
+            print(f"{Fore.RED}❌ No exchanges selected{Style.RESET_ALL}")
+            input("Press Enter to continue...")
+            return
+
+        print(f"\n{Fore.CYAN}🔍 Validating data integrity...{Style.RESET_ALL}")
+
+        try:
+            # Generate validation report
+            reports = self.quality_validator.generate_completeness_report(
+                exchanges, start_date, end_date
+            )
+
+            # Focus on integrity issues
+            integrity_issues = []
+            for report in reports:
+                for file_info in report.corrupted_files:
+                    if file_info.status in [FileStatus.CORRUPTED, FileStatus.INVALID]:
+                        integrity_issues.append((report.exchange, file_info))
+
+            if not integrity_issues:
+                print(f"{Fore.GREEN}✅ All files passed integrity validation!{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}❌ Found {len(integrity_issues)} integrity issues:{Style.RESET_ALL}")
+
+                for exchange, file_info in integrity_issues:
+                    print(f"\n  {Fore.YELLOW}{exchange} - {file_info.date.strftime('%Y-%m-%d')}:{Style.RESET_ALL}")
+                    print(f"    Status: {file_info.status.value}")
+                    print(f"    Issue: {file_info.error_message}")
+                    if file_info.actual_path:
+                        print(f"    File: {file_info.actual_path}")
+
+                if self.confirm_action("Attempt to re-download corrupted files?"):
+                    await self.recover_corrupted_files(integrity_issues)
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error during validation: {e}{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def gap_analysis_menu(self):
+        """Perform detailed gap analysis"""
+        print(f"\n{Fore.CYAN}📊 Data Gap Analysis{Style.RESET_ALL}")
+        print("=" * 50)
+
+        # Date range selection
+        start_date, end_date = await self.select_date_range()
+
+        print(f"\n{Fore.CYAN}🔍 Analyzing data gaps from {start_date} to {end_date}...{Style.RESET_ALL}")
+
+        try:
+            # Generate reports for all exchanges
+            reports = self.quality_validator.generate_completeness_report(
+                list(self.exchanges.keys()), start_date, end_date
+            )
+
+            # Analyze gaps
+            total_gaps = sum(len(r.missing_dates) for r in reports)
+
+            if total_gaps == 0:
+                print(f"{Fore.GREEN}🎉 No data gaps found! Complete data coverage.{Style.RESET_ALL}")
+                input("\nPress Enter to continue...")
+                return
+
+            print(f"\n{Fore.YELLOW}📊 Gap Analysis Results:{Style.RESET_ALL}")
+            print(f"  Total Missing Files: {total_gaps}")
+
+            # Group gaps by date
+            gap_by_date = {}
+            for report in reports:
+                for missing_date in report.missing_dates:
+                    if missing_date not in gap_by_date:
+                        gap_by_date[missing_date] = []
+                    gap_by_date[missing_date].append(report.exchange)
+
+            # Show gaps by date
+            print(f"\n{Fore.WHITE}📅 Missing Files by Date:{Style.RESET_ALL}")
+            for gap_date in sorted(gap_by_date.keys()):
+                exchanges = gap_by_date[gap_date]
+                print(f"  {gap_date.strftime('%Y-%m-%d')}: {', '.join(exchanges)} ({len(exchanges)} exchanges)")
+
+            # Show gaps by exchange
+            print(f"\n{Fore.WHITE}📊 Missing Files by Exchange:{Style.RESET_ALL}")
+            for report in reports:
+                if report.missing_dates:
+                    print(f"  {report.exchange}: {len(report.missing_dates)} missing files")
+
+            # Recovery options
+            print(f"\n{Fore.CYAN}🔄 Recovery Options:{Style.RESET_ALL}")
+            if self.confirm_action("Download all missing files?"):
+                await self.recover_missing_files_from_reports(reports)
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error during gap analysis: {e}{Style.RESET_ALL}")
+
+        input("\nPress Enter to continue...")
+
+    async def export_quality_reports(self, reports: List[QualityReport]):
+        """Export quality reports to file"""
+        print(f"\n{Fore.CYAN}📤 Export Quality Report{Style.RESET_ALL}")
+        print("=" * 40)
+
+        # Export format selection
+        format_menu = create_simple_menu("📄 Select Export Format", [
+            "CSV (Spreadsheet compatible)",
+            "JSON (API/Script friendly)",
+            "Text (Human readable)"
+        ])
+
+        format_result = self.menu_controller.run_menu(format_menu)
+        if not format_result:
+            return
+
+        # Determine format
+        if "CSV" in format_result.title:
+            await self.export_reports_csv(reports)
+        elif "JSON" in format_result.title:
+            await self.export_reports_json(reports)
+        else:
+            await self.export_reports_text(reports)
+
+    async def export_reports_csv(self, reports: List[QualityReport]):
+        """Export reports to CSV format"""
+        try:
+            filename = f"quality_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+
+                # Write header
+                writer.writerow([
+                    'Exchange', 'Period_Start', 'Period_End', 'Total_Expected',
+                    'Total_Present', 'Total_Missing', 'Total_Corrupted',
+                    'Completeness_Rate', 'Quality_Level', 'Missing_Dates'
+                ])
+
+                # Write data
+                for report in reports:
+                    missing_dates_str = ';'.join(d.strftime('%Y-%m-%d') for d in report.missing_dates)
+                    writer.writerow([
+                        report.exchange,
+                        report.period_start.strftime('%Y-%m-%d'),
+                        report.period_end.strftime('%Y-%m-%d'),
+                        report.total_expected,
+                        report.total_present,
+                        report.total_missing,
+                        report.total_corrupted,
+                        f"{report.completeness_rate:.2f}%",
+                        report.quality_level.value,
+                        missing_dates_str
+                    ])
+
+            print(f"{Fore.GREEN}✅ CSV report exported: {filename}{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error exporting CSV: {e}{Style.RESET_ALL}")
+
+    async def export_reports_json(self, reports: List[QualityReport]):
+        """Export reports to JSON format"""
+        try:
+            filename = f"quality_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+            # Convert reports to JSON-serializable format
+            json_data = {
+                "generated_at": datetime.now().isoformat(),
+                "summary": {
+                    "total_exchanges": len(reports),
+                    "overall_completeness": sum(r.completeness_rate for r in reports) / len(reports) if reports else 0
+                },
+                "reports": []
+            }
+
+            for report in reports:
+                report_data = {
+                    "exchange": report.exchange,
+                    "period": {
+                        "start": report.period_start.isoformat(),
+                        "end": report.period_end.isoformat()
+                    },
+                    "statistics": {
+                        "total_expected": report.total_expected,
+                        "total_present": report.total_present,
+                        "total_missing": report.total_missing,
+                        "total_corrupted": report.total_corrupted,
+                        "completeness_rate": report.completeness_rate
+                    },
+                    "quality_level": report.quality_level.value,
+                    "missing_dates": [d.isoformat() for d in report.missing_dates],
+                    "recommendations": report.recommendations
+                }
+                json_data["reports"].append(report_data)
+
+            with open(filename, 'w', encoding='utf-8') as jsonfile:
+                json.dump(json_data, jsonfile, indent=2, ensure_ascii=False)
+
+            print(f"{Fore.GREEN}✅ JSON report exported: {filename}{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error exporting JSON: {e}{Style.RESET_ALL}")
+
+    async def export_reports_text(self, reports: List[QualityReport]):
+        """Export reports to human-readable text format"""
+        try:
+            filename = f"quality_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+            with open(filename, 'w', encoding='utf-8') as txtfile:
+                txtfile.write("NSE/BSE Data Quality Report\n")
+                txtfile.write("=" * 50 + "\n")
+                txtfile.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                # Overall summary
+                total_expected = sum(r.total_expected for r in reports)
+                total_present = sum(r.total_present for r in reports)
+                overall_completeness = (total_present / total_expected * 100) if total_expected > 0 else 0
+
+                txtfile.write("OVERALL SUMMARY\n")
+                txtfile.write("-" * 20 + "\n")
+                txtfile.write(f"Total Expected Files: {total_expected}\n")
+                txtfile.write(f"Files Present: {total_present} ({overall_completeness:.1f}%)\n")
+                txtfile.write(f"Missing Files: {sum(r.total_missing for r in reports)}\n")
+                txtfile.write(f"Corrupted Files: {sum(r.total_corrupted for r in reports)}\n\n")
+
+                # Individual reports
+                for report in reports:
+                    txtfile.write(f"{report.exchange.upper()}\n")
+                    txtfile.write("-" * len(report.exchange) + "\n")
+                    txtfile.write(f"Period: {report.period_start} to {report.period_end}\n")
+                    txtfile.write(f"Completeness: {report.completeness_rate:.1f}% ({report.total_present}/{report.total_expected})\n")
+                    txtfile.write(f"Quality Level: {report.quality_level.value.title()}\n")
+
+                    if report.missing_dates:
+                        txtfile.write(f"Missing Dates: {', '.join(d.strftime('%Y-%m-%d') for d in report.missing_dates)}\n")
+
+                    if report.recommendations:
+                        txtfile.write("Recommendations:\n")
+                        for rec in report.recommendations:
+                            txtfile.write(f"  - {rec}\n")
+
+                    txtfile.write("\n")
+
+            print(f"{Fore.GREEN}✅ Text report exported: {filename}{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error exporting text: {e}{Style.RESET_ALL}")
+
+    async def recover_missing_files_from_reports(self, reports: List[QualityReport]):
+        """Recover missing files identified in quality reports"""
+        print(f"\n{Fore.CYAN}🔄 Recovering Missing Files...{Style.RESET_ALL}")
+
+        # Collect all missing files
+        recovery_tasks = []
+        for report in reports:
+            if report.missing_dates:
+                recovery_tasks.append((report.exchange, report.missing_dates))
+
+        if not recovery_tasks:
+            print(f"{Fore.GREEN}✅ No missing files to recover{Style.RESET_ALL}")
+            return
+
+        # Initialize progress tracking
+        progress = MultiProgressDisplay()
+
+        for exchange, missing_dates in recovery_tasks:
+            progress.add_exchange(f"{exchange}_recovery", len(missing_dates))
+
+        # Start recovery downloads
+        download_tasks = []
+        for exchange, missing_dates in recovery_tasks:
+            task = asyncio.create_task(
+                self.download_exchange_missing_files(f"{exchange}_recovery", missing_dates, progress)
+            )
+            download_tasks.append(task)
+
+        # Wait for all recoveries to complete
+        await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Finish progress display
+        progress.finish()
+
+        print(f"{Fore.GREEN}✅ Missing files recovery completed{Style.RESET_ALL}")
+
+    async def recover_corrupted_files(self, integrity_issues: List[Tuple[str, Any]]):
+        """Recover corrupted files"""
+        print(f"\n{Fore.CYAN}🔧 Recovering Corrupted Files...{Style.RESET_ALL}")
+
+        # Group by exchange
+        recovery_by_exchange = {}
+        for exchange, file_info in integrity_issues:
+            if exchange not in recovery_by_exchange:
+                recovery_by_exchange[exchange] = []
+            recovery_by_exchange[exchange].append(file_info.date)
+
+        # Initialize progress tracking
+        progress = MultiProgressDisplay()
+
+        for exchange, dates in recovery_by_exchange.items():
+            progress.add_exchange(f"{exchange}_repair", len(dates))
+
+        # Start recovery downloads
+        download_tasks = []
+        for exchange, dates in recovery_by_exchange.items():
+            task = asyncio.create_task(
+                self.download_exchange_missing_files(f"{exchange}_repair", dates, progress)
+            )
+            download_tasks.append(task)
+
+        # Wait for all recoveries to complete
+        await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Finish progress display
+        progress.finish()
+
+        print(f"{Fore.GREEN}✅ Corrupted files recovery completed{Style.RESET_ALL}")

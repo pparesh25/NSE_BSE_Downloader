@@ -76,19 +76,19 @@ class CLIInterface:
     
     def print_welcome(self):
         """Print welcome message"""
-        print(f"\n{Fore.CYAN}{Style.BRIGHT}")
-        print("╔" + "═" * 58 + "╗")
-        print("║" + " " * 58 + "║")
-        print("║" + "NSE/BSE Data Downloader - CLI Mode".center(58) + "║")
-        print("║" + " " * 58 + "║") 
-        print("║" + f"Version 2.0.0 - Enhanced Edition".center(58) + "║")
-        print("║" + " " * 58 + "║")
-        print("╚" + "═" * 58 + "╝")
-        print(f"{Style.RESET_ALL}\n")
-        
-        print(f"{Fore.GREEN}✅ Configuration loaded: {self.config.config_path}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}✅ Data directory: {getattr(self.config, 'data_folder', 'data/')}{Style.RESET_ALL}")
-        print()
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}", flush=True)
+        print("╔" + "═" * 58 + "╗", flush=True)
+        print("║" + " " * 58 + "║", flush=True)
+        print("║" + "NSE/BSE Data Downloader - CLI Mode".center(58) + "║", flush=True)
+        print("║" + " " * 58 + "║", flush=True)
+        print("║" + f"Version 2.0.0 - Enhanced Edition".center(58) + "║", flush=True)
+        print("║" + " " * 58 + "║", flush=True)
+        print("╚" + "═" * 58 + "╝", flush=True)
+        print(f"{Style.RESET_ALL}\n", flush=True)
+
+        print(f"{Fore.GREEN}✅ Configuration loaded: {self.config.config_path}{Style.RESET_ALL}", flush=True)
+        print(f"{Fore.GREEN}✅ Data directory: {getattr(self.config, 'data_folder', 'data/')}{Style.RESET_ALL}", flush=True)
+        print(flush=True)
     
     async def run(self):
         """Run the main CLI interface"""
@@ -123,7 +123,7 @@ class CLIInterface:
             menu.add_item("view_history", "📜 Download History", "View recent download history")
             menu.add_separator()
             menu.add_item("exit", "🚪 Exit", "Exit the application")
-            
+
             result = self.menu_controller.run_menu(menu)
             
             if not result or result.id == "exit":
@@ -183,9 +183,9 @@ class CLIInterface:
         """Show exchange selection menu"""
         menu = create_multi_select_menu("🎯 Select Exchanges to Download", self.exchanges)
         menu.show_help = True
-        
-        # Pre-select commonly used exchanges
-        menu.selected_items = ["NSE_EQ", "BSE_EQ"]
+
+        # Start with no pre-selected exchanges - let user choose
+        menu.selected_items = []
         
         result = self.menu_controller.run_menu(menu)
         selected_exchanges = menu.get_selected_items()
@@ -393,13 +393,14 @@ class CLIInterface:
                         current_file=current_file
                     )
 
-                    # Simulate download (replace with actual download logic)
-                    await asyncio.sleep(0.1)  # Simulate download time
-
-                    # Simulate success/failure (replace with actual result)
-                    import random
-                    success = random.random() > 0.02  # 98% success rate for missing files
-                    bytes_downloaded = random.randint(50000, 200000) if success else 0
+                    # Get actual downloader and attempt download
+                    downloader = self._get_downloader_for_exchange(exchange_id)
+                    if downloader:
+                        success = await self._download_single_file(downloader, target_date)
+                        bytes_downloaded = 100000 if success else 0
+                    else:
+                        success = False
+                        bytes_downloaded = 0
 
                     # Update progress
                     progress.increment_exchange(
@@ -652,8 +653,12 @@ class CLIInterface:
                                    progress: MultiProgressDisplay):
         """Download data for a specific exchange"""
         try:
-            # For now, simulate downloader availability
-            # TODO: Integrate with actual downloader classes
+            # Get actual downloader instance
+            downloader = self._get_downloader_for_exchange(exchange_id)
+            if not downloader:
+                print(f"{Fore.RED}❌ No downloader available for {exchange_id}{Style.RESET_ALL}")
+                return
+
             print(f"{Fore.CYAN}📥 Starting {exchange_id} download...{Style.RESET_ALL}")
 
             # Download each day
@@ -666,13 +671,9 @@ class CLIInterface:
                         current_file=current_file
                     )
 
-                    # Simulate download (replace with actual download logic)
-                    await asyncio.sleep(0.1)  # Simulate download time
-
-                    # Simulate success/failure (replace with actual result)
-                    import random
-                    success = random.random() > 0.05  # 95% success rate
-                    bytes_downloaded = random.randint(50000, 200000) if success else 0
+                    # Attempt actual download
+                    success = await self._download_single_file(downloader, target_date)
+                    bytes_downloaded = 100000 if success else 0  # Approximate file size
 
                     # Update progress
                     progress.increment_exchange(
@@ -696,6 +697,55 @@ class CLIInterface:
 
         except Exception as e:
             print(f"{Fore.RED}❌ Error downloading {exchange_id}: {e}{Style.RESET_ALL}")
+
+    def _get_downloader_for_exchange(self, exchange_id: str):
+        """Get appropriate downloader instance for exchange"""
+        try:
+            # Parse exchange and segment from exchange_id (e.g., "NSE_EQ" -> "NSE", "EQ")
+            if '_' not in exchange_id:
+                return None
+
+            exchange, segment = exchange_id.split('_', 1)
+
+            # Import and create appropriate downloader
+            if exchange == "NSE" and segment == "EQ":
+                from ..downloaders.nse_eq_downloader import NSEEQDownloader
+                return NSEEQDownloader(self.config)
+            elif exchange == "NSE" and segment == "FO":
+                from ..downloaders.nse_fo_downloader import NSEFODownloader
+                return NSEFODownloader(self.config)
+            elif exchange == "NSE" and segment == "SME":
+                from ..downloaders.nse_sme_downloader import NSESMEDownloader
+                return NSESMEDownloader(self.config)
+            elif exchange == "NSE" and segment == "INDEX":
+                from ..downloaders.nse_index_downloader import NSEIndexDownloader
+                return NSEIndexDownloader(self.config)
+            elif exchange == "BSE" and segment == "EQ":
+                from ..downloaders.bse_eq_downloader import BSEEQDownloader
+                return BSEEQDownloader(self.config)
+            elif exchange == "BSE" and segment == "INDEX":
+                from ..downloaders.bse_index_downloader import BSEIndexDownloader
+                return BSEIndexDownloader(self.config)
+            else:
+                print(f"{Fore.YELLOW}⚠️ Unknown exchange: {exchange_id}{Style.RESET_ALL}")
+                return None
+
+        except ImportError as e:
+            print(f"{Fore.YELLOW}⚠️ Downloader not available for {exchange_id}: {e}{Style.RESET_ALL}")
+            return None
+        except Exception as e:
+            print(f"{Fore.RED}❌ Error creating downloader for {exchange_id}: {e}{Style.RESET_ALL}")
+            return None
+
+    async def _download_single_file(self, downloader, target_date: date) -> bool:
+        """Download single file using downloader"""
+        try:
+            # Use the downloader's download_data_range method for single date
+            success = await downloader.download_data_range(target_date, target_date)
+            return success
+        except Exception as e:
+            print(f"{Fore.RED}❌ Download failed for {target_date}: {e}{Style.RESET_ALL}")
+            return False
 
     async def handle_config_menu_selection(self, selection: str):
         """Handle configuration menu selection"""

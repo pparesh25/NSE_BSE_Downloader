@@ -19,6 +19,7 @@ try:
     import colorama
     from colorama import Fore, Back, Style
     colorama.init()
+    # Enable rich terminal mode with arrow key support
     RICH_TERMINAL = True
 except ImportError:
     RICH_TERMINAL = False
@@ -93,8 +94,11 @@ class InteractiveMenu:
         return self
     
     def clear_screen(self):
-        """Clear the terminal screen"""
-        os.system('cls' if os.name == 'nt' else 'clear')
+        """Clear the terminal screen efficiently"""
+        # Use ANSI escape codes for fast screen clearing
+        print('\033[2J\033[H', end='', flush=True)
+        # Additional optimization: clear scrollback buffer if supported
+        print('\033[3J', end='', flush=True)
     
     def print_header(self):
         """Print menu header"""
@@ -280,46 +284,75 @@ class MenuController:
                     key = msvcrt.getch()
                     if key == b'H':  # Up arrow
                         menu.move_up()
+                        return  # Return to re-render menu
                     elif key == b'P':  # Down arrow
                         menu.move_down()
+                        return  # Return to re-render menu
                 elif key == b'\r':  # Enter
                     self._handle_selection(menu)
                 elif key == b'\x1b':  # Escape
                     self.running = False
                 elif key == b' ':  # Space
                     menu.toggle_selection()
+                    return  # Return to re-render menu
                 elif key.lower() == b'a':
                     menu.select_all()
+                    return  # Return to re-render menu
                 elif key.lower() == b'n':
                     menu.select_none()
+                    return  # Return to re-render menu
             else:
-                # Unix/Linux
+                # Unix/Linux - Improved arrow key handling
                 import termios
                 import tty
+                import select
                 fd = sys.stdin.fileno()
                 old_settings = termios.tcgetattr(fd)
                 try:
                     tty.setraw(sys.stdin.fileno())
+
+                    # Read first character
                     key = sys.stdin.read(1)
 
-                    if key == '\x1b':  # Escape sequence
-                        key += sys.stdin.read(2)
-                        if key == '\x1b[A':  # Up arrow
-                            menu.move_up()
-                        elif key == '\x1b[B':  # Down arrow
-                            menu.move_down()
-                        else:  # Just escape
+                    if key == '\x1b':  # Escape sequence start
+                        # Check if more data is available (arrow keys) - reduced timeout for better responsiveness
+                        if select.select([sys.stdin], [], [], 0.05)[0]:
+                            # Read the bracket
+                            bracket = sys.stdin.read(1)
+                            if bracket == '[':
+                                # Read the direction
+                                direction = sys.stdin.read(1)
+                                if direction == 'A':  # Up arrow
+                                    menu.move_up()
+                                    return  # Return to re-render menu
+                                elif direction == 'B':  # Down arrow
+                                    menu.move_down()
+                                    return  # Return to re-render menu
+                                elif direction == 'C':  # Right arrow (could be used for future features)
+                                    return  # Return to re-render menu
+                                elif direction == 'D':  # Left arrow (could be used for future features)
+                                    return  # Return to re-render menu
+                            else:
+                                # Not an arrow key, treat as escape
+                                self.running = False
+                        else:
+                            # Just escape key pressed
                             self.running = False
                     elif key == '\r' or key == '\n':  # Enter
                         self._handle_selection(menu)
                     elif key == ' ':  # Space
                         menu.toggle_selection()
+                        return  # Return to re-render menu
                     elif key.lower() == 'a':
                         menu.select_all()
+                        return  # Return to re-render menu
                     elif key.lower() == 'n':
                         menu.select_none()
+                        return  # Return to re-render menu
                     elif key == '\x03':  # Ctrl+C
                         raise KeyboardInterrupt
+                    elif key == 'q':  # q for quit (fallback)
+                        self.running = False
                 finally:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -329,8 +362,12 @@ class MenuController:
     def _handle_simple_input(self, menu: InteractiveMenu):
         """Handle input with simple terminal support"""
         try:
-            print(f"{Fore.YELLOW}Enter command: {Style.RESET_ALL}", end="")
+            print(f"{Fore.YELLOW}Enter command: {Style.RESET_ALL}", end="", flush=True)
             command = input().strip().lower()
+
+            # Handle multiple consecutive characters (e.g., "ssss" -> "s")
+            if command and len(command) > 1 and len(set(command)) == 1:
+                command = command[0]
 
             if command in ['w', 'up']:
                 menu.move_up()
@@ -340,7 +377,7 @@ class MenuController:
                 self._handle_selection(menu)
             elif command in ['q', 'quit', 'exit', 'back']:
                 self.running = False
-            elif command == 'space' and menu.menu_type == MenuType.MULTI_SELECT:
+            elif command in ['space', ' ', 'toggle'] and menu.menu_type == MenuType.MULTI_SELECT:
                 menu.toggle_selection()
             elif command == 'a' and menu.menu_type == MenuType.MULTI_SELECT:
                 menu.select_all()

@@ -145,13 +145,13 @@ def main():
     """Main entry point"""
     parser = setup_argument_parser()
     args = parser.parse_args()
-    
+
     # Validate config file exists
     config_path = Path(args.config)
     if not config_path.exists():
         print(f"Error: Configuration file '{config_path}' not found.")
         return 1
-    
+
     try:
         if args.cli:
             # Run in CLI mode
@@ -159,7 +159,7 @@ def main():
         else:
             # Run in GUI mode (default)
             return run_gui_mode(str(config_path))
-            
+
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
         return 0

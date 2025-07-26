@@ -317,13 +317,19 @@ class MissingFilesDetector:
     def __init__(self, base_data_path: Path):
         self.base_data_path = Path(base_data_path)
     
-    def find_missing_files(self, exchanges: List[str], start_date: date, 
+    def find_missing_files(self, exchanges: List[str], start_date: date,
                           end_date: date, include_weekends: bool = False) -> Dict[str, List[date]]:
         """Find missing files for given exchanges and date range"""
         missing_files = {}
-        
+
         for exchange in exchanges:
-            exchange_path = self.base_data_path / exchange
+            # Convert exchange format (NSE_EQ -> NSE/EQ)
+            if '_' in exchange:
+                exchange_parts = exchange.split('_', 1)
+                exchange_path = self.base_data_path / exchange_parts[0] / exchange_parts[1]
+            else:
+                exchange_path = self.base_data_path / exchange
+
             if not exchange_path.exists():
                 # Entire exchange directory missing
                 missing_files[exchange] = self._get_expected_dates(start_date, end_date, include_weekends)

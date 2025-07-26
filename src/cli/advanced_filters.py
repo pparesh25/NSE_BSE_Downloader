@@ -369,19 +369,24 @@ class MissingFilesDetector:
     
     def _file_exists_for_date(self, exchange_path: Path, exchange: str, target_date: date) -> bool:
         """Check if file exists for given date"""
-        # This is a simplified check - in real implementation,
-        # you would check for actual file patterns based on exchange type
-        date_str = target_date.strftime('%Y%m%d')
-        
-        # Common file patterns
+        # Check for actual file patterns based on our file naming convention
+        # Our files follow the pattern: YYYY-MM-DD-EXCHANGE-SEGMENT.txt
+
+        # Primary pattern: YYYY-MM-DD format (matches our actual files)
+        date_str_hyphen = target_date.strftime('%Y-%m-%d')
+
+        # File patterns to check (in order of preference)
         patterns = [
-            f"*{date_str}*",
-            f"*{target_date.strftime('%d%m%y')}*",
-            f"*{target_date.strftime('%Y-%m-%d')}*"
+            f"{date_str_hyphen}-{exchange}.*",  # Exact match: 2025-07-23-NSE-EQ.txt
+            f"*{date_str_hyphen}*",             # Contains date: *2025-07-23*
+            f"*{target_date.strftime('%Y%m%d')}*",  # Compact format: *20250723*
+            f"*{target_date.strftime('%d%m%y')}*",  # DD/MM/YY format: *230725*
+            f"*{target_date.strftime('%d%m%Y')}*",  # DD/MM/YYYY format: *23072025*
         ]
-        
+
         for pattern in patterns:
-            if list(exchange_path.glob(pattern)):
+            matches = list(exchange_path.glob(pattern))
+            if matches:
                 return True
-        
+
         return False

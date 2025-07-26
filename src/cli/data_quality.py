@@ -108,33 +108,33 @@ class DataQualityValidator:
         # Simplified config - in real implementation, load from config file
         return {
             "NSE_EQ": {
-                "file_pattern": "*NSE-EQ*.csv*",
-                "date_format": "%Y%m%d",
+                "file_pattern": "*NSE-EQ*",  # Match our actual file format: YYYY-MM-DD-NSE-EQ.txt
+                "date_format": "%Y-%m-%d",   # Our actual date format
                 "required_headers": ["SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
             },
             "NSE_FO": {
-                "file_pattern": "*NSE-FO*.csv*", 
-                "date_format": "%Y%m%d",
+                "file_pattern": "*NSE-FO*",
+                "date_format": "%Y-%m-%d",
                 "required_headers": ["SYMBOL", "EXPIRY_DT", "STRIKE_PR", "OPTION_TYP"]
             },
             "NSE_SME": {
-                "file_pattern": "*NSE-SME*.csv*",
-                "date_format": "%d%m%y", 
+                "file_pattern": "*NSE-SME*",
+                "date_format": "%Y-%m-%d",
                 "required_headers": ["SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE"]
             },
             "BSE_EQ": {
-                "file_pattern": "*BSE-EQ*.csv*",
-                "date_format": "%Y%m%d",
+                "file_pattern": "*BSE-EQ*",
+                "date_format": "%Y-%m-%d",
                 "required_headers": ["SC_CODE", "SC_NAME", "OPEN", "HIGH", "LOW", "CLOSE"]
             },
             "BSE_INDEX": {
-                "file_pattern": "*BSE-INDEX*.csv*",
-                "date_format": "%d%m%Y",
+                "file_pattern": "*BSE-INDEX*",
+                "date_format": "%Y-%m-%d",
                 "required_headers": ["Index Name", "Index Value"]
             },
             "NSE_INDEX": {
-                "file_pattern": "*NSE-INDEX*.csv*", 
-                "date_format": "%d%m%Y",
+                "file_pattern": "*NSE-INDEX*",
+                "date_format": "%Y-%m-%d",
                 "required_headers": ["Index Name", "Index Value"]
             }
         }
@@ -170,7 +170,12 @@ class DataQualityValidator:
     
     def check_file_exists(self, exchange: str, target_date: date) -> FileInfo:
         """Check if file exists for given exchange and date"""
-        exchange_path = self.base_data_path / exchange
+        # Convert exchange format (NSE_EQ -> NSE/EQ)
+        if '_' in exchange:
+            exchange_parts = exchange.split('_', 1)
+            exchange_path = self.base_data_path / exchange_parts[0] / exchange_parts[1]
+        else:
+            exchange_path = self.base_data_path / exchange
         file_info = FileInfo(
             exchange=exchange,
             date=target_date,
@@ -187,17 +192,29 @@ class DataQualityValidator:
         file_pattern = config.get("file_pattern", "*")
         date_format = config.get("date_format", "%Y%m%d")
         
-        # Generate possible date strings
+        # Generate possible date strings (prioritize our actual format)
         date_strings = [
-            target_date.strftime(date_format),
-            target_date.strftime("%Y%m%d"),
-            target_date.strftime("%d%m%y"),
-            target_date.strftime("%d%m%Y")
+            target_date.strftime("%Y-%m-%d"),  # Our primary format: 2025-07-23
+            target_date.strftime(date_format),  # Config specified format
+            target_date.strftime("%Y%m%d"),     # Compact: 20250723
+            target_date.strftime("%d%m%y"),     # DD/MM/YY: 230725
+            target_date.strftime("%d%m%Y")      # DD/MM/YYYY: 23072025
         ]
         
         # Search for matching files
         for date_str in date_strings:
-            pattern_with_date = file_pattern.replace("*", f"*{date_str}*")
+            # Create pattern - combine date and exchange pattern
+            # Our files are in format: YYYY-MM-DD-EXCHANGE-SEGMENT.txt
+            # So we need pattern: *date_str*exchange_pattern*
+            if file_pattern == "*":
+                pattern_with_date = f"*{date_str}*"
+            elif "*" in file_pattern:
+                # Replace first * with *date_str* to get: *date_str*NSE-EQ*
+                pattern_with_date = file_pattern.replace("*", f"*{date_str}*", 1)
+            else:
+                # No wildcards in pattern, just add date
+                pattern_with_date = f"*{date_str}*{file_pattern}*"
+
             matching_files = list(exchange_path.glob(pattern_with_date))
             
             if matching_files:

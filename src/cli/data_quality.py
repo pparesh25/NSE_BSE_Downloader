@@ -276,18 +276,50 @@ class DataQualityValidator:
                         reader = csv.reader(content.splitlines())
                         headers = next(reader, [])
             else:
-                # Read CSV file directly
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    headers = next(reader, [])
+                # Handle different file formats
+                if file_path.suffix.lower() in ['.csv']:
+                    # Read CSV file directly
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        headers = next(reader, [])
+                elif file_path.suffix.lower() in ['.txt']:
+                    # For TXT files, try to read as tab-separated or comma-separated
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        if '\t' in first_line:
+                            headers = first_line.split('\t')
+                        elif ',' in first_line:
+                            headers = first_line.split(',')
+                        else:
+                            # Single column or unknown format - just check if file has content
+                            headers = [first_line] if first_line else []
+                else:
+                    # Unknown format - just check if file has content
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        headers = [first_line] if first_line else []
             
-            # Validate headers
-            if required_headers:
-                missing_headers = [h for h in required_headers if h not in headers]
-                if missing_headers:
-                    file_info.status = FileStatus.INVALID
-                    file_info.error_message = f"Missing required headers: {missing_headers}"
-                    return file_info
+            # Validate headers (only if headers are actually present)
+            if required_headers and headers:
+                # Check if first line looks like actual headers (not data)
+                # Real headers would be like: SYMBOL,OPEN,HIGH,LOW,CLOSE,VOLUME
+                # Data would be like: 20MICRONS,20250721,266.55,270.99,256.41,258.52,486773
+                first_header = headers[0] if headers else ""
+
+                # Check if this looks like a header row by checking if it contains expected header names
+                looks_like_headers = any(header.upper() in first_header.upper() for header in required_headers)
+
+                if looks_like_headers:
+                    # This looks like a header row, validate it
+                    missing_headers = [h for h in required_headers if h not in headers]
+                    if missing_headers:
+                        file_info.status = FileStatus.INVALID
+                        file_info.error_message = f"Missing required headers: {missing_headers}"
+                        return file_info
+                else:
+                    # This looks like data (no proper headers), skip header validation
+                    # File is valid if it has data - this is common for NSE/BSE files
+                    pass
             
             # Check if file has data rows
             if len(headers) == 0:

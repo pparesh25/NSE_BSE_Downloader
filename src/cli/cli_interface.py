@@ -51,7 +51,7 @@ class CLIInterface:
         self.date_parser = AdvancedDateParser()
         self.exchange_filter = ExchangeFilter(list(self.exchanges.keys()))
         self.missing_files_detector = MissingFilesDetector(
-            getattr(config, 'data_folder', Path('data'))
+            config.base_data_path
         )
 
         # Initialize configuration manager
@@ -59,7 +59,7 @@ class CLIInterface:
 
         # Initialize data quality validator
         self.quality_validator = DataQualityValidator(
-            getattr(config, 'data_folder', Path('data'))
+            config.base_data_path
         )
         
         # Quick date range options

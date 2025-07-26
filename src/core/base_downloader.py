@@ -11,7 +11,16 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
-import pandas as pd
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+    DataFrame = pd.DataFrame
+except ImportError:
+    HAS_PANDAS = False
+    pd = None
+    # Create a dummy DataFrame type for type annotations
+    class DataFrame:
+        pass
 
 from .config import Config, ExchangeConfig
 from .data_manager import DataManager
@@ -129,7 +138,7 @@ class BaseDownloader(ABC):
         pass
     
     @abstractmethod
-    def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[pd.DataFrame]:
+    def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[DataFrame]:
         """
         Process downloaded file data in memory
 
@@ -143,7 +152,7 @@ class BaseDownloader(ABC):
         pass
     
     @abstractmethod
-    def transform_data(self, df: pd.DataFrame, file_date: date) -> pd.DataFrame:
+    def transform_data(self, df: DataFrame, file_date: date) -> DataFrame:
         """
         Transform DataFrame according to exchange-specific requirements
         
@@ -195,7 +204,7 @@ class BaseDownloader(ABC):
         suffix = self.exchange_config.file_suffix
         return f"{date_str}{suffix}.{extension}"
     
-    def save_processed_data(self, df: pd.DataFrame, target_date: date) -> Path:
+    def save_processed_data(self, df: DataFrame, target_date: date) -> Path:
         """
         Save processed DataFrame to final location
         

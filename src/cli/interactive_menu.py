@@ -301,6 +301,17 @@ class MenuController:
                 elif key.lower() == b'n':
                     menu.select_none()
                     return  # Return to re-render menu
+                elif key.lower() == b'w':  # w for up navigation
+                    menu.move_up()
+                    return  # Return to re-render menu
+                elif key.lower() == b's':  # s for down navigation
+                    menu.move_down()
+                    return  # Return to re-render menu
+                elif key.lower() == b'q':  # q for quit
+                    self.running = False
+                else:
+                    # Unhandled key - just return to re-render menu
+                    return
             else:
                 # Unix/Linux - Improved arrow key handling
                 import termios
@@ -349,10 +360,19 @@ class MenuController:
                     elif key.lower() == 'n':
                         menu.select_none()
                         return  # Return to re-render menu
+                    elif key.lower() == 'w':  # w for up navigation
+                        menu.move_up()
+                        return  # Return to re-render menu
+                    elif key.lower() == 's':  # s for down navigation
+                        menu.move_down()
+                        return  # Return to re-render menu
                     elif key == '\x03':  # Ctrl+C
                         raise KeyboardInterrupt
                     elif key == 'q':  # q for quit (fallback)
                         self.running = False
+                    else:
+                        # Unhandled key - just return to re-render menu
+                        return
                 finally:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 

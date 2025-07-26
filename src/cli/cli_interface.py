@@ -125,10 +125,14 @@ class CLIInterface:
             menu.add_item("exit", "🚪 Exit", "Exit the application")
 
             result = self.menu_controller.run_menu(menu)
-            
-            if not result or result.id == "exit":
+
+            # Handle exit explicitly
+            if result and result.id == "exit":
                 print(f"\n{Fore.CYAN}Thank you for using NSE/BSE Data Downloader!{Style.RESET_ALL}")
                 break
+            elif not result:
+                # If result is None (e.g., from escape key), continue to main menu
+                continue
             
             await self.handle_main_menu_selection(result.id)
     

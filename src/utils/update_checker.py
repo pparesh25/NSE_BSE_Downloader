@@ -55,27 +55,38 @@ class UpdateChecker:
             Dictionary with update information
         """
         try:
-            self.logger.info("Checking for updates from GitHub version.py...")
+            self.logger.info("🔍 DEBUG: Starting update check from GitHub version.py...")
+            self.logger.info(f"🔍 DEBUG: Current local version: {self.current_version}")
+            self.logger.info(f"🔍 DEBUG: GitHub URL: {self.version_info_url}")
 
             # Fetch version.py from GitHub
+            self.logger.info("🔍 DEBUG: Fetching GitHub version.py...")
             response = requests.get(self.version_info_url, timeout=10)
+            self.logger.info(f"🔍 DEBUG: GitHub response status: {response.status_code}")
 
             # Check for 404 or other errors
             if response.status_code == 404:
-                self.logger.info("GitHub version.py file not found (404) - no updates available")
+                self.logger.error("🔍 DEBUG: GitHub version.py file not found (404)")
                 return {"update_available": False, "error": "GitHub version file not available"}
 
             response.raise_for_status()
+            self.logger.info("🔍 DEBUG: Successfully fetched GitHub version.py")
 
             # Parse version.py content to extract version and changelog
+            self.logger.info("🔍 DEBUG: Parsing GitHub version.py content...")
             github_version_info = self._parse_github_version_file(response.text)
 
             if not github_version_info:
+                self.logger.error("🔍 DEBUG: Failed to parse GitHub version file")
                 return {"update_available": False, "error": "Could not parse GitHub version file"}
 
             # Check if update is available
-            latest_version = github_version_info.get("version", "0.0.0")
+            latest_version = github_version_info.get("latest_version", "0.0.0")
+            self.logger.info(f"🔍 DEBUG: Parsed GitHub version: {latest_version}")
+            self.logger.info(f"🔍 DEBUG: Comparing {latest_version} vs {self.current_version}")
+
             update_available = self._is_newer_version(latest_version, self.current_version)
+            self.logger.info(f"🔍 DEBUG: Update available result: {update_available}")
 
             result = {
                 "update_available": update_available,
@@ -146,13 +157,17 @@ class UpdateChecker:
         try:
             import re
 
+            self.logger.info("🔍 DEBUG: Starting GitHub version.py parsing...")
+
             # Extract version
             version_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
             if not version_match:
-                self.logger.error("Could not find __version__ in GitHub version.py")
+                self.logger.error("🔍 DEBUG: Could not find __version__ in GitHub version.py")
+                self.logger.error(f"🔍 DEBUG: Content preview: {content[:200]}...")
                 return {}
 
             version = version_match.group(1)
+            self.logger.info(f"🔍 DEBUG: Extracted version: {version}")
 
             # Extract build date
             build_date_match = re.search(r'__build_date__\s*=\s*["\']([^"\']+)["\']', content)

@@ -306,8 +306,8 @@ class MainWindow(QMainWindow):
         # Timeout option
         self.timeout_spinbox = None
 
-        # Update checker (debug mode enabled for development)
-        self.update_checker = UpdateChecker(get_version(), debug=True)  # Current version
+        # Update checker (debug mode disabled to test real update checking)
+        self.update_checker = UpdateChecker(get_version(), debug=False)  # Current version
         self.update_worker = None
 
         # User preferences
@@ -874,16 +874,24 @@ class MainWindow(QMainWindow):
     def handle_update_result(self, result: dict):
         """Handle update check result"""
         try:
+            self.logger.info(f"🔍 DEBUG: Update check result received: {result}")
+
             if result.get("update_available", False):
                 update_info = result.get("update_info")
                 if update_info:
-                    self.logger.info(f"Update available: {update_info.get('latest_version')}")
+                    latest_version = update_info.get('latest_version', 'Unknown')
+                    self.logger.info(f"🔍 DEBUG: Update available - showing dialog for version {latest_version}")
                     self.show_update_dialog(update_info)
+                else:
+                    self.logger.warning("🔍 DEBUG: Update available but no update_info provided")
             else:
-                self.logger.info("No updates available")
+                error_msg = result.get("error", "No error specified")
+                self.logger.info(f"🔍 DEBUG: No updates available. Error: {error_msg}")
 
         except Exception as e:
-            self.logger.error(f"Error handling update result: {e}")
+            self.logger.error(f"🔍 DEBUG: Error handling update result: {e}")
+            import traceback
+            self.logger.error(f"🔍 DEBUG: Traceback: {traceback.format_exc()}")
 
     def show_update_dialog(self, update_info: dict):
         """Show update dialog to user"""

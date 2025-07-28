@@ -119,10 +119,22 @@ class BaseDownloader(ABC):
         self.logger.info(message)
     
     def _report_error(self, error: str) -> None:
-        """Report error message"""
+        """Report error message to both application console and IDE console"""
+        # Send to application console (GUI)
         if self.progress_callback:
             self.progress_callback.on_error(self.exchange_segment, error)
+
+        # Send to IDE console (logger) - ensure same message appears in both places
         self.logger.error(error)
+
+    def _report_notice(self, notice: str) -> None:
+        """Report notice message to both application console and IDE console"""
+        # Send to application console (GUI) as error (for visibility)
+        if self.progress_callback:
+            self.progress_callback.on_error(self.exchange_segment, notice)
+
+        # Send to IDE console as warning (appropriate level for notices)
+        self.logger.warning(notice)
     
     @abstractmethod
     def build_url(self, target_date: date) -> str:

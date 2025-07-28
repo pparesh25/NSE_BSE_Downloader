@@ -167,14 +167,14 @@ class NSEIndexDownloader(BaseDownloader):
 
                                 if not is_weekend and not is_holiday and not is_current_date:
                                     # File skipped for non-weekend, non-holiday, non-current date - notify user
-                                    self._report_error(f"⚠️ NOTICE: File skipped for {target_date} (not weekend/holiday) - Server timeout or file unavailable")
+                                    self._report_notice(f"⚠️ NSE INDEX NOTICE: File skipped for {target_date} (not weekend/holiday) - Server timeout or file unavailable")
                                 else:
                                     if is_current_date:
                                         self.logger.info(f"File not available for {target_date} (current date - files available after market close)")
                                     else:
                                         self.logger.info(f"File not available for {target_date} (weekend/holiday)")
                             else:
-                                self._report_error(f"Download failed for {target_date}: {error_msg}")
+                                self._report_error(f"NSE INDEX download failed for {target_date}: {error_msg}")
                             
                 except Exception as e:
                     self._report_error(f"Error processing {target_date}: {e}")

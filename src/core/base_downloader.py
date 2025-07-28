@@ -25,11 +25,12 @@ except ImportError:
 from .config import Config, ExchangeConfig
 from .data_manager import DataManager
 from .exceptions import (
-    DownloaderError, 
-    DataProcessingError, 
+    DownloaderError,
+    DataProcessingError,
     NetworkError,
     FileOperationError
 )
+from ..services.memory_append_manager import MemoryAppendManager
 
 
 class ProgressCallback:
@@ -90,7 +91,12 @@ class BaseDownloader(ABC):
         # Initialize components
         self.data_manager = DataManager(config)
         self.logger = logging.getLogger(f"{__name__}.{self.exchange_segment}")
-        
+
+        # Initialize memory append manager (shared instance)
+        if not hasattr(BaseDownloader, '_memory_append_manager'):
+            BaseDownloader._memory_append_manager = MemoryAppendManager(config)
+        self.memory_append_manager = BaseDownloader._memory_append_manager
+
         # Get exchange-specific configuration
         self.exchange_config = config.get_exchange_config(exchange, segment)
         
@@ -233,11 +239,25 @@ class BaseDownloader(ABC):
         try:
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
-            
+
             # Save without header and index (as per original code)
             df.to_csv(output_path, index=False, header=False)
-            
+
             self.logger.info(f"Saved processed data: {filename}")
+
+            # Store data in memory for append operations
+            self.memory_append_manager.store_data(
+                exchange=self.exchange,
+                segment=self.segment,
+                target_date=target_date,
+                data=df
+            )
+
+            # Try append operations (non-blocking)
+            append_results = self.memory_append_manager.try_append_operations(target_date)
+            if append_results:
+                self.logger.info(f"Append operations completed: {append_results}")
+
             return output_path
             
         except Exception as e:

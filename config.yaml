@@ -21,6 +21,16 @@ download_settings:
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
 
+# Download options for data processing
+download_options:
+  # SME Symbol Processing
+  sme_add_suffix: false  # Add '_SME' suffix to NSE SME symbol names
+
+  # Data Append Options (Memory-based)
+  sme_append_to_eq: false      # Append NSE SME data to NSE EQ files
+  index_append_to_eq: false    # Append NSE Index data to NSE EQ files
+  bse_index_append_to_eq: false # Append BSE Index data to BSE EQ files
+
 # Date settings
 date_settings:
   base_start_date: "2025-01-01"  # Default start date for first run

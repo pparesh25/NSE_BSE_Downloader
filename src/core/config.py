@@ -237,6 +237,10 @@ class Config:
         
         return sorted(exchanges)
     
+    def get_download_options(self) -> Dict:
+        """Get download options for data processing"""
+        return self._config_data.get("download_options", {})
+
     def reload_config(self) -> None:
         """Reload configuration from file"""
         self.load_config()

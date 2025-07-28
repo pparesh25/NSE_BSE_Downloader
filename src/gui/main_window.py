@@ -487,8 +487,8 @@ class MainWindow(QMainWindow):
         # Dynamic options for NSE SME (initially hidden)
         self.sme_options_row = QHBoxLayout()
 
-        self.sme_suffix_checkbox = QCheckBox("Add '_sme' suffix to symbol names")
-        self.sme_suffix_checkbox.setToolTip("Add '_sme' suffix to symbol names in NSE SME data")
+        self.sme_suffix_checkbox = QCheckBox("Add '_SME' suffix to NSE SME symbol")
+        self.sme_suffix_checkbox.setToolTip("Add '_SME' suffix to symbol names in NSE SME data")
         self.sme_suffix_checkbox.setChecked(False)
         self.sme_suffix_checkbox.setVisible(False)
         self.sme_options_row.addWidget(self.sme_suffix_checkbox)

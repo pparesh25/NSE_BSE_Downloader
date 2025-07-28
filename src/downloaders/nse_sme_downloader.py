@@ -137,7 +137,13 @@ class NSESMEDownloader(BaseDownloader):
                 # Remove columns that exist in the DataFrame
                 existing_columns = [col for col in columns_to_remove if col in df.columns]
                 df = df.drop(columns=existing_columns)
-                
+
+                # Add '_SME' suffix to symbol names if option is enabled
+                download_options = self.config.get_download_options()
+                if download_options.get('sme_add_suffix', False) and 'SYMBOL' in df.columns:
+                    df['SYMBOL'] = df['SYMBOL'].astype(str) + '_SME'
+                    self.logger.info("Added '_SME' suffix to symbol names")
+
                 # Optimize memory usage
                 df = self.memory_optimizer.optimize_dataframe(df)
                 

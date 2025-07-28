@@ -158,24 +158,21 @@ class NSEIndexDownloader(BaseDownloader):
                                 self._report_error(f"Failed to process data for {target_date}")
                         else:
                             error_msg = results[0].error_message if results else "Unknown download error"
-                            # In fast mode, don't report as error if file is simply not available
-                            if hasattr(self.config.download_settings, 'fast_mode') and self.config.download_settings.fast_mode:
-                                if "not available" in error_msg.lower() or "404" in error_msg:
-                                    # Check if it's a weekend or holiday
-                                    is_weekend = target_date.weekday() >= 5
-                                    is_holiday = self.config.holiday_manager.is_holiday(target_date)
-                                    is_current_date = target_date == date.today()
+                            # Check if file is simply not available (weekend/holiday/timeout)
+                            if "not available" in error_msg.lower() or "404" in error_msg:
+                                # Check if it's a weekend or holiday
+                                is_weekend = target_date.weekday() >= 5
+                                is_holiday = self.config.holiday_manager.is_holiday(target_date)
+                                is_current_date = target_date == date.today()
 
-                                    if not is_weekend and not is_holiday and not is_current_date:
-                                        # File skipped for non-weekend, non-holiday, non-current date - notify user
-                                        self._report_error(f"⚠️ NOTICE: File skipped for {target_date} (not weekend/holiday) - Server timeout or file unavailable")
-                                    else:
-                                        if is_current_date:
-                                            self.logger.info(f"File not available for {target_date} (current date - files available after market close)")
-                                        else:
-                                            self.logger.info(f"File not available for {target_date} (weekend/holiday)")
+                                if not is_weekend and not is_holiday and not is_current_date:
+                                    # File skipped for non-weekend, non-holiday, non-current date - notify user
+                                    self._report_error(f"⚠️ NOTICE: File skipped for {target_date} (not weekend/holiday) - Server timeout or file unavailable")
                                 else:
-                                    self._report_error(f"Download failed for {target_date}: {error_msg}")
+                                    if is_current_date:
+                                        self.logger.info(f"File not available for {target_date} (current date - files available after market close)")
+                                    else:
+                                        self.logger.info(f"File not available for {target_date} (weekend/holiday)")
                             else:
                                 self._report_error(f"Download failed for {target_date}: {error_msg}")
                             

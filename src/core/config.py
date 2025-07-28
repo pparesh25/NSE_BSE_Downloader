@@ -31,7 +31,6 @@ class DownloadSettings:
     timeout_seconds: int = 30
     chunk_size: int = 8192
     rate_limit_delay: float = 0.5
-    fast_mode: bool = False
 
 
 @dataclass
@@ -139,8 +138,7 @@ class Config:
             retry_attempts=settings_data.get('retry_attempts', 3),
             timeout_seconds=settings_data.get('timeout_seconds', 30),
             chunk_size=settings_data.get('chunk_size', 8192),
-            rate_limit_delay=settings_data.get('rate_limit_delay', 0.5),
-            fast_mode=settings_data.get('fast_mode', False)
+            rate_limit_delay=settings_data.get('rate_limit_delay', 0.5)
         )
     
     @property

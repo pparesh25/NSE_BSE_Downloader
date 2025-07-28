@@ -258,32 +258,29 @@ class NSEFODownloader(BaseDownloader):
                             # Build detailed URL for debugging
                             url = self.build_url(target_date)
 
-                            # In fast mode, don't report as error if file is simply not available
-                            if hasattr(self.config.download_settings, 'fast_mode') and self.config.download_settings.fast_mode:
-                                if "not available" in error_msg.lower() or "404" in error_msg or "timeout" in error_msg.lower():
-                                    # Check if it's a weekend or holiday
-                                    is_weekend = target_date.weekday() >= 5
-                                    is_holiday = self.config.holiday_manager.is_holiday(target_date)
-                                    is_current_date = target_date == date.today()
+                            # Check if file is simply not available (weekend/holiday/timeout)
+                            if "not available" in error_msg.lower() or "404" in error_msg or "timeout" in error_msg.lower():
+                                # Check if it's a weekend or holiday
+                                is_weekend = target_date.weekday() >= 5
+                                is_holiday = self.config.holiday_manager.is_holiday(target_date)
+                                is_current_date = target_date == date.today()
 
-                                    if not is_weekend and not is_holiday and not is_current_date:
+                                if not is_weekend and not is_holiday and not is_current_date:
                                         # File skipped for non-weekend, non-holiday, non-current date - notify user with more details
                                         self._report_error(f"⚠️ NSE FO NOTICE: File skipped for {target_date} (not weekend/holiday)")
                                         self.logger.warning(f"  URL attempted: {url}")
                                         self.logger.warning(f"  Error details: {error_msg}")
-                                    else:
-                                        if is_current_date:
-                                            self.logger.info(f"NSE FO file not available for {target_date} (current date - files available after market close)")
-                                        else:
-                                            self.logger.info(f"NSE FO file not available for {target_date} (weekend/holiday)")
                                 else:
-                                    # Other errors - provide detailed information
-                                    self._report_error(f"NSE FO download failed for {target_date}: {error_msg}")
-                                    self.logger.error(f"  URL attempted: {url}")
-                                    if not error_msg or error_msg == "Download attempt failed - no specific error details":
-                                        self.logger.error(f"  This may indicate a connection issue or server problem")
+                                    if is_current_date:
+                                        self.logger.info(f"NSE FO file not available for {target_date} (current date - files available after market close)")
+                                    else:
+                                        self.logger.info(f"NSE FO file not available for {target_date} (weekend/holiday)")
                             else:
+                                # Other errors - provide detailed information
                                 self._report_error(f"NSE FO download failed for {target_date}: {error_msg}")
+                                self.logger.error(f"  URL attempted: {url}")
+                                if not error_msg or error_msg == "Download attempt failed - no specific error details":
+                                    self.logger.error(f"  This may indicate a connection issue or server problem")
                                 self.logger.error(f"  URL attempted: {url}")
 
                 except Exception as e:

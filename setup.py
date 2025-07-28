@@ -60,7 +60,7 @@ def install_dependencies():
     if gui_success:
         print("✓ GUI dependencies installed - GUI mode available")
     else:
-        print("⚠ GUI dependencies failed - CLI mode only")
+        print("⚠ GUI dependencies failed - GUI mode will not be available")
     
     return True
 

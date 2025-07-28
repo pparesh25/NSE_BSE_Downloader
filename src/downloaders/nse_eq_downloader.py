@@ -221,35 +221,31 @@ class NSEEQDownloader(BaseDownloader):
                             # Build detailed URL for debugging
                             url = self.build_url(target_date)
 
-                            # In fast mode, don't report as error if file is simply not available
-                            if hasattr(self.config.download_settings, 'fast_mode') and self.config.download_settings.fast_mode:
-                                if "not available" in error_msg.lower() or "404" in error_msg or "timeout" in error_msg.lower():
-                                    # Check if it's a weekend or holiday
-                                    is_weekend = target_date.weekday() >= 5
-                                    is_holiday = self.config.holiday_manager.is_holiday(target_date)
-                                    is_current_date = target_date == date.today()
+                            # Check if file is simply not available (weekend/holiday/timeout)
+                            if "not available" in error_msg.lower() or "404" in error_msg or "timeout" in error_msg.lower():
+                                # Check if it's a weekend or holiday
+                                is_weekend = target_date.weekday() >= 5
+                                is_holiday = self.config.holiday_manager.is_holiday(target_date)
+                                is_current_date = target_date == date.today()
 
-                                    if not is_weekend and not is_holiday and not is_current_date:
-                                        # NSE EQ is critical - provide detailed error for main section
-                                        self._report_error(f"🚨 NSE EQ CRITICAL: File skipped for {target_date} (MAIN SECTION - not weekend/holiday)")
-                                        self.logger.error(f"  URL attempted: {url}")
-                                        self.logger.error(f"  Error details: {error_msg}")
-                                        self.logger.error(f"  This is the main NSE section - file should be available!")
-                                    else:
-                                        if is_current_date:
-                                            self.logger.info(f"NSE EQ file not available for {target_date} (current date - files available after market close)")
-                                        else:
-                                            self.logger.info(f"NSE EQ file not available for {target_date} (weekend/holiday)")
-                                else:
-                                    # Other errors in main section - critical
-                                    self._report_error(f"🚨 NSE EQ CRITICAL download failed for {target_date}: {error_msg}")
+                                if not is_weekend and not is_holiday and not is_current_date:
+                                    # NSE EQ is critical - provide detailed error for main section
+                                    self._report_error(f"🚨 NSE EQ CRITICAL: File skipped for {target_date} (MAIN SECTION - not weekend/holiday)")
                                     self.logger.error(f"  URL attempted: {url}")
-                                    if not error_msg or error_msg == "Download attempt failed - no specific error details":
-                                        self.logger.error(f"  This may indicate a serious connection issue or server problem")
-                                        self.logger.error(f"  NSE EQ is the main section - this failure needs investigation")
+                                    self.logger.error(f"  Error details: {error_msg}")
+                                    self.logger.error(f"  This is the main NSE section - file should be available!")
+                                else:
+                                    if is_current_date:
+                                        self.logger.info(f"NSE EQ file not available for {target_date} (current date - files available after market close)")
+                                    else:
+                                        self.logger.info(f"NSE EQ file not available for {target_date} (weekend/holiday)")
                             else:
-                                self._report_error(f"NSE EQ download failed for {target_date}: {error_msg}")
+                                # Other errors in main section - critical
+                                self._report_error(f"🚨 NSE EQ CRITICAL download failed for {target_date}: {error_msg}")
                                 self.logger.error(f"  URL attempted: {url}")
+                                if not error_msg or error_msg == "Download attempt failed - no specific error details":
+                                    self.logger.error(f"  This may indicate a serious connection issue or server problem")
+                                    self.logger.error(f"  NSE EQ is the main section - this failure needs investigation")
 
                 except Exception as e:
                     self._report_error(f"Error processing {target_date}: {e}")

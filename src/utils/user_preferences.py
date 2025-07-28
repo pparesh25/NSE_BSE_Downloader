@@ -41,8 +41,7 @@ class UserPreferences:
             },
             "download_options": {
                 "include_weekends": False,
-                "timeout_seconds": 5,
-                "fast_mode": True
+                "timeout_seconds": 5
             },
             "gui_settings": {
                 "window_width": 800,
@@ -175,14 +174,7 @@ class UserPreferences:
         self.preferences["download_options"]["timeout_seconds"] = timeout
         self.save_preferences()
     
-    def get_fast_mode(self) -> bool:
-        """Get fast mode setting"""
-        return self.preferences.get("download_options", {}).get("fast_mode", True)
-    
-    def set_fast_mode(self, fast_mode: bool) -> None:
-        """Set fast mode setting"""
-        self.preferences["download_options"]["fast_mode"] = fast_mode
-        self.save_preferences()
+
     
     # GUI Settings Methods
     def get_gui_settings(self) -> Dict[str, Any]:

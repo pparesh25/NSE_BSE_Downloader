@@ -227,9 +227,9 @@ class AsyncDownloadManager:
         # Check retry conditions
         return any(retry_conditions)
 
-    def _calculate_adaptive_delay(self, task: DownloadTask) -> float:
+    def _calculate_delay(self, task: DownloadTask) -> float:
         """
-        Calculate adaptive delay based on server type and current performance
+        Calculate consistent delay for rate limiting
 
         Args:
             task: Download task to analyze
@@ -237,99 +237,38 @@ class AsyncDownloadManager:
         Returns:
             Delay in seconds
         """
-        base_delay = self.download_settings.rate_limit_delay
+        # Use consistent rate limit delay for all servers
+        return self.download_settings.rate_limit_delay
 
-        # Server-specific delays
-        if "bseindia.com" in task.url:
-            # BSE servers are generally slower and need more delay
-            server_multiplier = 1.5
-        elif "nseindia.com" in task.url:
-            # NSE servers are faster but still need some delay
-            server_multiplier = 1.0
-        else:
-            server_multiplier = 1.0
-
-        # Fast mode optimization
-        if hasattr(self.download_settings, 'fast_mode') and self.download_settings.fast_mode:
-            # In fast mode, use configured delay but respect server requirements
-            fast_mode_delay = min(base_delay, 0.3)  # Maximum 0.3s delay in fast mode (increased from 0.1s)
-            return fast_mode_delay * server_multiplier
-        else:
-            return base_delay * server_multiplier
-
-    def _get_adaptive_timeout(self, task: DownloadTask) -> int:
+    def _get_timeout(self, task: DownloadTask) -> int:
         """
-        Get adaptive timeout based on server type and exchange
+        Get consistent timeout for all servers
 
         Args:
             task: Download task to analyze
 
         Returns:
-            Timeout in seconds
+            Timeout in seconds (user-configured value)
         """
-        base_timeout = self.download_settings.timeout_seconds
+        # Use user-configured timeout for all servers consistently
+        return self.download_settings.timeout_seconds
 
-        # Server-specific timeout adjustments
-        if "bseindia.com" in task.url:
-            # BSE servers are generally slower, need more time
-            if "INDEXSummary" in task.url:
-                # BSE INDEX files are particularly slow
-                return max(base_timeout, 8)
-            else:
-                # BSE EQ files
-                return max(base_timeout, 6)
-        elif "nseindia.com" in task.url:
-            # NSE servers need more aggressive timeouts
-            if "sme" in task.url.lower():
-                # NSE SME files are particularly problematic - increase timeout significantly
-                return max(base_timeout, 10)  # Increased from 6 to 10
-            elif "content/fo" in task.url:
-                # NSE FO files also need more time
-                return max(base_timeout, 8)  # Increased from base to 8
-            elif "content/cm" in task.url:
-                # NSE EQ files - main section, needs reliability
-                return max(base_timeout, 7)  # Increased from base to 7
-            else:
-                # NSE INDEX files
-                return max(base_timeout, 6)
-        else:
-            return base_timeout
-
-    def _get_max_retry_attempts(self, task: DownloadTask) -> int:
+    def _get_retry_attempts(self, task: DownloadTask) -> int:
         """
-        Get maximum retry attempts based on server type and exchange
+        Get consistent retry attempts for all servers
 
         Args:
             task: Download task to analyze
 
         Returns:
-            Maximum retry attempts
+            Maximum retry attempts (user-configured value)
         """
-        base_attempts = self.download_settings.retry_attempts
-
-        # NSE servers need more aggressive retry strategy
-        if "nseindia.com" in task.url:
-            if "sme" in task.url.lower():
-                # NSE SME is most problematic - use maximum retries
-                return max(base_attempts, 4)  # At least 4 attempts
-            elif "content/fo" in task.url:
-                # NSE FO also needs more retries
-                return max(base_attempts, 3)  # At least 3 attempts
-            elif "content/cm" in task.url:
-                # NSE EQ - main section, needs reliability
-                return max(base_attempts, 3)  # At least 3 attempts
-            else:
-                # NSE INDEX
-                return base_attempts
-        elif "bseindia.com" in task.url:
-            # BSE is generally more stable
-            return base_attempts
-        else:
-            return base_attempts
+        # Use consistent retry attempts for all servers
+        return self.download_settings.retry_attempts
 
     def _get_retry_delay(self, task: DownloadTask, attempt: int) -> float:
         """
-        Get retry delay based on server type and attempt number
+        Get consistent retry delay for all servers
 
         Args:
             task: Download task to analyze
@@ -338,26 +277,8 @@ class AsyncDownloadManager:
         Returns:
             Delay in seconds
         """
-        # Progressive delay with server-specific adjustments
-        base_delay = 0.5 * (attempt + 1)  # 0.5s, 1.0s, 1.5s, 2.0s
-
-        # NSE servers need longer delays between retries
-        if "nseindia.com" in task.url:
-            if "sme" in task.url.lower():
-                # NSE SME needs longer delays
-                multiplier = 2.0  # 1.0s, 2.0s, 3.0s, 4.0s
-            elif "content/fo" in task.url:
-                # NSE FO needs moderate delays
-                multiplier = 1.5  # 0.75s, 1.5s, 2.25s, 3.0s
-            else:
-                # NSE EQ, INDEX
-                multiplier = 1.2  # 0.6s, 1.2s, 1.8s, 2.4s
-        else:
-            # BSE and others
-            multiplier = 1.0
-
-        # Cap maximum delay at 5 seconds
-        return min(5.0, base_delay * multiplier)
+        # Simple progressive delay: 1s, 2s, 3s, 4s
+        return min(5.0, 1.0 * (attempt + 1))
 
     def _classify_error(self, error_message: str, task: DownloadTask) -> dict:
         """
@@ -451,123 +372,80 @@ class AsyncDownloadManager:
         
         async with self.semaphore:  # Limit concurrent downloads
             try:
-                # Adaptive rate limiting based on server type and performance
-                delay = self._calculate_adaptive_delay(task)
-
+                # Simple rate limiting
+                delay = self._calculate_delay(task)
                 if delay > 0:
                     await asyncio.sleep(delay)
-                
-                # Enhanced fast download strategy with NSE-specific intelligent retry
-                if hasattr(self.download_settings, 'fast_mode') and self.download_settings.fast_mode:
-                    # Determine retry attempts based on server type
-                    max_attempts = self._get_max_retry_attempts(task)
-                    last_error = None
 
-                    for attempt in range(max(1, max_attempts)):
-                        try:
-                            result = await self._attempt_download(task)
-                            if result.success:
-                                self.download_stats['successful_downloads'] += 1
-                                self.download_stats['total_bytes'] += result.file_size
-                                if attempt > 0:
-                                    self.logger.info(f"✅ Success on retry {attempt + 1} for {task.date_str}")
-                                return result
-                            else:
-                                # If download failed but no exception, classify error and decide retry
-                                last_error = result.error_message
-                                error_info = self._classify_error(result.error_message, task)
+                # Simple retry logic for all servers
+                max_attempts = self._get_retry_attempts(task)
+                last_error = None
 
-                                if error_info["should_retry"] and attempt < max_attempts - 1:
-                                    wait_time = self._get_retry_delay(task, attempt)
-                                    self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
-                                    await asyncio.sleep(wait_time)
-                                    self.download_stats['retry_count'] += 1
-                                    continue
-                                else:
-                                    # Don't retry for this type of error or max attempts reached
-                                    if not error_info["should_retry"]:
-                                        self.logger.info(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
-                                    break
-
-                        except asyncio.TimeoutError:
-                            adaptive_timeout = self._get_adaptive_timeout(task)
-                            last_error = f"Server timeout after {adaptive_timeout}s"
-                            if attempt < max_attempts - 1:
-                                wait_time = self._get_retry_delay(task, attempt)
-                                self.logger.info(f"⏱️ Timeout retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
-                                await asyncio.sleep(wait_time)
-                                self.download_stats['retry_count'] += 1
-                                continue
-                            else:
-                                last_error = f"Server timeout after {adaptive_timeout}s (all {max_attempts} attempts failed)"
-                                break
-
-                        except Exception as e:
-                            last_error = f"Download error: {e}"
-                            error_info = self._classify_error(str(e), task)
+                for attempt in range(max(1, max_attempts)):
+                    try:
+                        result = await self._attempt_download(task)
+                        if result.success:
+                            self.download_stats['successful_downloads'] += 1
+                            self.download_stats['total_bytes'] += result.file_size
+                            if attempt > 0:
+                                self.logger.info(f"✅ Success on retry {attempt + 1} for {task.date_str}")
+                            return result
+                        else:
+                            # If download failed but no exception, classify error and decide retry
+                            last_error = result.error_message
+                            error_info = self._classify_error(result.error_message, task)
 
                             if error_info["should_retry"] and attempt < max_attempts - 1:
                                 wait_time = self._get_retry_delay(task, attempt)
-                                self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts}): {error_info['user_message']}")
+                                self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                                 await asyncio.sleep(wait_time)
                                 self.download_stats['retry_count'] += 1
                                 continue
                             else:
-                                self.logger.error(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
+                                # Don't retry for this type of error or max attempts reached
+                                if not error_info["should_retry"]:
+                                    self.logger.info(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
                                 break
 
-                    # All attempts failed - provide classified error message
-                    self.download_stats['failed_downloads'] += 1
-                    final_error_info = self._classify_error(last_error or "Unknown error", task)
+                    except asyncio.TimeoutError:
+                        timeout_value = self._get_timeout(task)
+                        last_error = f"Server timeout after {timeout_value}s"
+                        if attempt < max_attempts - 1:
+                            wait_time = self._get_retry_delay(task, attempt)
+                            self.logger.info(f"⏱️ Timeout retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
+                            await asyncio.sleep(wait_time)
+                            self.download_stats['retry_count'] += 1
+                            continue
+                        else:
+                            last_error = f"Server timeout after {timeout_value}s (all {max_attempts} attempts failed)"
+                            break
 
-                    return DownloadResult(
-                        task=task,
-                        success=False,
-                        error_message=final_error_info["user_message"],
-                        download_time=time.time() - start_time
-                    )
+                    except Exception as e:
+                        last_error = f"Download error: {e}"
+                        error_info = self._classify_error(str(e), task)
 
-                else:
-                    # Original retry logic for non-fast mode
-                    for attempt in range(self.download_settings.retry_attempts):
-                        try:
-                            result = await self._attempt_download(task)
-                            if result.success:
-                                self.download_stats['successful_downloads'] += 1
-                                self.download_stats['total_bytes'] += result.file_size
-                                return result
+                        if error_info["should_retry"] and attempt < max_attempts - 1:
+                            wait_time = self._get_retry_delay(task, attempt)
+                            self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts}): {error_info['user_message']}")
+                            await asyncio.sleep(wait_time)
+                            self.download_stats['retry_count'] += 1
+                            continue
+                        else:
+                            self.logger.error(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
+                            break
 
-                            # If not successful and not the last attempt, wait before retry
-                            if attempt < self.download_settings.retry_attempts - 1:
-                                wait_time = 2 ** attempt  # Exponential backoff
-                                self.logger.warning(f"Retry {attempt + 1} for {task.url} in {wait_time}s")
-                                await asyncio.sleep(wait_time)
-                                self.download_stats['retry_count'] += 1
-
-                        except Exception as e:
-                            if attempt == self.download_settings.retry_attempts - 1:
-                                # Last attempt failed
-                                error_msg = f"Download failed after {self.download_settings.retry_attempts} attempts: {e}"
-                                self.logger.error(f"{task.url}: {error_msg}")
-                                self.download_stats['failed_downloads'] += 1
-
-                                return DownloadResult(
-                                    task=task,
-                                    success=False,
-                                    error_message=error_msg,
-                                    download_time=time.time() - start_time
-                                )
-                
-                # All retries exhausted
-                error_msg = f"All {self.download_settings.retry_attempts} download attempts failed"
+                # All attempts failed - provide classified error message
                 self.download_stats['failed_downloads'] += 1
-                
+                final_error_info = self._classify_error(last_error or "Unknown error", task)
+
                 return DownloadResult(
                     task=task,
                     success=False,
-                    error_message=error_msg,
+                    error_message=final_error_info["user_message"],
                     download_time=time.time() - start_time
                 )
+
+
                 
             finally:
                 self.completed_downloads += 1
@@ -594,18 +472,15 @@ class AsyncDownloadManager:
             is_bse_index = is_bse_request and "INDEXSummary" in task.url
             is_bse_eq = is_bse_request and "BhavCopy_BSE_CM" in task.url
 
-            # Get adaptive timeout for this specific request
-            adaptive_timeout = self._get_adaptive_timeout(task)
+            # Get timeout for this request
+            timeout_value = self._get_timeout(task)
 
             if is_bse_request:
                 request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                 self.logger.info(f"🔍 {request_type} HTTP Request Debug:")
                 self.logger.info(f"  URL: {task.url}")
-                self.logger.info(f"  Base Timeout: {self.download_settings.timeout_seconds}s")
-                self.logger.info(f"  Adaptive Timeout: {adaptive_timeout}s")
+                self.logger.info(f"  Timeout: {timeout_value}s")
                 self.logger.info(f"  SSL Verification: Disabled (BSE compatibility)")
-            elif adaptive_timeout != self.download_settings.timeout_seconds:
-                self.logger.info(f"🕐 Using adaptive timeout {adaptive_timeout}s for {task.date_str} (base: {self.download_settings.timeout_seconds}s)")
 
             # Make HTTP request with SSL handling for BSE
             ssl_context = None

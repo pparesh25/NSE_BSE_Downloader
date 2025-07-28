@@ -114,32 +114,42 @@ def check_updates_cli():
 
         print("\n🔄 Checking for updates...")
 
-        # Fetch update info
-        url = "https://raw.githubusercontent.com/pparesh25/Getbhavcopy-alternative/main/update_info.json"
+        # Fetch version info from GitHub version.py
+        url = "https://raw.githubusercontent.com/pparesh25/Getbhavcopy-alternative/main/version.py"
         response = requests.get(url, timeout=10)
 
         if response.status_code == 404:
-            print("✅ No updates available (update info not found)")
+            print("✅ No updates available (version file not found)")
             return
         elif response.status_code == 200:
-            data = response.json()
+            # Parse version.py content
+            import re
+            content = response.text
+            version_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
 
-            current_version = "2.0.0"  # Current version
-            latest_version = data.get("latest_version", "Unknown")
-            update_available = data.get("update_available", False)
+            if not version_match:
+                print("⚠️ Could not parse GitHub version file")
+                return
 
-            if update_available and latest_version != current_version:
+            current_version = "2.1.0"  # Current version
+            latest_version = version_match.group(1)
+
+            # Simple version comparison
+            def is_newer(latest, current):
+                try:
+                    latest_parts = [int(x) for x in latest.split('.')]
+                    current_parts = [int(x) for x in current.split('.')]
+                    return latest_parts > current_parts
+                except:
+                    return False
+
+            update_available = is_newer(latest_version, current_version)
+
+            if update_available:
                 print(f"\n🎉 Update Available!")
                 print(f"   Current: v{current_version}")
                 print(f"   Latest:  v{latest_version}")
-                print(f"   Message: {data.get('update_message', 'New version available')}")
-
-                # Show some features
-                features = data.get('changelog', {}).get('features', [])
-                if features:
-                    print(f"\n🆕 New Features:")
-                    for i, feature in enumerate(features[:3]):  # Show first 3
-                        print(f"   • {feature}")
+                print(f"   New version available with improved features!")
 
                 print(f"\n📥 Download: https://github.com/pparesh25/Getbhavcopy-alternative/releases")
                 print(f"   Or visit: https://github.com/pparesh25/Getbhavcopy-alternative")

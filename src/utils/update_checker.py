@@ -32,14 +32,14 @@ class UpdateChecker:
         self.debug = debug
         self.logger = logging.getLogger(__name__)
         
-        # GitHub URLs
+        # GitHub URLs - Using version.py as single source of truth
         self.github_base = "https://raw.githubusercontent.com/pparesh25/Getbhavcopy-alternative/main"
-        self.update_info_url = f"{self.github_base}/update_info.json"
+        self.version_info_url = f"{self.github_base}/version.py"
         self.download_url = "https://github.com/pparesh25/Getbhavcopy-alternative/archive/refs/heads/main.zip"
 
         self.logger.info(f"Update checker initialized:")
         self.logger.info(f"  Current version: {current_version}")
-        self.logger.info(f"  Update info URL: {self.update_info_url}")
+        self.logger.info(f"  Version info URL: {self.version_info_url}")
         self.logger.info(f"  Download URL: {self.download_url}")
         
         # Local cache
@@ -49,41 +49,46 @@ class UpdateChecker:
     
     def check_for_updates(self) -> Dict:
         """
-        Check if updates are available
-        
+        Check if updates are available by comparing GitHub version.py
+
         Returns:
             Dictionary with update information
         """
         try:
-            self.logger.info("Checking for updates...")
-            
-            # Fetch update info from GitHub
-            response = requests.get(self.update_info_url, timeout=10)
+            self.logger.info("Checking for updates from GitHub version.py...")
+
+            # Fetch version.py from GitHub
+            response = requests.get(self.version_info_url, timeout=10)
 
             # Check for 404 or other errors
             if response.status_code == 404:
-                self.logger.info("Update info file not found (404) - no updates available")
-                return {"update_available": False, "error": "Update info not available"}
+                self.logger.info("GitHub version.py file not found (404) - no updates available")
+                return {"update_available": False, "error": "GitHub version file not available"}
 
             response.raise_for_status()
-            update_info = response.json()
-            
+
+            # Parse version.py content to extract version and changelog
+            github_version_info = self._parse_github_version_file(response.text)
+
+            if not github_version_info:
+                return {"update_available": False, "error": "Could not parse GitHub version file"}
+
             # Check if update is available
-            latest_version = update_info.get("latest_version", "0.0.0")
+            latest_version = github_version_info.get("version", "0.0.0")
             update_available = self._is_newer_version(latest_version, self.current_version)
-            
+
             result = {
                 "update_available": update_available,
                 "current_version": self.current_version,
                 "latest_version": latest_version,
-                "update_info": update_info if update_available else None,
+                "update_info": github_version_info if update_available else None,
                 "error": None
             }
-            
+
             # Cache the result (only if successful and not in debug mode)
             if not self.debug and result.get("update_available") is not None and not result.get("error"):
                 self._cache_update_info(result)
-            
+
             self.logger.info(f"Update check completed. Available: {update_available}")
             return result
             
@@ -127,6 +132,91 @@ class UpdateChecker:
         except (ValueError, AttributeError):
             self.logger.warning(f"Could not parse versions: {latest} vs {current}")
             return False
+
+    def _parse_github_version_file(self, content: str) -> Dict:
+        """
+        Parse GitHub version.py file content to extract version and changelog
+
+        Args:
+            content: Raw content of version.py file from GitHub
+
+        Returns:
+            Dictionary with version information and changelog
+        """
+        try:
+            import re
+
+            # Extract version
+            version_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+            if not version_match:
+                self.logger.error("Could not find __version__ in GitHub version.py")
+                return {}
+
+            version = version_match.group(1)
+
+            # Extract build date
+            build_date_match = re.search(r'__build_date__\s*=\s*["\']([^"\']+)["\']', content)
+            build_date = build_date_match.group(1) if build_date_match else "Unknown"
+
+            # Extract VERSION_HISTORY
+            version_history = {}
+            try:
+                # Find VERSION_HISTORY dictionary
+                history_match = re.search(r'VERSION_HISTORY\s*=\s*({.*?})\s*(?=\n\w|\nclass|\ndef|\Z)', content, re.DOTALL)
+                if history_match:
+                    # Safely evaluate the dictionary (basic parsing)
+                    history_str = history_match.group(1)
+                    # Simple parsing for the latest version entry
+                    latest_version_pattern = rf'"{re.escape(version)}"\s*:\s*{{([^}}]+)}}'
+                    latest_match = re.search(latest_version_pattern, history_str, re.DOTALL)
+
+                    if latest_match:
+                        version_data = latest_match.group(1)
+
+                        # Extract features
+                        features_match = re.search(r'"features"\s*:\s*\[(.*?)\]', version_data, re.DOTALL)
+                        features = []
+                        if features_match:
+                            features_str = features_match.group(1)
+                            features = re.findall(r'"([^"]+)"', features_str)
+
+                        # Extract bug fixes
+                        bug_fixes_match = re.search(r'"bug_fixes"\s*:\s*\[(.*?)\]', version_data, re.DOTALL)
+                        bug_fixes = []
+                        if bug_fixes_match:
+                            bug_fixes_str = bug_fixes_match.group(1)
+                            bug_fixes = re.findall(r'"([^"]+)"', bug_fixes_str)
+
+                        version_history = {
+                            "version": version,
+                            "release_date": build_date,
+                            "features": features,
+                            "bug_fixes": bug_fixes
+                        }
+
+            except Exception as e:
+                self.logger.warning(f"Could not parse VERSION_HISTORY: {e}")
+
+            # Create update info structure compatible with existing dialog
+            update_info = {
+                "latest_version": version,
+                "update_available": True,
+                "update_message": f"New version {version} available with improved features!",
+                "release_date": build_date,
+                "download_url": self.download_url,
+                "changelog": version_history if version_history else {
+                    "version": version,
+                    "features": ["Updated to version " + version],
+                    "bug_fixes": ["Various improvements and fixes"]
+                }
+            }
+
+            self.logger.info(f"Parsed GitHub version: {version}")
+            return update_info
+
+        except Exception as e:
+            self.logger.error(f"Error parsing GitHub version file: {e}")
+            return {}
     
     def download_update(self, download_path: Optional[Path] = None) -> Tuple[bool, str]:
         """

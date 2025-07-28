@@ -4,12 +4,33 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "2.0.0"
-__build_date__ = "2025-01-23"
-__build_number__ = 200
+__version__ = "2.1.0"
+__build_date__ = "2025-07-28"
+__build_number__ = 210
 
 # Version history
 VERSION_HISTORY = {
+    "2.1.0": {
+        "release_date": "2025-07-28",
+        "features": [
+            "🚀 Removed Fast Mode for rock-solid download stability",
+            "🎯 Simplified download process with consistent user-configured timeouts",
+            "🗑️ Complete CLI module removal for better maintainability",
+            "⚙️ User-configured timeout properly applied to all servers and exchanges",
+            "🔧 Improved error handling and retry logic across all downloaders",
+            "📊 Simplified configuration with reduced complexity",
+            "🛡️ Enhanced reliability with predictable download behavior"
+        ],
+        "bug_fixes": [
+            "Fixed hardcoded timeout issues that bypassed user settings",
+            "Resolved server-specific timeout conflicts and inconsistencies",
+            "Eliminated CLI navigation and interaction problems",
+            "Better memory management during concurrent downloads",
+            "Improved download reliability across NSE and BSE exchanges",
+            "Fixed fast mode optimizations that caused missed downloads",
+            "Resolved complex retry logic that led to unpredictable behavior"
+        ]
+    },
     "2.0.0": {
         "release_date": "2025-01-23",
         "features": [

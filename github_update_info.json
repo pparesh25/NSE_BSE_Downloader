@@ -1,0 +1,64 @@
+{
+  "latest_version": "2.1.0",
+  "update_available": true,
+  "update_message": "🚀 Major Update: Improved Stability & Simplified Architecture",
+  "release_date": "2025-07-28",
+  "download_url": "https://github.com/pparesh25/Getbhavcopy-alternative/archive/refs/heads/main.zip",
+  "changelog": {
+    "version": "2.1.0",
+    "features": [
+      "🚀 Removed Fast Mode for rock-solid download stability",
+      "🎯 Simplified download process with consistent user-configured timeouts",
+      "🗑️ Complete CLI module removal for better maintainability",
+      "⚙️ User-configured timeout properly applied to all servers and exchanges",
+      "🔧 Improved error handling and retry logic across all downloaders",
+      "📊 Simplified configuration with reduced complexity",
+      "🛡️ Enhanced reliability with predictable download behavior"
+    ],
+    "bug_fixes": [
+      "Fixed hardcoded timeout issues that bypassed user settings",
+      "Resolved server-specific timeout conflicts and inconsistencies", 
+      "Eliminated CLI navigation and interaction problems",
+      "Better memory management during concurrent downloads",
+      "Improved download reliability across NSE and BSE exchanges",
+      "Fixed fast mode optimizations that caused missed downloads",
+      "Resolved complex retry logic that led to unpredictable behavior"
+    ],
+    "breaking_changes": [
+      "CLI mode completely removed - GUI-only interface",
+      "Fast mode settings removed from configuration files",
+      "Simplified download settings structure in config.yaml",
+      "Removed CLI-specific dependencies (keyboard, colorama)",
+      "Updated project structure with CLI module removal"
+    ]
+  },
+  "requirements": {
+    "min_python_version": "3.8",
+    "dependencies": [
+      "pandas>=2.0.0",
+      "PyQt6>=6.5.0",
+      "aiohttp>=3.8.0",
+      "pyyaml>=6.0",
+      "requests>=2.28.0",
+      "python-dateutil>=2.8.0",
+      "psutil>=5.9.0"
+    ]
+  },
+  "installation": {
+    "backup_recommended": true,
+    "restart_required": true,
+    "instructions": [
+      "1. Close the current NSE/BSE Data Downloader application",
+      "2. Create a backup of your current installation (recommended)",
+      "3. Download the update ZIP file from GitHub",
+      "4. Extract the ZIP file to your desired location",
+      "5. Run the application from the new location",
+      "6. Your settings and preferences will be preserved"
+    ]
+  },
+  "compatibility": {
+    "config_migration": true,
+    "data_preservation": true,
+    "settings_compatible": true
+  }
+}

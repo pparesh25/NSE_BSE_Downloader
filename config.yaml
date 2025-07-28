@@ -24,12 +24,12 @@ download_settings:
 # Download options for data processing
 download_options:
   # SME Symbol Processing
-  sme_add_suffix: false  # Add '_SME' suffix to NSE SME symbol names
+  sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 
   # Data Append Options (Memory-based)
-  sme_append_to_eq: false      # Append NSE SME data to NSE EQ files
-  index_append_to_eq: false    # Append NSE Index data to NSE EQ files
-  bse_index_append_to_eq: false # Append BSE Index data to BSE EQ files
+  sme_append_to_eq: true      # Append NSE SME data to NSE EQ files
+  index_append_to_eq: true    # Append NSE Index data to NSE EQ files
+  bse_index_append_to_eq: true # Append BSE Index data to BSE EQ files
 
 # Date settings
 date_settings:
@@ -44,8 +44,7 @@ gui_settings:
   window_width: 800
   window_height: 600
   default_exchanges: 
-    - "NSE_EQ"
-    - "BSE_EQ"
+    - "NSE_EQ"    
   progress_update_interval: 100  # milliseconds
 
 # Exchange URLs and patterns

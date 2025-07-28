@@ -241,6 +241,10 @@ class Config:
         """Get download options for data processing"""
         return self._config_data.get("download_options", {})
 
+    def get_output_directory(self) -> Path:
+        """Get base output directory for data files"""
+        return self.base_data_path
+
     def reload_config(self) -> None:
         """Reload configuration from file"""
         self.load_config()

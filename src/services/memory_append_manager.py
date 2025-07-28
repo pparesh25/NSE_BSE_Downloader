@@ -116,16 +116,20 @@ class MemoryAppendManager:
     def try_append_operations(self, target_date: date) -> Dict[str, bool]:
         """
         Try all possible append operations for the given date
-        
+
         Args:
             target_date: Date to process append operations for
-            
+
         Returns:
             Dictionary with operation results
         """
         results = {}
-        
+
         try:
+            if not HAS_PANDAS:
+                self.logger.warning("Pandas not available - skipping append operations")
+                return {'pandas_unavailable': False}
+
             self.logger.info(f"Trying append operations for {target_date}")
             available_types = self.get_available_data_types(target_date)
             self.logger.info(f"Available data types: {available_types}")
@@ -229,6 +233,10 @@ class MemoryAppendManager:
     def _save_combined_file(self, exchange: str, segment: str, data: DataFrame, target_date: date) -> bool:
         """Save combined data to file"""
         try:
+            if not HAS_PANDAS:
+                self.logger.error("Pandas not available - cannot save combined file")
+                return False
+
             # Get output directory from config
             output_dir = Path(self.config.get_output_directory()) / exchange / segment
             output_dir.mkdir(parents=True, exist_ok=True)

@@ -166,9 +166,11 @@ class MemoryAppendManager:
                 
                 sme_data = self.get_data('NSE', 'SME', target_date)
                 if sme_data is not None and not sme_data.empty:
-                    combined_data = pd.concat([combined_data, sme_data], ignore_index=True)
-                    append_count += len(sme_data)
-                    self.logger.info(f"Appended {len(sme_data)} SME rows to NSE EQ")
+                    # Ensure SME data has same columns as EQ data
+                    aligned_sme_data = self._align_columns_for_append(sme_data, combined_data)
+                    combined_data = pd.concat([combined_data, aligned_sme_data], ignore_index=True)
+                    append_count += len(aligned_sme_data)
+                    self.logger.info(f"Appended {len(aligned_sme_data)} SME rows to NSE EQ")
             
             # Add Index data if available and enabled
             if (self.is_append_enabled('index_append_to_eq') and 
@@ -176,15 +178,17 @@ class MemoryAppendManager:
                 
                 index_data = self.get_data('NSE', 'INDEX', target_date)
                 if index_data is not None and not index_data.empty:
-                    combined_data = pd.concat([combined_data, index_data], ignore_index=True)
-                    append_count += len(index_data)
-                    self.logger.info(f"Appended {len(index_data)} Index rows to NSE EQ")
+                    # Ensure Index data has same columns as EQ data
+                    aligned_index_data = self._align_columns_for_append(index_data, combined_data)
+                    combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
+                    append_count += len(aligned_index_data)
+                    self.logger.info(f"Appended {len(aligned_index_data)} Index rows to NSE EQ")
             
-            # Save combined file if any data was appended
+            # Append to real NSE EQ file if any data was appended
             if append_count > 0:
-                success = self._save_combined_file('NSE', 'EQ', combined_data, target_date)
+                success = self._append_to_real_file('NSE', 'EQ', combined_data, target_date)
                 if success:
-                    self.logger.info(f"Saved combined NSE EQ file with {append_count} additional rows")
+                    self.logger.info(f"Appended {append_count} additional rows to real NSE EQ file")
                 return success
             else:
                 self.logger.info("No data to append to NSE EQ")
@@ -216,11 +220,11 @@ class MemoryAppendManager:
                     append_count += len(index_data)
                     self.logger.info(f"Appended {len(index_data)} Index rows to BSE EQ")
             
-            # Save combined file if any data was appended
+            # Append to real BSE EQ file if any data was appended
             if append_count > 0:
-                success = self._save_combined_file('BSE', 'EQ', combined_data, target_date)
+                success = self._append_to_real_file('BSE', 'EQ', combined_data, target_date)
                 if success:
-                    self.logger.info(f"Saved combined BSE EQ file with {append_count} additional rows")
+                    self.logger.info(f"Appended {append_count} additional rows to real BSE EQ file")
                 return success
             else:
                 self.logger.info("No data to append to BSE EQ")
@@ -229,7 +233,111 @@ class MemoryAppendManager:
         except Exception as e:
             self.logger.error(f"Error in BSE EQ append: {e}")
             return False
-    
+
+    def _align_columns_for_append(self, append_data: DataFrame, base_data: DataFrame) -> DataFrame:
+        """
+        Align columns of append data to match base data structure
+
+        Args:
+            append_data: Data to be appended
+            base_data: Base data with target column structure
+
+        Returns:
+            DataFrame with aligned columns
+        """
+        try:
+            if not HAS_PANDAS:
+                return append_data
+
+            # Get base columns
+            base_columns = list(base_data.columns)
+
+            # Create aligned DataFrame with same columns as base
+            aligned_data = pd.DataFrame(columns=base_columns)
+
+            # Copy data from append_data to aligned_data for matching columns
+            for col in append_data.columns:
+                if col in base_columns:
+                    aligned_data[col] = append_data[col].values
+
+            # Fill NaN values with empty strings to maintain consistency
+            aligned_data = aligned_data.fillna('')
+
+            self.logger.info(f"Aligned {len(append_data)} rows to match base column structure")
+            return aligned_data
+
+        except Exception as e:
+            self.logger.error(f"Error aligning columns: {e}")
+            return append_data
+
+    def _append_to_real_file(self, exchange: str, segment: str, combined_data: DataFrame, target_date: date) -> bool:
+        """
+        Append data to the real EQ file instead of creating separate combined file
+
+        Args:
+            exchange: Exchange name (NSE/BSE)
+            segment: Segment name (EQ)
+            combined_data: Combined data including EQ + SME + Index
+            target_date: Date of the data
+
+        Returns:
+            True if append successful
+        """
+        try:
+            if not HAS_PANDAS:
+                self.logger.error("Pandas not available - cannot append to real file")
+                return False
+
+            # Find the real EQ file
+            output_dir = Path(self.config.get_output_directory()) / exchange / segment
+            date_str = target_date.strftime("%d%m%Y")
+
+            # Look for existing EQ file (both .csv and .txt formats)
+            possible_files = [
+                output_dir / f"{exchange}_{segment}_{date_str}.csv",
+                output_dir / f"{exchange}_{segment}_{date_str}.txt",
+                output_dir / f"{target_date.strftime('%Y-%m-%d')}-{exchange}-{segment}.txt",
+                output_dir / f"{target_date.strftime('%Y-%m-%d')}-{exchange}-{segment}.csv"
+            ]
+
+            real_file = None
+            for file_path in possible_files:
+                if file_path.exists():
+                    real_file = file_path
+                    break
+
+            if not real_file:
+                self.logger.warning(f"Real {exchange} {segment} file not found for {target_date}")
+                return False
+
+            self.logger.info(f"Found real file: {real_file}")
+
+            # Get only the appended data (exclude original EQ data)
+            eq_data = self.get_data(exchange, segment, target_date)
+            if eq_data is None:
+                return False
+
+            original_count = len(eq_data)
+            total_count = len(combined_data)
+            append_data = combined_data.iloc[original_count:]  # Get only appended rows
+
+            if len(append_data) == 0:
+                self.logger.info("No data to append")
+                return True
+
+            # Append to real file without headers
+            with open(real_file, 'a', encoding='utf-8') as f:
+                # Convert DataFrame to CSV format without headers
+                csv_content = append_data.to_csv(index=False, header=False)
+                f.write(csv_content)
+
+            self.logger.info(f"Successfully appended {len(append_data)} rows to {real_file}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error appending to real file: {e}")
+            return False
+
     def _save_combined_file(self, exchange: str, segment: str, data: DataFrame, target_date: date) -> bool:
         """Save combined data to file"""
         try:

@@ -196,6 +196,42 @@ class UserPreferences:
                 self.preferences["download_options"][key] = value
         self.save_preferences()
 
+    def get_sme_add_suffix(self) -> bool:
+        """Get SME add suffix setting"""
+        return self.preferences.get("download_options", {}).get("sme_add_suffix", False)
+
+    def set_sme_add_suffix(self, enabled: bool) -> None:
+        """Set SME add suffix setting"""
+        self.preferences["download_options"]["sme_add_suffix"] = enabled
+        self.save_preferences()
+
+    def get_sme_append_to_eq(self) -> bool:
+        """Get SME append to EQ setting"""
+        return self.preferences.get("download_options", {}).get("sme_append_to_eq", False)
+
+    def set_sme_append_to_eq(self, enabled: bool) -> None:
+        """Set SME append to EQ setting"""
+        self.preferences["download_options"]["sme_append_to_eq"] = enabled
+        self.save_preferences()
+
+    def get_index_append_to_eq(self) -> bool:
+        """Get Index append to EQ setting"""
+        return self.preferences.get("download_options", {}).get("index_append_to_eq", False)
+
+    def set_index_append_to_eq(self, enabled: bool) -> None:
+        """Set Index append to EQ setting"""
+        self.preferences["download_options"]["index_append_to_eq"] = enabled
+        self.save_preferences()
+
+    def get_bse_index_append_to_eq(self) -> bool:
+        """Get BSE Index append to EQ setting"""
+        return self.preferences.get("download_options", {}).get("bse_index_append_to_eq", False)
+
+    def set_bse_index_append_to_eq(self, enabled: bool) -> None:
+        """Set BSE Index append to EQ setting"""
+        self.preferences["download_options"]["bse_index_append_to_eq"] = enabled
+        self.save_preferences()
+
     # GUI Settings Methods
     def get_gui_settings(self) -> Dict[str, Any]:
         """Get GUI settings"""

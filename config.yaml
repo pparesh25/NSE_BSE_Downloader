@@ -33,7 +33,7 @@ download_options:
 
 # Date settings
 date_settings:
-  base_start_date: "2025-07-01"  # Default start date for first run
+  base_start_date: "2025-07-14"  # Default start date for first run
   weekend_skip: true  # Skip weekends automatically (can be overridden by user)
   holiday_skip: true  # Skip known holidays
   allow_weekend_override: true  # Allow user to download weekend data

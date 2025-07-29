@@ -489,14 +489,16 @@ class MainWindow(QMainWindow):
 
         self.sme_suffix_checkbox = QCheckBox("Add '_SME' suffix to NSE SME symbol")
         self.sme_suffix_checkbox.setToolTip("Add '_SME' suffix to symbol names in NSE SME data")
-        self.sme_suffix_checkbox.setChecked(False)
+        self.sme_suffix_checkbox.setChecked(self.user_prefs.get_sme_add_suffix())  # Load from preferences
         self.sme_suffix_checkbox.setVisible(False)
+        self.sme_suffix_checkbox.stateChanged.connect(self.on_append_option_changed)
         self.sme_options_row.addWidget(self.sme_suffix_checkbox)
 
         self.sme_append_checkbox = QCheckBox("Append NSE SME data to NSE EQ file")
         self.sme_append_checkbox.setToolTip("Combine NSE SME data with NSE EQ data in single file")
-        self.sme_append_checkbox.setChecked(False)
+        self.sme_append_checkbox.setChecked(self.user_prefs.get_sme_append_to_eq())  # Load from preferences
         self.sme_append_checkbox.setVisible(False)
+        self.sme_append_checkbox.stateChanged.connect(self.on_append_option_changed)
         self.sme_options_row.addWidget(self.sme_append_checkbox)
 
         self.sme_options_row.addStretch()
@@ -507,8 +509,9 @@ class MainWindow(QMainWindow):
 
         self.index_append_checkbox = QCheckBox("Add NSE Index data to NSE EQ file")
         self.index_append_checkbox.setToolTip("Append NSE Index data to NSE EQ files")
-        self.index_append_checkbox.setChecked(False)
+        self.index_append_checkbox.setChecked(self.user_prefs.get_index_append_to_eq())  # Load from preferences
         self.index_append_checkbox.setVisible(False)
+        self.index_append_checkbox.stateChanged.connect(self.on_append_option_changed)
         self.index_options_row.addWidget(self.index_append_checkbox)
 
         self.index_options_row.addStretch()
@@ -519,8 +522,9 @@ class MainWindow(QMainWindow):
 
         self.bse_index_append_checkbox = QCheckBox("Add BSE Index data to BSE EQ file")
         self.bse_index_append_checkbox.setToolTip("Append BSE Index data to BSE EQ files")
-        self.bse_index_append_checkbox.setChecked(False)
+        self.bse_index_append_checkbox.setChecked(self.user_prefs.get_bse_index_append_to_eq())  # Load from preferences
         self.bse_index_append_checkbox.setVisible(False)
+        self.bse_index_append_checkbox.stateChanged.connect(self.on_append_option_changed)
         self.bse_index_options_row.addWidget(self.bse_index_append_checkbox)
 
         self.bse_index_options_row.addStretch()
@@ -909,6 +913,23 @@ class MainWindow(QMainWindow):
                 f"A new version is available: {update_info.get('latest_version', 'Unknown')}\n"
                 f"Please visit GitHub to download the update."
             )
+
+    def on_append_option_changed(self):
+        """Handle append option checkbox changes"""
+        try:
+            # Save all append options to user preferences
+            append_options = {
+                "sme_add_suffix": self.sme_suffix_checkbox.isChecked(),
+                "sme_append_to_eq": self.sme_append_checkbox.isChecked(),
+                "index_append_to_eq": self.index_append_checkbox.isChecked(),
+                "bse_index_append_to_eq": self.bse_index_append_checkbox.isChecked()
+            }
+
+            self.user_prefs.set_append_options(append_options)
+            self.logger.info(f"Saved append options: {append_options}")
+
+        except Exception as e:
+            self.logger.error(f"Error saving append options: {e}")
 
     def on_exchange_selection_changed(self):
         """Handle exchange selection changes"""

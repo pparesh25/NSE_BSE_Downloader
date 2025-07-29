@@ -23,6 +23,7 @@ except ImportError:
 
 from ..core.config import Config
 from ..core.exceptions import FileOperationError
+from ..utils.user_preferences import UserPreferences
 
 
 class MemoryAppendManager:
@@ -39,6 +40,7 @@ class MemoryAppendManager:
     def __init__(self, config: Config):
         """Initialize memory append manager"""
         self.config = config
+        self.user_prefs = UserPreferences()
         self.logger = logging.getLogger(__name__)
         
         # Simple memory storage: key -> DataFrame
@@ -109,7 +111,13 @@ class MemoryAppendManager:
         return self.available_data.get(date_key, set())
     
     def is_append_enabled(self, option_name: str) -> bool:
-        """Check if append option is enabled"""
+        """Check if append option is enabled from user preferences"""
+        # First check user preferences, then fallback to config
+        append_options = self.user_prefs.get_append_options()
+        if option_name in append_options:
+            return append_options[option_name]
+
+        # Fallback to config if not in user preferences
         download_options = self.config.get_download_options()
         return download_options.get(option_name, False)
     
@@ -168,9 +176,10 @@ class MemoryAppendManager:
                 if sme_data is not None and not sme_data.empty:
                     # Ensure SME data has same columns as EQ data
                     aligned_sme_data = self._align_columns_for_append(sme_data, combined_data)
-                    combined_data = pd.concat([combined_data, aligned_sme_data], ignore_index=True)
-                    append_count += len(aligned_sme_data)
-                    self.logger.info(f"Appended {len(aligned_sme_data)} SME rows to NSE EQ")
+                    if not aligned_sme_data.empty:  # Only concat if data is not empty
+                        combined_data = pd.concat([combined_data, aligned_sme_data], ignore_index=True)
+                        append_count += len(aligned_sme_data)
+                        self.logger.info(f"Appended {len(aligned_sme_data)} SME rows to NSE EQ")
             
             # Add Index data if available and enabled
             if (self.is_append_enabled('index_append_to_eq') and 
@@ -180,9 +189,10 @@ class MemoryAppendManager:
                 if index_data is not None and not index_data.empty:
                     # Ensure Index data has same columns as EQ data
                     aligned_index_data = self._align_columns_for_append(index_data, combined_data)
-                    combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
-                    append_count += len(aligned_index_data)
-                    self.logger.info(f"Appended {len(aligned_index_data)} Index rows to NSE EQ")
+                    if not aligned_index_data.empty:  # Only concat if data is not empty
+                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
+                        append_count += len(aligned_index_data)
+                        self.logger.info(f"Appended {len(aligned_index_data)} Index rows to NSE EQ")
             
             # Append to real NSE EQ file if any data was appended
             if append_count > 0:
@@ -216,9 +226,12 @@ class MemoryAppendManager:
                 
                 index_data = self.get_data('BSE', 'INDEX', target_date)
                 if index_data is not None and not index_data.empty:
-                    combined_data = pd.concat([combined_data, index_data], ignore_index=True)
-                    append_count += len(index_data)
-                    self.logger.info(f"Appended {len(index_data)} Index rows to BSE EQ")
+                    # Ensure Index data has same columns as EQ data
+                    aligned_index_data = self._align_columns_for_append(index_data, combined_data)
+                    if not aligned_index_data.empty:  # Only concat if data is not empty
+                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
+                        append_count += len(aligned_index_data)
+                        self.logger.info(f"Appended {len(aligned_index_data)} Index rows to BSE EQ")
             
             # Append to real BSE EQ file if any data was appended
             if append_count > 0:

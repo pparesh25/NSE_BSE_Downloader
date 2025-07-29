@@ -41,7 +41,12 @@ class UserPreferences:
             },
             "download_options": {
                 "include_weekends": False,
-                "timeout_seconds": 5
+                "timeout_seconds": 5,
+                # Append options
+                "sme_add_suffix": False,
+                "sme_append_to_eq": False,
+                "index_append_to_eq": False,
+                "bse_index_append_to_eq": False
             },
             "gui_settings": {
                 "window_width": 800,
@@ -173,9 +178,24 @@ class UserPreferences:
         """Set timeout seconds setting"""
         self.preferences["download_options"]["timeout_seconds"] = timeout
         self.save_preferences()
-    
 
-    
+    # Append Options Methods
+    def get_append_options(self) -> Dict[str, bool]:
+        """Get all append options"""
+        return {
+            "sme_add_suffix": self.preferences.get("download_options", {}).get("sme_add_suffix", False),
+            "sme_append_to_eq": self.preferences.get("download_options", {}).get("sme_append_to_eq", False),
+            "index_append_to_eq": self.preferences.get("download_options", {}).get("index_append_to_eq", False),
+            "bse_index_append_to_eq": self.preferences.get("download_options", {}).get("bse_index_append_to_eq", False)
+        }
+
+    def set_append_options(self, options: Dict[str, bool]) -> None:
+        """Set append options"""
+        for key, value in options.items():
+            if key in ["sme_add_suffix", "sme_append_to_eq", "index_append_to_eq", "bse_index_append_to_eq"]:
+                self.preferences["download_options"][key] = value
+        self.save_preferences()
+
     # GUI Settings Methods
     def get_gui_settings(self) -> Dict[str, Any]:
         """Get GUI settings"""

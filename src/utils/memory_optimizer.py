@@ -168,9 +168,11 @@ class MemoryOptimizer:
                     if 'int' in str(col_type):
                         optimized_df[col] = pd.to_numeric(optimized_df[col], downcast='integer')
                     
-                    # Downcast floats
+                    # Downcast floats (but preserve precision for financial data)
                     elif 'float' in str(col_type):
-                        optimized_df[col] = pd.to_numeric(optimized_df[col], downcast='float')
+                        # Skip float downcasting for financial data to preserve precision
+                        # optimized_df[col] = pd.to_numeric(optimized_df[col], downcast='float')
+                        pass  # Keep original float64 precision
                 
                 else:
                     # Convert object columns to category if beneficial

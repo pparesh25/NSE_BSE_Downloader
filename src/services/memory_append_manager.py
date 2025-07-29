@@ -45,10 +45,13 @@ class MemoryAppendManager:
         
         # Simple memory storage: key -> DataFrame
         self.memory_store: Dict[str, DataFrame] = {}
-        
+
         # Track what data we have for each date
         self.available_data: Dict[str, Set[str]] = {}  # date -> set of data types
-        
+
+        # Track completed append operations to prevent duplicates
+        self.completed_appends: Dict[str, Set[str]] = {}  # date -> set of completed append types
+
         self.logger.info("Memory Append Manager initialized")
     
     def _get_data_key(self, exchange: str, segment: str, target_date: date) -> str:
@@ -114,12 +117,18 @@ class MemoryAppendManager:
         """Check if append option is enabled from user preferences"""
         # First check user preferences, then fallback to config
         append_options = self.user_prefs.get_append_options()
+        self.logger.debug(f"User preferences append options: {append_options}")
+
         if option_name in append_options:
-            return append_options[option_name]
+            result = append_options[option_name]
+            self.logger.debug(f"Option '{option_name}' from user preferences: {result}")
+            return result
 
         # Fallback to config if not in user preferences
         download_options = self.config.get_download_options()
-        return download_options.get(option_name, False)
+        result = download_options.get(option_name, False)
+        self.logger.debug(f"Option '{option_name}' from config (fallback): {result}")
+        return result
     
     def try_append_operations(self, target_date: date) -> Dict[str, bool]:
         """
@@ -159,92 +168,173 @@ class MemoryAppendManager:
     def _try_nse_eq_append(self, target_date: date) -> bool:
         """Try NSE EQ append operations (SME + Index)"""
         try:
+            # Check if append already completed for this date
+            date_key = self._get_date_key(target_date)
+            if date_key in self.completed_appends and 'nse_eq_append' in self.completed_appends[date_key]:
+                self.logger.info(f"NSE EQ append already completed for {target_date}")
+                return True
+
             # Get base NSE EQ data
             eq_data = self.get_data('NSE', 'EQ', target_date)
             if eq_data is None:
                 self.logger.warning(f"NSE EQ data not available for {target_date}")
                 return False
-            
+
+            self.logger.info(f"Starting NSE EQ append for {target_date} with {len(eq_data)} base rows")
             combined_data = eq_data.copy()
             append_count = 0
-            
+
+            # Check append options
+            sme_append_enabled = self.is_append_enabled('sme_append_to_eq')
+            index_append_enabled = self.is_append_enabled('index_append_to_eq')
+            self.logger.info(f"Append options - SME: {sme_append_enabled}, Index: {index_append_enabled}")
+
             # Add SME data if available and enabled
-            if (self.is_append_enabled('sme_append_to_eq') and 
-                self.has_data('NSE', 'SME', target_date)):
-                
+            if sme_append_enabled and self.has_data('NSE', 'SME', target_date):
                 sme_data = self.get_data('NSE', 'SME', target_date)
                 if sme_data is not None and not sme_data.empty:
+                    self.logger.info(f"Found SME data with {len(sme_data)} rows")
                     # Ensure SME data has same columns as EQ data
                     aligned_sme_data = self._align_columns_for_append(sme_data, combined_data)
                     if not aligned_sme_data.empty:  # Only concat if data is not empty
-                        combined_data = pd.concat([combined_data, aligned_sme_data], ignore_index=True)
+                        # Use sort=False to avoid FutureWarning about column sorting
+                        combined_data = pd.concat([combined_data, aligned_sme_data], ignore_index=True, sort=False)
                         append_count += len(aligned_sme_data)
                         self.logger.info(f"Appended {len(aligned_sme_data)} SME rows to NSE EQ")
-            
+                    else:
+                        self.logger.warning("SME data alignment resulted in empty DataFrame")
+                else:
+                    self.logger.warning("SME data is None or empty")
+            else:
+                if not sme_append_enabled:
+                    self.logger.info("SME append is disabled")
+                else:
+                    self.logger.info("No SME data available for append")
+
             # Add Index data if available and enabled
-            if (self.is_append_enabled('index_append_to_eq') and 
-                self.has_data('NSE', 'INDEX', target_date)):
-                
+            if index_append_enabled and self.has_data('NSE', 'INDEX', target_date):
                 index_data = self.get_data('NSE', 'INDEX', target_date)
                 if index_data is not None and not index_data.empty:
+                    self.logger.info(f"Found Index data with {len(index_data)} rows")
                     # Ensure Index data has same columns as EQ data
                     aligned_index_data = self._align_columns_for_append(index_data, combined_data)
                     if not aligned_index_data.empty:  # Only concat if data is not empty
-                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
+                        # Use sort=False to avoid FutureWarning about column sorting
+                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True, sort=False)
                         append_count += len(aligned_index_data)
                         self.logger.info(f"Appended {len(aligned_index_data)} Index rows to NSE EQ")
-            
+                    else:
+                        self.logger.warning("Index data alignment resulted in empty DataFrame")
+                else:
+                    self.logger.warning("Index data is None or empty")
+            else:
+                if not index_append_enabled:
+                    self.logger.info("Index append is disabled")
+                else:
+                    self.logger.info("No Index data available for append")
+
             # Append to real NSE EQ file if any data was appended
             if append_count > 0:
+                self.logger.info(f"Attempting to append {append_count} rows to real NSE EQ file")
                 success = self._append_to_real_file('NSE', 'EQ', combined_data, target_date)
                 if success:
-                    self.logger.info(f"Appended {append_count} additional rows to real NSE EQ file")
+                    self.logger.info(f"Successfully appended {append_count} additional rows to real NSE EQ file")
+                    # Mark append as completed
+                    if date_key not in self.completed_appends:
+                        self.completed_appends[date_key] = set()
+                    self.completed_appends[date_key].add('nse_eq_append')
+                else:
+                    self.logger.error(f"Failed to append {append_count} rows to real NSE EQ file")
                 return success
             else:
                 self.logger.info("No data to append to NSE EQ")
+                # Mark as completed even if no data to append
+                if date_key not in self.completed_appends:
+                    self.completed_appends[date_key] = set()
+                self.completed_appends[date_key].add('nse_eq_append')
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error in NSE EQ append: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     def _try_bse_eq_append(self, target_date: date) -> bool:
         """Try BSE EQ append operations (Index)"""
         try:
+            # Check if append already completed for this date
+            date_key = self._get_date_key(target_date)
+            if date_key in self.completed_appends and 'bse_eq_append' in self.completed_appends[date_key]:
+                self.logger.info(f"BSE EQ append already completed for {target_date}")
+                return True
+
             # Get base BSE EQ data
             eq_data = self.get_data('BSE', 'EQ', target_date)
             if eq_data is None:
                 self.logger.warning(f"BSE EQ data not available for {target_date}")
                 return False
-            
+
+            self.logger.info(f"Starting BSE EQ append for {target_date} with {len(eq_data)} base rows")
             combined_data = eq_data.copy()
             append_count = 0
-            
+
+            # Check append options
+            index_append_enabled = self.is_append_enabled('bse_index_append_to_eq')
+            self.logger.info(f"BSE Index append enabled: {index_append_enabled}")
+
             # Add Index data if available and enabled
-            if (self.is_append_enabled('bse_index_append_to_eq') and 
-                self.has_data('BSE', 'INDEX', target_date)):
-                
+            if index_append_enabled and self.has_data('BSE', 'INDEX', target_date):
                 index_data = self.get_data('BSE', 'INDEX', target_date)
                 if index_data is not None and not index_data.empty:
+                    self.logger.info(f"Found BSE Index data with {len(index_data)} rows")
+                    self.logger.debug(f"BSE Index data columns: {list(index_data.columns)}")
+                    self.logger.debug(f"BSE EQ data columns: {list(combined_data.columns)}")
+
                     # Ensure Index data has same columns as EQ data
                     aligned_index_data = self._align_columns_for_append(index_data, combined_data)
                     if not aligned_index_data.empty:  # Only concat if data is not empty
-                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True)
+                        # Use sort=False to avoid FutureWarning about column sorting
+                        combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True, sort=False)
                         append_count += len(aligned_index_data)
                         self.logger.info(f"Appended {len(aligned_index_data)} Index rows to BSE EQ")
-            
+                    else:
+                        self.logger.warning("BSE Index data alignment resulted in empty DataFrame")
+                else:
+                    self.logger.warning("BSE Index data is None or empty")
+            else:
+                if not index_append_enabled:
+                    self.logger.info("BSE Index append is disabled")
+                else:
+                    self.logger.info(f"No BSE Index data available for append. Has BSE INDEX data: {self.has_data('BSE', 'INDEX', target_date)}")
+                    available_types = self.get_available_data_types(target_date)
+                    self.logger.info(f"Available data types for {target_date}: {available_types}")
+
             # Append to real BSE EQ file if any data was appended
             if append_count > 0:
+                self.logger.info(f"Attempting to append {append_count} rows to real BSE EQ file")
                 success = self._append_to_real_file('BSE', 'EQ', combined_data, target_date)
                 if success:
-                    self.logger.info(f"Appended {append_count} additional rows to real BSE EQ file")
+                    self.logger.info(f"Successfully appended {append_count} additional rows to real BSE EQ file")
+                    # Mark append as completed
+                    if date_key not in self.completed_appends:
+                        self.completed_appends[date_key] = set()
+                    self.completed_appends[date_key].add('bse_eq_append')
+                else:
+                    self.logger.error(f"Failed to append {append_count} rows to real BSE EQ file")
                 return success
             else:
                 self.logger.info("No data to append to BSE EQ")
+                # Mark as completed even if no data to append
+                if date_key not in self.completed_appends:
+                    self.completed_appends[date_key] = set()
+                self.completed_appends[date_key].add('bse_eq_append')
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error in BSE EQ append: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def _align_columns_for_append(self, append_data: DataFrame, base_data: DataFrame) -> DataFrame:
@@ -262,6 +352,17 @@ class MemoryAppendManager:
             if not HAS_PANDAS:
                 return append_data
 
+            self.logger.debug(f"Aligning columns - Base columns: {list(base_data.columns)}")
+            self.logger.debug(f"Aligning columns - Append columns: {list(append_data.columns)}")
+
+            # If both DataFrames have the same number of columns, assume they match
+            if len(append_data.columns) == len(base_data.columns):
+                # Create a copy with base column names
+                aligned_data = append_data.copy()
+                aligned_data.columns = base_data.columns
+                self.logger.info(f"Aligned {len(append_data)} rows by matching column count")
+                return aligned_data
+
             # Get base columns
             base_columns = list(base_data.columns)
 
@@ -272,15 +373,22 @@ class MemoryAppendManager:
             for col in append_data.columns:
                 if col in base_columns:
                     aligned_data[col] = append_data[col].values
+                else:
+                    self.logger.warning(f"Column '{col}' from append data not found in base columns")
 
             # Fill NaN values with empty strings to maintain consistency
             aligned_data = aligned_data.fillna('')
 
-            self.logger.info(f"Aligned {len(append_data)} rows to match base column structure")
+            # Remove rows that are completely empty (all columns are empty strings)
+            aligned_data = aligned_data.loc[~(aligned_data == '').all(axis=1)]
+
+            self.logger.info(f"Aligned {len(aligned_data)} rows (from {len(append_data)}) to match base column structure")
             return aligned_data
 
         except Exception as e:
             self.logger.error(f"Error aligning columns: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return append_data
 
     def _append_to_real_file(self, exchange: str, segment: str, combined_data: DataFrame, target_date: date) -> bool:
@@ -301,16 +409,23 @@ class MemoryAppendManager:
                 self.logger.error("Pandas not available - cannot append to real file")
                 return False
 
-            # Find the real EQ file
+            # Find the real EQ file using the same naming convention as build_filename
             output_dir = Path(self.config.get_output_directory()) / exchange / segment
-            date_str = target_date.strftime("%d%m%Y")
+
+            # Get the file suffix from exchange config
+            exchange_config = self.config.get_exchange_config(exchange, segment)
+            file_suffix = exchange_config.file_suffix if exchange_config else f"-{exchange}-{segment}"
+
+            # Build filename using the same pattern as BaseDownloader.build_filename
+            date_str = target_date.strftime('%Y-%m-%d')
 
             # Look for existing EQ file (both .csv and .txt formats)
             possible_files = [
-                output_dir / f"{exchange}_{segment}_{date_str}.csv",
-                output_dir / f"{exchange}_{segment}_{date_str}.txt",
-                output_dir / f"{target_date.strftime('%Y-%m-%d')}-{exchange}-{segment}.txt",
-                output_dir / f"{target_date.strftime('%Y-%m-%d')}-{exchange}-{segment}.csv"
+                output_dir / f"{date_str}{file_suffix}.txt",
+                output_dir / f"{date_str}{file_suffix}.csv",
+                # Legacy patterns for backward compatibility
+                output_dir / f"{exchange}_{segment}_{target_date.strftime('%d%m%Y')}.csv",
+                output_dir / f"{exchange}_{segment}_{target_date.strftime('%d%m%Y')}.txt"
             ]
 
             real_file = None
@@ -321,6 +436,7 @@ class MemoryAppendManager:
 
             if not real_file:
                 self.logger.warning(f"Real {exchange} {segment} file not found for {target_date}")
+                self.logger.debug(f"Searched for files: {[str(f) for f in possible_files]}")
                 return False
 
             self.logger.info(f"Found real file: {real_file}")
@@ -340,8 +456,8 @@ class MemoryAppendManager:
 
             # Append to real file without headers
             with open(real_file, 'a', encoding='utf-8') as f:
-                # Convert DataFrame to CSV format without headers
-                csv_content = append_data.to_csv(index=False, header=False)
+                # Convert DataFrame to CSV format without headers, with proper float formatting
+                csv_content = append_data.to_csv(index=False, header=False, float_format='%.2f')
                 f.write(csv_content)
 
             self.logger.info(f"Successfully appended {len(append_data)} rows to {real_file}")

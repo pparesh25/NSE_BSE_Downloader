@@ -89,7 +89,10 @@ class UpdateDialog(QDialog):
     def setup_ui(self):
         """Setup the user interface"""
         self.setWindowTitle("🚀 Update Available")
-        self.setFixedSize(600, 500)
+        self.resize(500, 900)
+        self.setMinimumSize(420, 830)
+        self.setMaximumSize(550, 950)
+        self.setModal(True)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         
         # Main layout

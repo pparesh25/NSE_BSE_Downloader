@@ -177,9 +177,13 @@ class BSEIndexDownloader(BaseDownloader):
                 df['Date'] = date_str
                 self.logger.info(f"  Added Date column: {date_str}")
 
-                # Reorder columns: IndexName first, then Date, then price columns
-                # Required format: IndexName, Date, OpenPrice, HighPrice, LowPrice, ClosePrice
-                column_order = ['IndexName', 'Date', 'OpenPrice', 'HighPrice', 'LowPrice', 'ClosePrice']
+                # Add VOLUME column with 0 values (Index data typically has no volume)
+                df['Volume'] = 0
+                self.logger.info(f"  Added Volume column with 0 values for Index data")
+
+                # Reorder columns: IndexName first, then Date, then price columns, then Volume
+                # Required format: IndexName, Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+                column_order = ['IndexName', 'Date', 'OpenPrice', 'HighPrice', 'LowPrice', 'ClosePrice', 'Volume']
 
                 # Ensure all required columns exist
                 available_columns = [col for col in column_order if col in df.columns]

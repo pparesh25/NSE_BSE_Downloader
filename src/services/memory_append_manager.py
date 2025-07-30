@@ -52,6 +52,9 @@ class MemoryAppendManager:
         # Track completed append operations to prevent duplicates
         self.completed_appends: Dict[str, Set[str]] = {}  # date -> set of completed append types
 
+        # Track pending append operations (for delayed execution when data becomes available)
+        self.pending_appends: Dict[str, Set[str]] = {}  # date -> set of pending operations
+
         self.logger.info("Memory Append Manager initialized")
     
     def _get_data_key(self, exchange: str, segment: str, target_date: date) -> str:
@@ -92,6 +95,10 @@ class MemoryAppendManager:
             self.available_data[date_key].add(f"{exchange}_{segment}")
             
             self.logger.info(f"Stored {exchange} {segment} data in memory: {len(data)} rows for {target_date}")
+
+            # Check if this storage enables any pending append operations
+            self._check_pending_appends(target_date)
+
             return True
             
         except Exception as e:
@@ -129,6 +136,44 @@ class MemoryAppendManager:
         result = download_options.get(option_name, False)
         self.logger.debug(f"Option '{option_name}' from config (fallback): {result}")
         return result
+
+    def _mark_append_as_pending(self, target_date: date, append_type: str) -> None:
+        """Mark an append operation as pending"""
+        date_key = self._get_date_key(target_date)
+        if date_key not in self.pending_appends:
+            self.pending_appends[date_key] = set()
+        self.pending_appends[date_key].add(append_type)
+        self.logger.info(f"Marked {append_type} as pending for {target_date}")
+
+    def _check_pending_appends(self, target_date: date) -> None:
+        """Check and execute any pending append operations for this date"""
+        date_key = self._get_date_key(target_date)
+        if date_key not in self.pending_appends:
+            return
+
+        pending_ops = self.pending_appends[date_key].copy()
+        self.logger.info(f"Checking pending append operations for {target_date}: {pending_ops}")
+
+        for append_type in pending_ops:
+            success = False
+            if append_type == 'bse_eq_append':
+                # Check if both BSE EQ and BSE INDEX are now available
+                if self.has_data('BSE', 'EQ', target_date) and self.has_data('BSE', 'INDEX', target_date):
+                    self.logger.info(f"Both BSE EQ and INDEX data available - executing pending BSE append")
+                    success = self._try_bse_eq_append(target_date)
+            elif append_type == 'nse_eq_append':
+                # Check if NSE EQ is available (SME and INDEX are optional)
+                if self.has_data('NSE', 'EQ', target_date):
+                    self.logger.info(f"NSE EQ data available - executing pending NSE append")
+                    success = self._try_nse_eq_append(target_date)
+
+            if success:
+                self.pending_appends[date_key].discard(append_type)
+                self.logger.info(f"Successfully executed pending {append_type} for {target_date}")
+
+        # Clean up empty pending sets
+        if not self.pending_appends[date_key]:
+            del self.pending_appends[date_key]
     
     def try_append_operations(self, target_date: date) -> Dict[str, bool]:
         """
@@ -155,10 +200,14 @@ class MemoryAppendManager:
             if 'NSE_EQ' in available_types:
                 results['nse_eq_append'] = self._try_nse_eq_append(target_date)
             
-            # BSE Index → BSE EQ  
+            # BSE Index → BSE EQ
             if 'BSE_EQ' in available_types:
                 results['bse_eq_append'] = self._try_bse_eq_append(target_date)
-            
+            else:
+                # Mark BSE append as pending if BSE EQ is not available yet
+                if 'BSE_INDEX' in available_types:
+                    self._mark_append_as_pending(target_date, 'bse_eq_append')
+
             return results
             
         except Exception as e:
@@ -283,9 +332,21 @@ class MemoryAppendManager:
             index_append_enabled = self.is_append_enabled('bse_index_append_to_eq')
             self.logger.info(f"BSE Index append enabled: {index_append_enabled}")
 
+            # Debug: Log user preferences and config values
+            user_append_options = self.user_prefs.get_append_options()
+            config_download_options = self.config.get_download_options()
+            self.logger.debug(f"User preferences BSE append: {user_append_options.get('bse_index_append_to_eq', 'NOT_SET')}")
+            self.logger.debug(f"Config BSE append: {config_download_options.get('bse_index_append_to_eq', 'NOT_SET')}")
+            self.logger.debug(f"Final BSE append decision: {index_append_enabled}")
+
             # Add Index data if available and enabled
+            self.logger.debug(f"BSE append check: enabled={index_append_enabled}, has_data={self.has_data('BSE', 'INDEX', target_date)}")
+
             if index_append_enabled and self.has_data('BSE', 'INDEX', target_date):
+                self.logger.info("BSE Index append conditions met - proceeding with append")
                 index_data = self.get_data('BSE', 'INDEX', target_date)
+                self.logger.debug(f"Retrieved BSE Index data: {index_data is not None}, empty={index_data.empty if index_data is not None else 'N/A'}")
+
                 if index_data is not None and not index_data.empty:
                     self.logger.info(f"Found BSE Index data with {len(index_data)} rows")
                     self.logger.debug(f"BSE Index data columns: {list(index_data.columns)}")
@@ -309,6 +370,11 @@ class MemoryAppendManager:
                     self.logger.info(f"No BSE Index data available for append. Has BSE INDEX data: {self.has_data('BSE', 'INDEX', target_date)}")
                     available_types = self.get_available_data_types(target_date)
                     self.logger.info(f"Available data types for {target_date}: {available_types}")
+
+                    # If BSE INDEX data is not available yet, mark this append as pending
+                    if index_append_enabled:
+                        self._mark_append_as_pending(target_date, 'bse_eq_append')
+                        self.logger.info("BSE append marked as pending - will retry when BSE INDEX data becomes available")
 
             # Append to real BSE EQ file if any data was appended
             if append_count > 0:

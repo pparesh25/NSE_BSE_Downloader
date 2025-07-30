@@ -258,6 +258,10 @@ class BaseDownloader(ABC):
             if append_results:
                 self.logger.info(f"Append operations completed: {append_results}")
 
+            # Special handling for BSE EQ - try direct file append if memory append failed
+            if self.exchange == 'BSE' and self.segment == 'EQ':
+                self._try_direct_bse_append(target_date, output_path)
+
             return output_path
             
         except Exception as e:
@@ -267,6 +271,47 @@ class BaseDownloader(ABC):
                 operation="save_csv"
             ) from e
     
+    def _try_direct_bse_append(self, target_date: date, bse_eq_file_path: Path) -> None:
+        """Try direct BSE INDEX to BSE EQ file append (fallback method)"""
+        try:
+            # Check if BSE append is enabled
+            user_prefs = self.memory_append_manager.user_prefs
+            if not user_prefs.get_bse_index_append_to_eq():
+                self.logger.debug("BSE Index append disabled - skipping direct append")
+                return
+
+            # Look for BSE INDEX file for the same date
+            bse_index_file_path = self.data_path.parent / "INDEX" / f"{target_date.strftime('%Y-%m-%d')}-BSE-INDEX.txt"
+
+            if not bse_index_file_path.exists():
+                self.logger.debug(f"BSE INDEX file not found for direct append: {bse_index_file_path}")
+                return
+
+            # Check if append already done (look for BSE SENSEX in EQ file)
+            with open(bse_eq_file_path, 'r') as f:
+                eq_content = f.read()
+
+            if "BSE SENSEX" in eq_content:
+                self.logger.debug("BSE INDEX data already appears to be in EQ file - skipping direct append")
+                return
+
+            # Read BSE INDEX data
+            with open(bse_index_file_path, 'r') as f:
+                index_lines = f.readlines()
+
+            if not index_lines:
+                self.logger.warning("BSE INDEX file is empty - skipping direct append")
+                return
+
+            # Append INDEX data to EQ file
+            with open(bse_eq_file_path, 'a') as f:
+                f.writelines(index_lines)
+
+            self.logger.info(f"✅ Direct BSE append completed: Added {len(index_lines)} INDEX rows to {bse_eq_file_path.name}")
+
+        except Exception as e:
+            self.logger.error(f"Error in direct BSE append: {e}")
+
     def cleanup_temp_files(self) -> None:
         """Clean up temporary files for this downloader (no longer needed)"""
         pass  # No temp files to clean up with memory-based processing

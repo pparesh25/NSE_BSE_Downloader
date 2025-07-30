@@ -139,10 +139,16 @@ class NSESMEDownloader(BaseDownloader):
                 df = df.drop(columns=existing_columns)
 
                 # Add '_SME' suffix to symbol names if option is enabled
-                download_options = self.config.get_download_options()
-                if download_options.get('sme_add_suffix', False) and 'SYMBOL' in df.columns:
+                # Check user preferences first, then fallback to config
+                from src.utils.user_preferences import UserPreferences
+                user_prefs = UserPreferences()
+                sme_add_suffix = user_prefs.get_sme_add_suffix()
+
+                if sme_add_suffix and 'SYMBOL' in df.columns:
                     df['SYMBOL'] = df['SYMBOL'].astype(str) + '_SME'
                     self.logger.info("Added '_SME' suffix to symbol names")
+                else:
+                    self.logger.info("SME suffix option disabled - keeping original symbol names")
 
                 # Optimize memory usage
                 df = self.memory_optimizer.optimize_dataframe(df)

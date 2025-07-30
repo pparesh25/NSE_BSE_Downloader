@@ -357,11 +357,16 @@ class MemoryAppendManager:
 
             # If both DataFrames have the same number of columns, assume they match
             if len(append_data.columns) == len(base_data.columns):
-                # Create a copy with base column names
-                aligned_data = append_data.copy()
-                aligned_data.columns = base_data.columns
-                self.logger.info(f"Aligned {len(append_data)} rows by matching column count")
-                return aligned_data
+                # Check if columns are exactly the same
+                if list(append_data.columns) == list(base_data.columns):
+                    self.logger.info(f"Columns match exactly - using data as-is for {len(append_data)} rows")
+                    return append_data.copy()
+                else:
+                    # Create a copy with base column names (assume same order)
+                    aligned_data = append_data.copy()
+                    aligned_data.columns = base_data.columns
+                    self.logger.info(f"Aligned {len(append_data)} rows by matching column count (renamed columns)")
+                    return aligned_data
 
             # Get base columns
             base_columns = list(base_data.columns)
@@ -370,19 +375,41 @@ class MemoryAppendManager:
             aligned_data = pd.DataFrame(columns=base_columns)
 
             # Copy data from append_data to aligned_data for matching columns
+            matched_columns = 0
             for col in append_data.columns:
                 if col in base_columns:
                     aligned_data[col] = append_data[col].values
+                    matched_columns += 1
                 else:
                     self.logger.warning(f"Column '{col}' from append data not found in base columns")
 
+            self.logger.debug(f"Matched {matched_columns} out of {len(append_data.columns)} columns")
+
             # Fill NaN values with empty strings to maintain consistency
             aligned_data = aligned_data.fillna('')
+
+            # If no columns matched, try a different approach - assume same order
+            if matched_columns == 0 and len(append_data.columns) == len(base_columns):
+                self.logger.warning("No column names matched, but same count - assuming same order")
+                aligned_data = append_data.copy()
+                aligned_data.columns = base_columns
+                self.logger.info(f"Applied column mapping by position for {len(aligned_data)} rows")
+                return aligned_data
+
+            # Debug: Check for empty rows before removal
+            empty_rows_count = (aligned_data == '').all(axis=1).sum()
+            self.logger.debug(f"Found {empty_rows_count} completely empty rows out of {len(aligned_data)}")
 
             # Remove rows that are completely empty (all columns are empty strings)
             aligned_data = aligned_data.loc[~(aligned_data == '').all(axis=1)]
 
             self.logger.info(f"Aligned {len(aligned_data)} rows (from {len(append_data)}) to match base column structure")
+
+            # Debug: Log sample of aligned data
+            if len(aligned_data) > 0:
+                self.logger.debug(f"Sample aligned data (first row): {aligned_data.iloc[0].to_dict()}")
+            else:
+                self.logger.warning("All rows were removed during alignment - possible column mismatch issue")
             return aligned_data
 
         except Exception as e:

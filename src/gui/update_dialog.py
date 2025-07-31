@@ -416,7 +416,7 @@ class UpdateDialog(QDialog):
             msg.setInformativeText(
                 f"Update has been extracted to:\n{result}\n\n"
                 "Please close the application and manually replace the files, "
-                "or restart the application to apply the update."
+                "and restart the application to apply the update."
             )
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.exec()

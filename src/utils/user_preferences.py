@@ -49,8 +49,12 @@ class UserPreferences:
                 "bse_index_append_to_eq": False
             },
             "gui_settings": {
-                "window_width": 800,
-                "window_height": 600,
+                "window_width": 576,
+                "window_height": 850,
+                "min_window_width": 550,
+                "max_window_width": 650,
+                "min_window_height": 750,
+                "max_window_height": 1000,
                 "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update")
             },
             "advanced_options": {

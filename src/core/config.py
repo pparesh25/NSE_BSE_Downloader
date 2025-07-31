@@ -237,6 +237,10 @@ class Config:
         
         return sorted(exchanges)
     
+    def get_app_settings(self) -> Dict[str, Any]:
+        """Get application settings"""
+        return self._config_data.get("app_settings", {})
+
     def get_download_options(self) -> Dict:
         """Get download options for data processing"""
         return self._config_data.get("download_options", {})

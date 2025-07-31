@@ -1,5 +1,6 @@
 # NSE/BSE Data Downloader Configuration
 
+
 # Data storage paths
 data_paths:
   base_folder: "~/NSE_BSE_Data"  # Will be expanded to user home directory

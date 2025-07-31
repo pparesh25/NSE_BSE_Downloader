@@ -32,10 +32,10 @@ class UpdateChecker:
         self.debug = debug
         self.logger = logging.getLogger(__name__)
         
-        # GitHub URLs - Using version.py as single source of truth
-        self.github_base = "https://raw.githubusercontent.com/pparesh25/Getbhavcopy-alternative/main"
+        # GitHub URLs - Production repository
+        self.github_base = "https://raw.githubusercontent.com/pparesh25/NSE_BSE_Downloader/main"
         self.version_info_url = f"{self.github_base}/version.py"
-        self.download_url = "https://github.com/pparesh25/Getbhavcopy-alternative/archive/refs/heads/main.zip"
+        self.download_url = "https://codeload.github.com/pparesh25/NSE_BSE_Downloader/zip/refs/heads/main"
 
         self.logger.info(f"Update checker initialized:")
         self.logger.info(f"  Current version: {current_version}")

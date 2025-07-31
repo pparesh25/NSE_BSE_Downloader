@@ -89,9 +89,9 @@ class UpdateDialog(QDialog):
     def setup_ui(self):
         """Setup the user interface"""
         self.setWindowTitle("🚀 Update Available")
-        self.resize(500, 900)
-        self.setMinimumSize(420, 830)
-        self.setMaximumSize(550, 950)
+        self.resize(550, 800)
+        self.setMinimumSize(500, 750)
+        self.setMaximumSize(600, 850)
         self.setModal(True)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         
@@ -304,7 +304,7 @@ class UpdateDialog(QDialog):
         button_layout = QHBoxLayout(button_widget)
         
         # Download button
-        self.download_btn = QPushButton("📥 Download & Install Update")
+        self.download_btn = QPushButton("📥 Download Update")
         self.download_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;

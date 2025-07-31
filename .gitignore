@@ -157,4 +157,20 @@ celerybeat.pid
 # mkdocs documentation
 /site
 
+# Development and testing files (production cleanup)
+debug_*.py
+test_*.py
+trace_*.py
+manual_*.py
+*_test.py
+*_debug.py
+*.md.backup
+*BACKUP*
+*_BACKUP_*
+
+# Investigation and cleanup files (development only)
+BSE_APPEND_INVESTIGATION_RESULTS.md
+SME_SUFFIX_APPEND_FIX.md
+PROJECT_CLEANUP_PLAN.md
+
 # End of file

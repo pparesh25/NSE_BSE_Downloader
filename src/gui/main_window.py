@@ -357,6 +357,16 @@ class MainWindow(QMainWindow):
             # Load window size from user preferences
             width, height = self.user_prefs.get_window_size()
             self.logger.info(f"Loading window size from preferences: {width}x{height}")
+
+            # Set window size constraints
+            gui_settings = self.user_prefs.get_gui_settings()
+            min_width = gui_settings.get('min_window_width', 500)
+            max_width = gui_settings.get('max_window_width', 1200)
+            min_height = gui_settings.get('min_window_height', 600)
+            max_height = gui_settings.get('max_window_height', 1400)
+
+            self.setMinimumSize(min_width, min_height)
+            self.setMaximumSize(max_width, max_height)
             self.setGeometry(100, 100, width, height)
             
             # Create central widget
@@ -1142,22 +1152,42 @@ class MainWindow(QMainWindow):
         pass
 
     def show_about(self):
-        """Show about dialog"""
-        about_text = """
-        NSE/BSE Data Downloader v1.0.0
+        """Show about dialog with dynamic version info"""
+        try:
+            # Get version info from config
+            app_info = self.config.get_app_settings()
+            version = app_info.get('version', '1.0.0')
+            features = app_info.get('features', [])
+            release_date = app_info.get('release_date', '2025-07-30')
 
-        A comprehensive data downloader for NSE and BSE market data.
+            features_text = '\n'.join([f"• {feature}" for feature in features])
 
-        Features:
-        • Concurrent downloads for faster processing
-        • Memory optimization for large datasets
-        • Smart date management
-        • Real-time progress tracking
+            about_text = f"""
+NSE/BSE Data Downloader v{version}
 
-        Developed with PyQt6 and modern Python architecture.
-        """
+A professional data downloader for NSE and BSE market data.
+Release Date: {release_date}
 
-        QMessageBox.about(self, "About NSE/BSE Data Downloader", about_text)
+Key Features:
+{features_text}
+
+Developed with PyQt6 and modern Python architecture.
+Built for traders, analysts, and financial professionals.
+
+© 2025 Manisha. All rights reserved.
+            """
+
+            QMessageBox.about(self, f"About NSE/BSE Data Downloader v{version}", about_text.strip())
+
+        except Exception as e:
+            self.logger.error(f"Error showing about dialog: {e}")
+            # Fallback about text
+            fallback_text = """
+NSE/BSE Data Downloader v1.0.0
+
+A comprehensive data downloader for NSE and BSE market data.
+            """
+            QMessageBox.about(self, "About NSE/BSE Data Downloader", fallback_text.strip())
 
     def show_donate_dialog(self):
         """Show donate dialog"""

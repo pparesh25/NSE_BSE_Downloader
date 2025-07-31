@@ -22,7 +22,7 @@ class HolidayManager:
         self.logger = logging.getLogger(__name__)
         self.cache_dir = cache_dir
         self.cache_file = cache_dir / "market_holidays.json"
-        self.github_url = "https://raw.githubusercontent.com/pparesh25/Getbhavcopy-alternative/main/Market%20Holidays"
+        self.github_url = "https://raw.githubusercontent.com/pparesh25/NSE_BSE_Downloader/main/Market%20Holidays"
         
         # Ensure cache directory exists
         self.cache_dir.mkdir(parents=True, exist_ok=True)

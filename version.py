@@ -4,30 +4,13 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "2.0.0"
-__build_date__ = "2025-01-23"
-__build_number__ = 150
+__version__ = "1.0.0"
+__build_date__ = "2024-12-01"
+__build_number__ = 100
 
 # Version history
 VERSION_HISTORY = {    
-    "2.0.0": {
-        "release_date": "2025-01-23",
-        "features": [
-            "Added BSE INDEX downloader support",
-            "Implemented fast download strategy (5-10x faster)",
-            "Added GitHub market holidays integration",
-            "Enhanced GUI with dynamic options",
-            "Added response timeout configuration",
-            "Implemented memory-based file processing",
-            "Added update checker system"
-        ],
-        "bug_fixes": [
-            "Fixed application freeze on stop download",
-            "Resolved BSE INDEX column ordering issue",
-            "Fixed console log clearing after download complete",
-            "Improved GUI flickering during downloads"
-        ]
-    },
+    
     "1.0.0": {
         "release_date": "2024-12-01",
         "features": [

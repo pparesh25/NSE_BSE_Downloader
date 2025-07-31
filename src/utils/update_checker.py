@@ -7,6 +7,7 @@ Checks for application updates from GitHub repository.
 import requests
 import json
 import logging
+import sys
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 import zipfile
@@ -19,18 +20,23 @@ class UpdateChecker:
     """
     Checks for application updates from GitHub repository
     """
-    
-    def __init__(self, current_version: str = "2.0.0", debug: bool = False):
+
+    def __init__(self, current_version: str = None, debug: bool = False):
         """
         Initialize update checker
 
         Args:
-            current_version: Current application version
+            current_version: Current application version (if None, will auto-detect from version.py)
             debug: Enable debug mode (disables caching)
         """
-        self.current_version = current_version
         self.debug = debug
         self.logger = logging.getLogger(__name__)
+
+        # Auto-detect current version if not provided
+        if current_version is None:
+            current_version = self._get_local_version()
+
+        self.current_version = current_version
         
         # GitHub URLs - Production repository
         self.github_base = "https://raw.githubusercontent.com/pparesh25/NSE_BSE_Downloader/main"
@@ -367,3 +373,51 @@ class UpdateChecker:
     def set_current_version(self, version: str) -> None:
         """Set current application version"""
         self.current_version = version
+
+    def _get_local_version(self) -> str:
+        """
+        Get current version from local version.py file
+
+        Returns:
+            Version string from version.py, defaults to "0.0.0" if not found
+        """
+        try:
+            # Try to find version.py in multiple possible locations
+            possible_paths = [
+                # From src/utils/ directory, go up to project root
+                Path(__file__).parent.parent.parent / "version.py",
+                # From current working directory
+                Path.cwd() / "version.py",
+                # From sys.path[0] (script directory)
+                Path(sys.path[0]) / "version.py" if sys.path else None
+            ]
+
+            # Filter out None paths
+            possible_paths = [p for p in possible_paths if p is not None]
+
+            for version_path in possible_paths:
+                if version_path.exists():
+                    self.logger.info(f"Found version.py at: {version_path}")
+
+                    # Read and parse version.py
+                    version_content = version_path.read_text(encoding='utf-8')
+
+                    # Extract __version__ using simple parsing
+                    for line in version_content.split('\n'):
+                        line = line.strip()
+                        if line.startswith('__version__') and '=' in line:
+                            # Extract version string
+                            version_part = line.split('=', 1)[1].strip()
+                            # Remove quotes
+                            version = version_part.strip('"\'')
+                            self.logger.info(f"Detected local version: {version}")
+                            return version
+
+                    self.logger.warning(f"Could not find __version__ in {version_path}")
+
+            self.logger.warning("Could not find version.py file in any expected location")
+            return "0.0.0"
+
+        except Exception as e:
+            self.logger.error(f"Error reading local version: {e}")
+            return "0.0.0"

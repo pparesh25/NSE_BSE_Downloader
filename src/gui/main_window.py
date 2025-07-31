@@ -47,19 +47,6 @@ from ..core.base_downloader import ProgressCallback
 from ..core.exceptions import GUIError
 
 
-def get_version():
-    """Get current application version"""
-    try:
-        import sys
-        import os
-        # Add project root to path
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        sys.path.insert(0, project_root)
-        from version import get_version as _get_version
-        return _get_version()
-    except ImportError:
-        return "2.0.0"  # Fallback version
-
 
 class UpdateCheckWorker(QThread):
     """Worker thread for checking updates"""
@@ -307,7 +294,8 @@ class MainWindow(QMainWindow):
         self.timeout_spinbox = None
 
         # Update checker (debug mode disabled to test real update checking)
-        self.update_checker = UpdateChecker(get_version(), debug=False)  # Current version
+        # UpdateChecker will auto-detect version from version.py
+        self.update_checker = UpdateChecker(debug=False)
         self.update_worker = None
 
         # User preferences

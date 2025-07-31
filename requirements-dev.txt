@@ -1,0 +1,28 @@
+# Development Dependencies for NSE/BSE Data Downloader
+# Install with: pip install -r requirements-dev.txt
+
+# Testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-qt>=4.2.0
+pytest-cov>=4.0.0
+
+# Code quality and formatting
+flake8>=6.0.0
+black>=23.0.0
+isort>=5.12.0
+
+# Type checking
+mypy>=1.0.0
+
+# Documentation
+sphinx>=5.0.0
+sphinx-rtd-theme>=1.2.0
+
+# Build tools
+build>=0.10.0
+twine>=4.0.0
+
+# Performance profiling
+memory-profiler>=0.60.0
+line-profiler>=4.0.0

@@ -25,6 +25,7 @@ from src.gui.main_window import MainWindow
 
 try:
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import Qt
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -59,6 +60,11 @@ def run_gui_mode(config_path: str):
         print("Error: PyQt6 is not installed. Cannot run GUI mode.")
         print("Install PyQt6 with: pip install PyQt6")
         return 1
+
+    # Enable High DPI support
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("NSE/BSE Data Downloader")

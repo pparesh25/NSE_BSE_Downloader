@@ -1174,7 +1174,7 @@ Key Features:
 Developed with PyQt6 and modern Python architecture.
 Built for traders, analysts, and financial professionals.
 
-© 2025 Manisha. All rights reserved.
+© 2025 Paresh Patel. All rights reserved.
             """
 
             QMessageBox.about(self, f"About NSE/BSE Data Downloader v{version}", about_text.strip())

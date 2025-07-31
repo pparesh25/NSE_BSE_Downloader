@@ -40,7 +40,7 @@ def install_dependencies():
     # Core dependencies
     core_deps = [
         "pandas>=2.0.0",
-        "numpy>=1.24.0", 
+        "numpy>=1.24.0",
         "aiohttp>=3.8.0",
         "pyyaml>=6.0",
         "requests>=2.28.0",

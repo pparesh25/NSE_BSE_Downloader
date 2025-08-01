@@ -7,10 +7,10 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
 ## Step 1: Download Miniconda
 1. Download the Miniconda installer for Windows from the following link:
    - [Miniconda3-latest-Windows-x86_64.exe](https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe)
-2. Run the installer and follow the on-screen instructions to install Miniconda.
+2. Run the installer and follow the on-screen instructions to install Miniconda. 
 
 ## Step 2: Verify Miniconda Installation
-1. Open a Command Prompt.
+1. From start menu find and run 'Anaconda Prompt'.
 2. Check the installed Miniconda version by running:
    ```
    conda --version
@@ -29,11 +29,14 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
    ```
    conda activate trading
    ```
-   The command prompt should now show `(trading)` indicating the environment is active.
+   The Anaconda prompt should now show `(trading)` indicating the environment is active.
 
 ## Step 5: Install Required Libraries
-1. Ensure you have a `requirements.txt` file with the necessary Python libraries for your application.
-2. Install the libraries in the `trading` environment by running:
+1. To select our requirements.txt and install dependency from it
+   ```
+  cd C:\Users\ppare\OneDrive\Documents\NSE_BSE_Downloader-main
+   ```
+3. Install the libraries in the `trading` environment by running:
    ```
    pip install -r requirements.txt
    ```
@@ -41,7 +44,7 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
 ## Step 6: Run the Python Application
 1. Run your Python application (`main.py`) in the activated `trading` environment by executing:
    ```
-   python "C:\Users\ppare\OneDrive\Documents\NSE_BSE_Downloader-main\main.py"
+   python main.py
    ```
 
 ## Step 7: Create a Windows Batch File for Daily Execution
@@ -58,7 +61,7 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
    call conda activate trading
 
    :: Run the Python application
-   python "C:\Users\ppare\OneDrive\Documents\NSE_BSE_Downloader-main\main.py"
+   python "C:\Users\ppare\Desktop\NSE_BSE_Downloader-main\main.py"
 
    :: Deactivate the environment
    call conda deactivate

@@ -1,5 +1,4 @@
 
-
 # Guide to Create Miniconda Virtual Environment and Run Python Application
 
 This guide outlines the steps to download Miniconda, create a virtual environment, install dependencies, and run a Python application using a Windows batch file for daily execution.
@@ -7,7 +6,8 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
 ## Step 1: Download Miniconda
 1. Download the Miniconda installer for Windows from the following link:
    - [Miniconda3-latest-Windows-x86_64.exe](https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe)
-2. Run the installer and follow the on-screen instructions to install Miniconda. 
+2. Run the installer and follow the on-screen instructions to install Miniconda.
+3. I recommend tick this option during installation "Register Miniconda3 as my default python3.**"
 
 ## Step 2: Verify Miniconda Installation
 1. From start menu find and run 'Anaconda Prompt'.
@@ -31,11 +31,12 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
    ```
    The Anaconda prompt should now show `(trading)` indicating the environment is active.
 
-## Step 5: Install Required Libraries
-1. To select our requirements.txt and install dependency from it
+## Step 5: Navigate to Project Directory and Install Required Libraries
+1. Navigate to the directory containing the downloaded project files (e.g., `NSE_BSE_Downloader-main`) using the `cd` command. For example:
    ```
-  cd C:\Users\ppare\OneDrive\Documents\NSE_BSE_Downloader-main
+   cd C:\Users\ppare\Desktop\NSE_BSE_Downloader-main
    ```
+2. Ensure the `requirements.txt` file is present in this directory. This file contains the dependencies required for your project.
 3. Install the libraries in the `trading` environment by running:
    ```
    pip install -r requirements.txt
@@ -77,3 +78,4 @@ This guide outlines the steps to download Miniconda, create a virtual environmen
 - If you encounter errors, verify that the `trading` environment and `requirements.txt` are properly set up.
 - For automation, use Windows Task Scheduler to run the `.bat` file at a specific time each day.
 
+To incorporate the instruction about navigating to the project directory to install dependencies from the `requirements.txt` file using the `cd` command, we can update the guide. Below is the revised guide in English, including the specific step for navigating to the project directory (`C:\Users\ppare\Desktop\NSE_BSE_Downloader-main`) and selecting the `requirements.txt` file from the downloaded project files.

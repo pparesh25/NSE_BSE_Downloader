@@ -1,6 +1,6 @@
 # NSE/BSE Data Downloader v1.0.0
 
-A professional application for downloading NSE (National Stock Exchange) and BSE (Bombay Stock Exchange) market data with advanced processing capabilities.
+A professional application for downloading NSE and BSE market data with advanced processing capabilities.
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)

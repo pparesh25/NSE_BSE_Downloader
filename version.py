@@ -4,19 +4,28 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.1.0"
-__build_date__ = "2025-08-05"
-__build_number__ = 22
+__version__ = "1.0.0"
+__build_date__ = "2025-07-31"
+__build_number__ = 20
 
 # Version history
 VERSION_HISTORY = {    
     
-    "1.1.0": {
-        "release_date": "2025-08-05",
+    "1.0.0": {
+        "release_date": "2025-07-31",
         "features": [
-            
-            "exprimental update service testing no new updates available"
-            
+            "Initial release",
+            "NSE-EQ, NSE-INDEX, NSE-FO, NSE-SME downloaders",
+            "BSE-EQ, BSE-INDEX downloaders",
+            "Smart Append Operations",
+            "Professional GUI interface",
+            "Customizable Settings"
+            "File management system",
+            "Logging and error handling",
+            "Unit tests and code coverage",
+            "Automatic update checking",
+            "Memory optimization",
+            "Async download processing"
         ]
     }
 }

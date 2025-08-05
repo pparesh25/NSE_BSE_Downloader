@@ -8,6 +8,13 @@ NSE_BSE_Downloader is now available as a single-file executable binary package f
 
 ---
 
+## Download Links
+
+- **Linux x86-64**: [Download NSE_BSE_Downloader for Linux](https://github.com/pparesh25/NSE_BSE_Downloader/releases/download/1.0.0/NSE_BSE_Downloader_Linux_x86-64)  
+- **Windows x86-64**: [Download NSE_BSE_Downloader for Windows](https://github.com/pparesh25/NSE_BSE_Downloader/releases/download/1.0.0/NSE_BSE_Downloader_Windows_x86-64.exe)
+
+---
+
 ## Important Notice for Windows Users
 
 **Microsoft Defender may flag the Windows binary as a false positive.**  
@@ -55,5 +62,6 @@ To use the package safely and without interruption, you must exclude a folder fr
 - For any other issues, please refer to the official documentation or contact support.
 
 ---
+
 
 **Thank you for using NSE_BSE_Downloader!**

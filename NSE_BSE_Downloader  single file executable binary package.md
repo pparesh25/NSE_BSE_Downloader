@@ -23,12 +23,12 @@ To use the package safely and without interruption, you must exclude a folder fr
 ### Steps to Safely Use the Windows Binary
 
 1. **Create an Exclusion Folder**
-   - Create a new folder on your Desktop or any preferred location (e.g., `C:\Users\<yourname>\Desktop\NSE_BSE_Downloader_Exe`).
+   - Create a new folder on your Desktop or any preferred location (e.g., `C:\Users\<yourname>\Desktop\NSE_BSE_Downloader`).
 
 2. **Exclude the Folder from Microsoft Defender**
    - Open PowerShell as Administrator and run:
      ```powershell
-     Add-MpPreference -ExclusionPath "C:\Users\<yourname>\Desktop\NSE_BSE_Downloader_Exe"
+     Add-MpPreference -ExclusionPath "C:\Users\<yourname>\Desktop\NSE_BSE_Downloader"
      ```
    - Replace `<yourname>` with your actual Windows username or use your chosen folder path.
 
@@ -65,3 +65,4 @@ To use the package safely and without interruption, you must exclude a folder fr
 
 
 **Thank you for using NSE_BSE_Downloader!**
+

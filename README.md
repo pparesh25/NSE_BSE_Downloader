@@ -31,12 +31,6 @@ A professional application for downloading NSE and BSE market data with advanced
 - **Weekend Support**: Optional weekend download attempts
 - **Timeout Configuration**: Adjustable network timeout settings
 
-# **NSE_BSE_Downloader  single-file executable binary package**
-NSE_BSE_Downloader is now available as a single-file executable binary package for both **Linux x86-64** and **Windows x86-64** platforms.
-
-# **NSE_BSE_Downloader**:  [Single File Executable User Guide](https://github.com/pparesh25/NSE_BSE_Downloader/blob/main/NSE_BSE_Downloader%20%20single%20file%20executable%20binary%20package.md)
-
-  
 ## 📦 Installation
 
 ### **Prerequisites**

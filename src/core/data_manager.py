@@ -17,6 +17,7 @@ import logging
 
 from .config import Config
 from .exceptions import DataProcessingError, FileOperationError, DateRangeError
+from ..utils.date_utils import DateUtils
 
 
 class DataManager:
@@ -161,8 +162,18 @@ class DataManager:
                     )
                 return custom_start, custom_end
             
-            # Default end date is today
-            end_date = custom_end or date.today()
+            # Default end date calculation based on market hours
+            if custom_end:
+                end_date = custom_end
+            else:
+                today = date.today()
+                # If today is a trading day and it's before 6:00 PM, exclude today
+                if (DateUtils.is_trading_day(today) and
+                    not DateUtils.is_data_available_time()):
+                    # Use previous trading day as end date
+                    end_date = DateUtils.get_last_trading_day(today - timedelta(days=1))
+                else:
+                    end_date = today
             
             # Calculate start date
             if custom_start:
@@ -296,6 +307,136 @@ class DataManager:
                 }
         
         return summary
+
+    def is_database_up_to_date(self, exchange: str, segment: str) -> tuple[bool, str]:
+        """
+        Check if database is up-to-date for given exchange/segment
+
+        Args:
+            exchange: Exchange name
+            segment: Segment name
+
+        Returns:
+            Tuple of (is_up_to_date, message)
+        """
+        try:
+            last_file_date = self.get_last_file_date(exchange, segment)
+            expected_last_date = DateUtils.get_expected_last_trading_date()
+
+            if last_file_date is None:
+                return False, f"No data files found for {exchange}_{segment}"
+
+            if last_file_date >= expected_last_date:
+                # Base message
+                base_message = f"Database is up-to-date. Last file date: {last_file_date}"
+
+                # Add today's data availability info if relevant
+                today = date.today()
+                if DateUtils.is_trading_day(today) and not DateUtils.is_data_available_time():
+                    # Today is a trading day and it's before 6:00 PM
+                    base_message += f"\n\nNote: Today's data ({today.strftime('%Y-%m-%d')}) will be available after 6:00 PM."
+
+                return True, base_message
+            else:
+                missing_days = DateUtils.get_trading_days(last_file_date + timedelta(days=1), expected_last_date)
+                return False, f"Database needs update. Missing {len(missing_days)} trading days since {last_file_date}"
+
+        except Exception as e:
+            self.logger.error(f"Error checking database status for {exchange}_{segment}: {e}")
+            return False, f"Error checking database status: {e}"
+
+    def check_all_databases_status(self, selected_exchanges: List[str]) -> tuple[bool, str]:
+        """
+        Check if all selected databases are up-to-date and return a clean summary message
+
+        Args:
+            selected_exchanges: List of exchange_segment strings (e.g., ['NSE_EQ', 'BSE_EQ'])
+
+        Returns:
+            Tuple of (all_up_to_date, summary_message)
+        """
+        all_up_to_date = True
+        last_file_dates = []
+        error_exchanges = []
+
+        for exchange_segment in selected_exchanges:
+            try:
+                exchange, segment = exchange_segment.split('_', 1)
+
+                # Get last file date for this exchange
+                last_file_date = self.get_last_file_date(exchange, segment)
+                expected_last_date = DateUtils.get_expected_last_trading_date()
+
+                if last_file_date is None:
+                    all_up_to_date = False
+                    error_exchanges.append(f"{exchange_segment} (No data found)")
+                elif last_file_date < expected_last_date:
+                    all_up_to_date = False
+                    missing_days = DateUtils.get_trading_days(last_file_date + timedelta(days=1), expected_last_date)
+                    error_exchanges.append(f"{exchange_segment} (Missing {len(missing_days)} days)")
+                else:
+                    # Up-to-date, collect the date
+                    if last_file_date not in last_file_dates:
+                        last_file_dates.append(last_file_date)
+
+            except ValueError:
+                all_up_to_date = False
+                error_exchanges.append(f"{exchange_segment} (Invalid format)")
+            except Exception as e:
+                all_up_to_date = False
+                error_exchanges.append(f"{exchange_segment} (Error: {e})")
+
+        # Generate clean summary message
+        if all_up_to_date:
+            # All databases are up-to-date
+            if last_file_dates:
+                latest_date = max(last_file_dates)
+                message = f"Database is up-to-date. Last file date: {latest_date}"
+
+                # Add today's data availability info if relevant
+                today = date.today()
+                if DateUtils.is_trading_day(today) and not DateUtils.is_data_available_time():
+                    message += f"\n\nNote: Today's data ({today.strftime('%Y-%m-%d')}) will be available after 6:00 PM."
+            else:
+                message = "Database status could not be determined."
+        else:
+            # Some databases need updates
+            message = f"Database needs update for: {', '.join(error_exchanges)}"
+
+        return all_up_to_date, message
+
+    def get_download_completion_message(self, selected_exchanges: List[str],
+                                      successful_downloads: List[str]) -> str:
+        """
+        Generate appropriate completion message based on market hours and successful downloads
+
+        Args:
+            selected_exchanges: List of selected exchange segments
+            successful_downloads: List of successfully downloaded exchange segments
+
+        Returns:
+            Completion message string
+        """
+        today = date.today()
+        is_trading_day = DateUtils.is_trading_day(today)
+        is_data_available = DateUtils.is_data_available_time()
+
+        # Base success message
+        success_count = len(successful_downloads)
+        total_count = len(selected_exchanges)
+
+        if success_count == 0:
+            message = "Download completed with errors. No data was downloaded successfully."
+        elif success_count == total_count:
+            message = f"Download completed successfully! Downloaded data for {success_count} exchange(s)."
+        else:
+            message = f"Download partially completed. {success_count} out of {total_count} exchanges downloaded successfully."
+
+        # Add market hours information if relevant
+        if is_trading_day and not is_data_available:
+            message += f"\n\nNote: Today's data ({today.strftime('%Y-%m-%d')}) will be available after 6:00 PM."
+
+        return message
     
     def cleanup_temp_files(self, exchange: Optional[str] = None, segment: Optional[str] = None) -> None:
         """

@@ -76,10 +76,10 @@ class UpdateDialog(QDialog):
     Dialog for showing available updates and handling user actions
     """
     
-    def __init__(self, update_info: Dict, parent=None):
+    def __init__(self, update_info: Dict, parent=None, update_checker: UpdateChecker = None):
         super().__init__(parent)
         self.update_info = update_info
-        self.update_checker = UpdateChecker()
+        self.update_checker = update_checker or UpdateChecker()
         self.download_worker = None
         self.logger = logging.getLogger(__name__)
         

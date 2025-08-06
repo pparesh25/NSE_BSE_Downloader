@@ -309,6 +309,8 @@ class MainWindow(QMainWindow):
         
         # Status tracking
         self.download_status: Dict[str, str] = {}
+        self.successful_downloads: List[str] = []
+        self.selected_exchanges_for_download: List[str] = []
 
         # Update throttling to prevent flickering
         self.last_update_time: Dict[str, float] = {}
@@ -742,6 +744,20 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please select at least one exchange to download.")
                 return
 
+            # Check if databases are up-to-date
+            data_manager = DataManager(self.config)
+            all_up_to_date, status_message = data_manager.check_all_databases_status(selected_exchanges)
+
+            if all_up_to_date:
+                # Show up-to-date dialog
+                message = f"Database is Up-to-Date!\n\n{status_message}"
+                QMessageBox.information(self, "Database Status", message)
+                return
+
+            # Store selected exchanges for completion message
+            self.selected_exchanges_for_download = selected_exchanges.copy()
+            self.successful_downloads = []
+
             # Disable download button and enable stop button
             self.download_button.setEnabled(False)
             self.download_button.setText("Downloading...")
@@ -898,7 +914,7 @@ class MainWindow(QMainWindow):
     def show_update_dialog(self, update_info: dict):
         """Show update dialog to user"""
         try:
-            dialog = UpdateDialog(update_info, self)
+            dialog = UpdateDialog(update_info, self, self.update_checker)
             dialog.exec()
 
         except Exception as e:
@@ -1038,6 +1054,10 @@ class MainWindow(QMainWindow):
                 self.progress_bars[exchange].setValue(100)
 
             self.append_status_message(f"[{exchange}] Download completed successfully")
+
+            # Track successful downloads
+            if exchange not in self.successful_downloads:
+                self.successful_downloads.append(exchange)
         else:
             if exchange in self.status_labels:
                 self.status_labels[exchange].setText("Failed")
@@ -1049,14 +1069,28 @@ class MainWindow(QMainWindow):
         """Handle completion of all downloads"""
         self.reset_download_ui()
 
-        if overall_success:
+        # Generate smart completion message
+        data_manager = DataManager(self.config)
+        completion_message = data_manager.get_download_completion_message(
+            self.selected_exchanges_for_download,
+            self.successful_downloads
+        )
+
+        success_count = len(self.successful_downloads)
+        total_count = len(self.selected_exchanges_for_download)
+
+        if success_count == total_count and success_count > 0:
             self.status_bar.showMessage("All downloads completed successfully")
             self.append_status_message("All downloads completed successfully")
-            QMessageBox.information(self, "Success", "All downloads completed successfully!")
+            QMessageBox.information(self, "Download Complete", completion_message)
+        elif success_count > 0:
+            self.status_bar.showMessage("Downloads completed with some errors")
+            self.append_status_message("Downloads completed with some errors")
+            QMessageBox.warning(self, "Download Partially Complete", completion_message)
         else:
             self.status_bar.showMessage("Downloads completed with errors")
             self.append_status_message("Downloads completed with errors")
-            QMessageBox.warning(self, "Warning", "Some downloads failed. Check the status for details.")
+            QMessageBox.critical(self, "Download Failed", completion_message)
 
         # Refresh data summary without clearing console
         self.load_data_summary(clear_console=False)

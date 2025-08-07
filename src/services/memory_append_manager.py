@@ -377,11 +377,17 @@ class MemoryAppendManager:
 
                     if not aligned_index_data.empty:  # Only concat if data is not empty
                         self.logger.info(f"🔍 BSE DEBUG: Concatenating {len(aligned_index_data)} aligned rows")
+                        self.logger.debug(f"🔍 BSE DEBUG: Before concat - combined_data shape: {combined_data.shape}")
+                        self.logger.debug(f"🔍 BSE DEBUG: Before concat - aligned_index_data shape: {aligned_index_data.shape}")
+
                         # Use sort=False to avoid FutureWarning about column sorting
                         combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True, sort=False)
                         append_count += len(aligned_index_data)
+
+                        self.logger.info(f"🔍 BSE DEBUG: After concat - combined_data shape: {combined_data.shape}")
                         self.logger.info(f"🔍 BSE DEBUG: Successfully appended {len(aligned_index_data)} Index rows to BSE EQ")
                         self.logger.info(f"🔍 BSE DEBUG: Total combined data rows: {len(combined_data)}")
+                        self.logger.debug(f"🔍 BSE DEBUG: Sample combined data:\n{combined_data.tail()}")
                     else:
                         self.logger.warning("🔍 BSE DEBUG: BSE Index data alignment resulted in empty DataFrame")
                 else:
@@ -657,10 +663,19 @@ class MemoryAppendManager:
 
             original_count = len(eq_data)
             total_count = len(combined_data)
+
+            self.logger.info(f"🔍 APPEND DEBUG: Original EQ data count: {original_count}")
+            self.logger.info(f"🔍 APPEND DEBUG: Combined data count: {total_count}")
+            self.logger.info(f"🔍 APPEND DEBUG: Expected append count: {total_count - original_count}")
+
             append_data = combined_data.iloc[original_count:]  # Get only appended rows
 
+            self.logger.info(f"🔍 APPEND DEBUG: Actual append data count: {len(append_data)}")
+            if len(append_data) > 0:
+                self.logger.debug(f"🔍 APPEND DEBUG: Append data sample:\n{append_data.head()}")
+
             if len(append_data) == 0:
-                self.logger.info("No data to append")
+                self.logger.info("🔍 APPEND DEBUG: No data to append")
                 return True
 
             # Append to real file without headers

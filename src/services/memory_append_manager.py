@@ -192,21 +192,33 @@ class MemoryAppendManager:
                 self.logger.warning("Pandas not available - skipping append operations")
                 return {'pandas_unavailable': False}
 
-            self.logger.info(f"Trying append operations for {target_date}")
+            self.logger.info(f"🔍 DEBUGGING: Trying append operations for {target_date}")
             available_types = self.get_available_data_types(target_date)
-            self.logger.info(f"Available data types: {available_types}")
-            
+            self.logger.info(f"🔍 DEBUGGING: Available data types: {available_types}")
+
+            # Check BSE specific data availability
+            has_bse_eq = self.has_data('BSE', 'EQ', target_date)
+            has_bse_index = self.has_data('BSE', 'INDEX', target_date)
+            self.logger.info(f"🔍 DEBUGGING: BSE data availability - EQ: {has_bse_eq}, INDEX: {has_bse_index}")
+
             # NSE SME + NSE Index → NSE EQ
             if 'NSE_EQ' in available_types:
                 results['nse_eq_append'] = self._try_nse_eq_append(target_date)
 
             # BSE Index → BSE EQ
+            self.logger.info(f"🔍 DEBUGGING: Checking BSE append conditions...")
             if 'BSE_EQ' in available_types:
+                self.logger.info(f"🔍 DEBUGGING: BSE_EQ available, calling _try_bse_eq_append")
                 results['bse_eq_append'] = self._try_bse_eq_append(target_date)
+                self.logger.info(f"🔍 DEBUGGING: BSE append result: {results.get('bse_eq_append', 'NOT_SET')}")
             else:
+                self.logger.info(f"🔍 DEBUGGING: BSE_EQ not available in available_types")
                 # Mark BSE append as pending if BSE EQ is not available yet
                 if 'BSE_INDEX' in available_types:
+                    self.logger.info(f"🔍 DEBUGGING: BSE_INDEX available, marking BSE append as pending")
                     self._mark_append_as_pending(target_date, 'bse_eq_append')
+                else:
+                    self.logger.info(f"🔍 DEBUGGING: BSE_INDEX also not available")
 
             return results
             
@@ -312,70 +324,101 @@ class MemoryAppendManager:
     def _try_bse_eq_append(self, target_date: date) -> bool:
         """Try BSE EQ append operations (Index) - Fresh implementation based on NSE pattern"""
         try:
+            self.logger.info(f"🔍 BSE DEBUG: Starting _try_bse_eq_append for {target_date}")
+
             # Check if append already completed for this date
             date_key = self._get_date_key(target_date)
             if date_key in self.completed_appends and 'bse_eq_append' in self.completed_appends[date_key]:
-                self.logger.info(f"BSE EQ append already completed for {target_date}")
+                self.logger.info(f"🔍 BSE DEBUG: BSE EQ append already completed for {target_date}")
                 return True
 
             # Get base BSE EQ data
+            self.logger.info(f"🔍 BSE DEBUG: Getting BSE EQ data for {target_date}")
             eq_data = self.get_data('BSE', 'EQ', target_date)
             if eq_data is None:
-                self.logger.warning(f"BSE EQ data not available for {target_date}")
+                self.logger.warning(f"🔍 BSE DEBUG: BSE EQ data not available for {target_date}")
                 return False
 
-            self.logger.info(f"Starting BSE EQ append for {target_date} with {len(eq_data)} base rows")
+            self.logger.info(f"🔍 BSE DEBUG: Starting BSE EQ append for {target_date} with {len(eq_data)} base rows")
+            self.logger.debug(f"🔍 BSE DEBUG: BSE EQ data columns: {list(eq_data.columns)}")
             combined_data = eq_data.copy()
             append_count = 0
 
             # Check append options
             index_append_enabled = self.is_append_enabled('bse_index_append_to_eq')
-            self.logger.info(f"BSE Index append enabled: {index_append_enabled}")
+            self.logger.info(f"🔍 BSE DEBUG: BSE Index append enabled: {index_append_enabled}")
+
+            # Debug append options in detail
+            user_append_options = self.user_prefs.get_append_options()
+            config_download_options = self.config.get_download_options()
+            self.logger.debug(f"🔍 BSE DEBUG: User preferences BSE append: {user_append_options.get('bse_index_append_to_eq', 'NOT_SET')}")
+            self.logger.debug(f"🔍 BSE DEBUG: Config BSE append: {config_download_options.get('bse_index_append_to_eq', 'NOT_SET')}")
 
             # Add Index data if available and enabled
-            if index_append_enabled and self.has_data('BSE', 'INDEX', target_date):
+            self.logger.info(f"🔍 BSE DEBUG: Checking BSE Index data availability...")
+            has_bse_index_data = self.has_data('BSE', 'INDEX', target_date)
+            self.logger.info(f"🔍 BSE DEBUG: has_data('BSE', 'INDEX', {target_date}): {has_bse_index_data}")
+
+            if index_append_enabled and has_bse_index_data:
+                self.logger.info(f"🔍 BSE DEBUG: Both conditions met - getting BSE Index data")
                 index_data = self.get_data('BSE', 'INDEX', target_date)
+                self.logger.info(f"🔍 BSE DEBUG: Retrieved BSE Index data: {index_data is not None}")
+
                 if index_data is not None and not index_data.empty:
-                    self.logger.info(f"Found BSE Index data with {len(index_data)} rows")
-                    self.logger.debug(f"BSE Index columns: {list(index_data.columns)}")
-                    self.logger.debug(f"BSE EQ columns: {list(combined_data.columns)}")
+                    self.logger.info(f"🔍 BSE DEBUG: Found BSE Index data with {len(index_data)} rows")
+                    self.logger.debug(f"🔍 BSE DEBUG: BSE Index columns: {list(index_data.columns)}")
+                    self.logger.debug(f"🔍 BSE DEBUG: BSE EQ columns: {list(combined_data.columns)}")
+                    self.logger.debug(f"🔍 BSE DEBUG: Sample BSE Index data:\n{index_data.head()}")
 
                     # BSE specific column alignment
+                    self.logger.info(f"🔍 BSE DEBUG: Starting BSE column alignment...")
                     aligned_index_data = self._align_bse_index_columns(index_data, combined_data)
+                    self.logger.info(f"🔍 BSE DEBUG: Alignment result: {len(aligned_index_data)} rows")
+
                     if not aligned_index_data.empty:  # Only concat if data is not empty
+                        self.logger.info(f"🔍 BSE DEBUG: Concatenating {len(aligned_index_data)} aligned rows")
                         # Use sort=False to avoid FutureWarning about column sorting
                         combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True, sort=False)
                         append_count += len(aligned_index_data)
-                        self.logger.info(f"Appended {len(aligned_index_data)} Index rows to BSE EQ")
+                        self.logger.info(f"🔍 BSE DEBUG: Successfully appended {len(aligned_index_data)} Index rows to BSE EQ")
+                        self.logger.info(f"🔍 BSE DEBUG: Total combined data rows: {len(combined_data)}")
                     else:
-                        self.logger.warning("BSE Index data alignment resulted in empty DataFrame")
+                        self.logger.warning("🔍 BSE DEBUG: BSE Index data alignment resulted in empty DataFrame")
                 else:
-                    self.logger.warning("BSE Index data is None or empty")
+                    self.logger.warning(f"🔍 BSE DEBUG: BSE Index data is None or empty - data: {index_data}")
             else:
                 if not index_append_enabled:
-                    self.logger.info("BSE Index append is disabled")
+                    self.logger.info("🔍 BSE DEBUG: BSE Index append is disabled")
                 else:
-                    self.logger.info("No BSE Index data available for append")
+                    self.logger.info(f"🔍 BSE DEBUG: No BSE Index data available for append - has_data: {has_bse_index_data}")
 
             # Append to real BSE EQ file if any data was appended
+            self.logger.info(f"🔍 BSE DEBUG: Checking if data needs to be appended - append_count: {append_count}")
             if append_count > 0:
-                self.logger.info(f"Attempting to append {append_count} rows to real BSE EQ file")
+                self.logger.info(f"🔍 BSE DEBUG: Attempting to append {append_count} rows to real BSE EQ file")
+                self.logger.debug(f"🔍 BSE DEBUG: Combined data shape: {combined_data.shape}")
+                self.logger.debug(f"🔍 BSE DEBUG: Combined data columns: {list(combined_data.columns)}")
+
                 success = self._append_to_real_file('BSE', 'EQ', combined_data, target_date)
+                self.logger.info(f"🔍 BSE DEBUG: _append_to_real_file result: {success}")
+
                 if success:
-                    self.logger.info(f"Successfully appended {append_count} additional rows to real BSE EQ file")
+                    self.logger.info(f"🔍 BSE DEBUG: Successfully appended {append_count} additional rows to real BSE EQ file")
                     # Mark append as completed
                     if date_key not in self.completed_appends:
                         self.completed_appends[date_key] = set()
                     self.completed_appends[date_key].add('bse_eq_append')
+                    self.logger.info(f"🔍 BSE DEBUG: Marked BSE append as completed for {target_date}")
                 else:
-                    self.logger.error(f"Failed to append {append_count} rows to real BSE EQ file")
+                    self.logger.error(f"🔍 BSE DEBUG: Failed to append {append_count} rows to real BSE EQ file")
                 return success
             else:
-                self.logger.info("No data to append to BSE EQ")
+                self.logger.info("🔍 BSE DEBUG: No data to append to BSE EQ")
                 # Mark as completed even if no data to append
                 if date_key not in self.completed_appends:
                     self.completed_appends[date_key] = set()
                 self.completed_appends[date_key].add('bse_eq_append')
+                self.logger.info(f"🔍 BSE DEBUG: Marked BSE append as completed (no data) for {target_date}")
                 return True
 
         except Exception as e:
@@ -400,11 +443,14 @@ class MemoryAppendManager:
         """
         try:
             if not HAS_PANDAS:
+                self.logger.warning("🔍 BSE ALIGN DEBUG: Pandas not available")
                 return index_data
 
-            self.logger.info(f"Aligning BSE Index data to BSE EQ format")
-            self.logger.debug(f"Index columns: {list(index_data.columns)}")
-            self.logger.debug(f"EQ columns: {list(eq_data.columns)}")
+            self.logger.info(f"🔍 BSE ALIGN DEBUG: Starting BSE Index data alignment to BSE EQ format")
+            self.logger.info(f"🔍 BSE ALIGN DEBUG: Input Index data shape: {index_data.shape}")
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: Index columns: {list(index_data.columns)}")
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: EQ columns: {list(eq_data.columns)}")
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: Index data sample:\n{index_data.head()}")
 
             # Create aligned DataFrame with BSE EQ column structure
             aligned_data = pd.DataFrame()
@@ -420,31 +466,48 @@ class MemoryAppendManager:
                 'Volume': 'TtlTradgVol'       # Volume mapping
             }
 
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: Using column mapping: {column_mapping}")
+
             # Apply column mapping
+            mapping_success_count = 0
             for index_col, eq_col in column_mapping.items():
                 if index_col in index_data.columns and eq_col in eq_data.columns:
                     aligned_data[eq_col] = index_data[index_col]
-                    self.logger.debug(f"Mapped {index_col} -> {eq_col}")
+                    mapping_success_count += 1
+                    self.logger.debug(f"🔍 BSE ALIGN DEBUG: Successfully mapped {index_col} -> {eq_col}")
                 else:
-                    self.logger.warning(f"Column mapping failed: {index_col} -> {eq_col}")
+                    index_col_exists = index_col in index_data.columns
+                    eq_col_exists = eq_col in eq_data.columns
+                    self.logger.warning(f"🔍 BSE ALIGN DEBUG: Column mapping failed: {index_col} -> {eq_col} (index_exists: {index_col_exists}, eq_exists: {eq_col_exists})")
+
+            self.logger.info(f"🔍 BSE ALIGN DEBUG: Successfully mapped {mapping_success_count}/{len(column_mapping)} columns")
 
             # Ensure all BSE EQ columns are present
+            missing_columns = []
             for eq_col in eq_data.columns:
                 if eq_col not in aligned_data.columns:
                     # Fill missing columns with appropriate default values
                     if 'Vol' in eq_col or 'Qty' in eq_col:
                         aligned_data[eq_col] = 0  # Volume columns get 0
+                        default_val = 0
                     elif 'Pric' in eq_col or 'Price' in eq_col:
                         aligned_data[eq_col] = 0.0  # Price columns get 0.0
+                        default_val = 0.0
                     else:
                         aligned_data[eq_col] = ''  # Other columns get empty string
-                    self.logger.debug(f"Added missing column {eq_col} with default value")
+                        default_val = ''
+                    missing_columns.append(f"{eq_col}={default_val}")
+                    self.logger.debug(f"🔍 BSE ALIGN DEBUG: Added missing column {eq_col} with default value {default_val}")
+
+            if missing_columns:
+                self.logger.info(f"🔍 BSE ALIGN DEBUG: Added {len(missing_columns)} missing columns: {missing_columns}")
 
             # Reorder columns to match BSE EQ structure
             aligned_data = aligned_data[eq_data.columns]
 
-            self.logger.info(f"Successfully aligned {len(aligned_data)} BSE Index rows to BSE EQ format")
-            self.logger.debug(f"Final aligned columns: {list(aligned_data.columns)}")
+            self.logger.info(f"🔍 BSE ALIGN DEBUG: Successfully aligned {len(aligned_data)} BSE Index rows to BSE EQ format")
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: Final aligned columns: {list(aligned_data.columns)}")
+            self.logger.debug(f"🔍 BSE ALIGN DEBUG: Final aligned data sample:\n{aligned_data.head()}")
 
             return aligned_data
 

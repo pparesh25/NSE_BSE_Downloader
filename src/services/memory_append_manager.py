@@ -337,8 +337,11 @@ class MemoryAppendManager:
                 index_data = self.get_data('BSE', 'INDEX', target_date)
                 if index_data is not None and not index_data.empty:
                     self.logger.info(f"Found BSE Index data with {len(index_data)} rows")
-                    # Ensure Index data has same columns as EQ data
-                    aligned_index_data = self._align_columns_for_append(index_data, combined_data)
+                    self.logger.debug(f"BSE Index columns: {list(index_data.columns)}")
+                    self.logger.debug(f"BSE EQ columns: {list(combined_data.columns)}")
+
+                    # BSE specific column alignment
+                    aligned_index_data = self._align_bse_index_columns(index_data, combined_data)
                     if not aligned_index_data.empty:  # Only concat if data is not empty
                         # Use sort=False to avoid FutureWarning about column sorting
                         combined_data = pd.concat([combined_data, aligned_index_data], ignore_index=True, sort=False)
@@ -380,6 +383,76 @@ class MemoryAppendManager:
             import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return False
+
+    def _align_bse_index_columns(self, index_data: DataFrame, eq_data: DataFrame) -> DataFrame:
+        """
+        Align BSE Index columns to match BSE EQ column structure
+
+        BSE Index columns: IndexName, Date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume
+        BSE EQ columns: TckrSymb, TradDt, OpnPric, HghPric, LwPric, ClsPric, TtlTradgVol
+
+        Args:
+            index_data: BSE Index DataFrame
+            eq_data: BSE EQ DataFrame (for column reference)
+
+        Returns:
+            Aligned DataFrame with BSE EQ column structure
+        """
+        try:
+            if not HAS_PANDAS:
+                return index_data
+
+            self.logger.info(f"Aligning BSE Index data to BSE EQ format")
+            self.logger.debug(f"Index columns: {list(index_data.columns)}")
+            self.logger.debug(f"EQ columns: {list(eq_data.columns)}")
+
+            # Create aligned DataFrame with BSE EQ column structure
+            aligned_data = pd.DataFrame()
+
+            # Map BSE Index columns to BSE EQ columns
+            column_mapping = {
+                'IndexName': 'TckrSymb',      # Symbol mapping
+                'Date': 'TradDt',             # Date mapping
+                'OpenPrice': 'OpnPric',       # Open price mapping
+                'HighPrice': 'HghPric',       # High price mapping
+                'LowPrice': 'LwPric',         # Low price mapping
+                'ClosePrice': 'ClsPric',      # Close price mapping
+                'Volume': 'TtlTradgVol'       # Volume mapping
+            }
+
+            # Apply column mapping
+            for index_col, eq_col in column_mapping.items():
+                if index_col in index_data.columns and eq_col in eq_data.columns:
+                    aligned_data[eq_col] = index_data[index_col]
+                    self.logger.debug(f"Mapped {index_col} -> {eq_col}")
+                else:
+                    self.logger.warning(f"Column mapping failed: {index_col} -> {eq_col}")
+
+            # Ensure all BSE EQ columns are present
+            for eq_col in eq_data.columns:
+                if eq_col not in aligned_data.columns:
+                    # Fill missing columns with appropriate default values
+                    if 'Vol' in eq_col or 'Qty' in eq_col:
+                        aligned_data[eq_col] = 0  # Volume columns get 0
+                    elif 'Pric' in eq_col or 'Price' in eq_col:
+                        aligned_data[eq_col] = 0.0  # Price columns get 0.0
+                    else:
+                        aligned_data[eq_col] = ''  # Other columns get empty string
+                    self.logger.debug(f"Added missing column {eq_col} with default value")
+
+            # Reorder columns to match BSE EQ structure
+            aligned_data = aligned_data[eq_data.columns]
+
+            self.logger.info(f"Successfully aligned {len(aligned_data)} BSE Index rows to BSE EQ format")
+            self.logger.debug(f"Final aligned columns: {list(aligned_data.columns)}")
+
+            return aligned_data
+
+        except Exception as e:
+            self.logger.error(f"Error aligning BSE Index columns: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            return pd.DataFrame()  # Return empty DataFrame on error
     
 
 

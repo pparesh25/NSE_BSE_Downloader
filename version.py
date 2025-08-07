@@ -4,12 +4,23 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2-dev"
 __build_date__ = "2025-08-07"
-__build_number__ = 21
+__build_number__ = 22
 
 # Version history
 VERSION_HISTORY = {
+
+    "1.0.2-dev": {
+        "release_date": "2025-08-07",
+        "features": [
+            "Development branch initialized",
+            "Structured version management system",
+            "Clean git history established"
+        ],
+        "type": "development",
+        "status": "in_development"
+    },
 
     "1.0.1": {
         "release_date": "2025-08-07",

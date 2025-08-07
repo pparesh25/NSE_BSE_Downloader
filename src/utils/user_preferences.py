@@ -236,6 +236,8 @@ class UserPreferences:
         self.preferences["download_options"]["bse_index_append_to_eq"] = enabled
         self.save_preferences()
 
+
+
     # GUI Settings Methods
     def get_gui_settings(self) -> Dict[str, Any]:
         """Get GUI settings"""

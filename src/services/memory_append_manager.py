@@ -199,7 +199,7 @@ class MemoryAppendManager:
             # NSE SME + NSE Index → NSE EQ
             if 'NSE_EQ' in available_types:
                 results['nse_eq_append'] = self._try_nse_eq_append(target_date)
-            
+
             # BSE Index → BSE EQ
             if 'BSE_EQ' in available_types:
                 results['bse_eq_append'] = self._try_bse_eq_append(target_date)
@@ -308,9 +308,9 @@ class MemoryAppendManager:
             import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return False
-    
+
     def _try_bse_eq_append(self, target_date: date) -> bool:
-        """Try BSE EQ append operations (Index)"""
+        """Try BSE EQ append operations (Index) - Fresh implementation based on NSE pattern"""
         try:
             # Check if append already completed for this date
             date_key = self._get_date_key(target_date)
@@ -332,26 +332,11 @@ class MemoryAppendManager:
             index_append_enabled = self.is_append_enabled('bse_index_append_to_eq')
             self.logger.info(f"BSE Index append enabled: {index_append_enabled}")
 
-            # Debug: Log user preferences and config values
-            user_append_options = self.user_prefs.get_append_options()
-            config_download_options = self.config.get_download_options()
-            self.logger.debug(f"User preferences BSE append: {user_append_options.get('bse_index_append_to_eq', 'NOT_SET')}")
-            self.logger.debug(f"Config BSE append: {config_download_options.get('bse_index_append_to_eq', 'NOT_SET')}")
-            self.logger.debug(f"Final BSE append decision: {index_append_enabled}")
-
             # Add Index data if available and enabled
-            self.logger.debug(f"BSE append check: enabled={index_append_enabled}, has_data={self.has_data('BSE', 'INDEX', target_date)}")
-
             if index_append_enabled and self.has_data('BSE', 'INDEX', target_date):
-                self.logger.info("BSE Index append conditions met - proceeding with append")
                 index_data = self.get_data('BSE', 'INDEX', target_date)
-                self.logger.debug(f"Retrieved BSE Index data: {index_data is not None}, empty={index_data.empty if index_data is not None else 'N/A'}")
-
                 if index_data is not None and not index_data.empty:
                     self.logger.info(f"Found BSE Index data with {len(index_data)} rows")
-                    self.logger.debug(f"BSE Index data columns: {list(index_data.columns)}")
-                    self.logger.debug(f"BSE EQ data columns: {list(combined_data.columns)}")
-
                     # Ensure Index data has same columns as EQ data
                     aligned_index_data = self._align_columns_for_append(index_data, combined_data)
                     if not aligned_index_data.empty:  # Only concat if data is not empty
@@ -367,14 +352,7 @@ class MemoryAppendManager:
                 if not index_append_enabled:
                     self.logger.info("BSE Index append is disabled")
                 else:
-                    self.logger.info(f"No BSE Index data available for append. Has BSE INDEX data: {self.has_data('BSE', 'INDEX', target_date)}")
-                    available_types = self.get_available_data_types(target_date)
-                    self.logger.info(f"Available data types for {target_date}: {available_types}")
-
-                    # If BSE INDEX data is not available yet, mark this append as pending
-                    if index_append_enabled:
-                        self._mark_append_as_pending(target_date, 'bse_eq_append')
-                        self.logger.info("BSE append marked as pending - will retry when BSE INDEX data becomes available")
+                    self.logger.info("No BSE Index data available for append")
 
             # Append to real BSE EQ file if any data was appended
             if append_count > 0:
@@ -402,6 +380,8 @@ class MemoryAppendManager:
             import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return False
+    
+
 
     def _align_columns_for_append(self, append_data: DataFrame, base_data: DataFrame) -> DataFrame:
         """

@@ -118,10 +118,19 @@ class NSEIndexDownloader(BaseDownloader):
             # Process files one by one for immediate progress updates
             for i, target_date in enumerate(working_days):
                 try:
+                    # Skip current date if it's before 6:00 PM on a trading day
+                    from ..utils.date_utils import DateUtils
+                    today = date.today()
+                    if (target_date == today and
+                        DateUtils.is_trading_day(today) and
+                        not DateUtils.is_data_available_time()):
+                        self.logger.info(f"Skipping {target_date} (current trading day, data available after 6:00 PM)")
+                        continue
+
                     # Update progress
                     progress = int((i / len(working_days)) * 100)
                     self._update_progress(f"Processing {target_date} ({i+1}/{len(working_days)})")
-                    
+
                     # Create download task
                     url = self.build_url(target_date)
                     task = DownloadTask(

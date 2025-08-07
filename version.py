@@ -4,13 +4,28 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.0.0"
-__build_date__ = "2025-07-31"
-__build_number__ = 20
+__version__ = "1.0.1"
+__build_date__ = "2025-08-07"
+__build_number__ = 21
 
 # Version history
-VERSION_HISTORY = {    
-    
+VERSION_HISTORY = {
+
+    "1.0.1": {
+        "release_date": "2025-08-07",
+        "features": [
+            "Enhanced download logging system",
+            "Fixed unnecessary 'file not available' logs for current date",
+            "Improved console output during market hours",
+            "Better user experience with cleaner logs"
+        ],
+        "bug_fixes": [
+            "Prevented current date download attempts before 6:00 PM",
+            "Eliminated redundant error logs in IDE console",
+            "Fixed console spam during trading hours"
+        ]
+    },
+
     "1.0.0": {
         "release_date": "2025-07-31",
         "features": [
@@ -19,7 +34,7 @@ VERSION_HISTORY = {
             "BSE-EQ, BSE-INDEX downloaders",
             "Smart Append Operations",
             "Professional GUI interface",
-            "Customizable Settings"
+            "Customizable Settings",
             "File management system",
             "Logging and error handling",
             "Unit tests and code coverage",

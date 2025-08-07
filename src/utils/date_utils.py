@@ -242,20 +242,73 @@ class DateUtils:
     def add_trading_days(start_date: date, trading_days: int) -> date:
         """
         Add specified number of trading days to start date
-        
+
         Args:
             start_date: Starting date
             trading_days: Number of trading days to add
-            
+
         Returns:
             Date after adding trading days
         """
         current_date = start_date
         days_added = 0
-        
+
         while days_added < trading_days:
             current_date += timedelta(days=1)
             if DateUtils.is_trading_day(current_date):
                 days_added += 1
-        
+
         return current_date
+
+    @staticmethod
+    def is_market_hours() -> bool:
+        """
+        Check if current time is within market hours (9:15 AM to 3:30 PM IST)
+
+        Returns:
+            True if within market hours, False otherwise
+        """
+        now = datetime.now()
+        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+        return market_start <= now <= market_end
+
+    @staticmethod
+    def is_data_available_time() -> bool:
+        """
+        Check if current time is after 6:00 PM (when data files are typically available)
+
+        Returns:
+            True if after 6:00 PM, False otherwise
+        """
+        now = datetime.now()
+        data_available_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+
+        return now >= data_available_time
+
+    @staticmethod
+    def get_expected_last_trading_date() -> date:
+        """
+        Get the expected last trading date based on current date and time
+
+        For current trading day:
+        - Before 6:00 PM: Previous trading day
+        - After 6:00 PM: Current trading day (if it's a trading day)
+
+        Returns:
+            Expected last trading date
+        """
+        today = date.today()
+
+        # If today is not a trading day, get the last trading day
+        if not DateUtils.is_trading_day(today):
+            return DateUtils.get_last_trading_day(today)
+
+        # If today is a trading day
+        if DateUtils.is_data_available_time():
+            # After 6:00 PM - today's data should be available
+            return today
+        else:
+            # Before 6:00 PM - today's data not yet available
+            return DateUtils.get_last_trading_day(today - timedelta(days=1))

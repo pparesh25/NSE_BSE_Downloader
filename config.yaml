@@ -1,0 +1,90 @@
+# NSE/BSE Data Downloader Configuration
+
+
+# Data storage paths
+data_paths:
+  base_folder: "~/NSE_BSE_Data"  # Will be expanded to user home directory
+  exchanges:
+    NSE:
+      EQ: "NSE/EQ"
+      FO: "NSE/FO"
+      SME: "NSE/SME"
+      INDEX: "NSE/INDEX"
+    BSE:
+      EQ: "BSE/EQ"
+      INDEX: "BSE/INDEX"
+
+# Download settings
+download_settings:
+  max_concurrent_downloads: 1  # Sequential downloads for stability
+  retry_attempts: 3  # Consistent retry attempts for all servers
+  timeout_seconds: 5  # Wait for server response (user configurable)
+  chunk_size: 8192
+  rate_limit_delay: 0.5  # Consistent delay between requests for all servers
+
+# Download options for data processing
+download_options:
+  # SME Symbol Processing
+  sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
+
+  # Data Append Options (Memory-based)
+  sme_append_to_eq: true      # Append NSE SME data to NSE EQ files
+  index_append_to_eq: true    # Append NSE Index data to NSE EQ files
+  bse_index_append_to_eq: true # Append BSE Index data to BSE EQ files
+
+# Date settings
+date_settings:
+  base_start_date: "2025-07-15"  # Default start date for first run
+  weekend_skip: true  # Skip weekends automatically (can be overridden by user)
+  holiday_skip: true  # Skip known holidays
+  allow_weekend_override: true  # Allow user to download weekend data
+
+# GUI settings
+gui_settings:
+  window_title: "NSE/BSE Data Downloader"
+  window_width: 648
+  window_height: 960
+  default_exchanges: 
+    - "NSE_EQ"    
+  progress_update_interval: 100  # milliseconds
+
+# Exchange URLs and patterns
+exchange_config:
+  NSE:
+    EQ:
+      base_url: "https://archives.nseindia.com/content/cm"
+      filename_pattern: "BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
+      date_format: "%Y%m%d"
+      file_suffix: "-NSE-EQ"
+    FO:
+      base_url: "https://archives.nseindia.com/content/fo"
+      filename_pattern: "BhavCopy_NSE_FO_0_0_0_{date}_F_0000.csv.zip"
+      date_format: "%Y%m%d"
+      file_suffix: "-NSE-FO"
+    SME:
+      base_url: "https://archives.nseindia.com/archives/sme/bhavcopy"
+      filename_pattern: "sme{date}.csv"
+      date_format: "%d%m%y"
+      file_suffix: "-NSE-SME"
+    INDEX:
+      base_url: "https://archives.nseindia.com/content/indices"
+      filename_pattern: "ind_close_all_{date}.csv"
+      date_format: "%d%m%Y"
+      file_suffix: "-NSE-INDEX"
+  BSE:
+    EQ:
+      base_url: "https://www.bseindia.com/download/BhavCopy/Equity"
+      filename_pattern: "BhavCopy_BSE_CM_0_0_0_{date}_F_0000.CSV"
+      date_format: "%Y%m%d"
+      file_suffix: "-BSE-EQ"
+    INDEX:
+      base_url: "https://www.bseindia.com/bsedata/Index_Bhavcopy"
+      filename_pattern: "INDEXSummary_{date}.csv"
+      date_format: "%d%m%Y"
+      file_suffix: "-BSE-INDEX"
+
+# Logging settings
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "downloader.log"

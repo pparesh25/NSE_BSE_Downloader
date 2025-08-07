@@ -1,0 +1,42 @@
+# NSE/BSE Data Downloader - Dependencies
+# Core dependencies for the application
+
+# Data processing and analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Async HTTP requests
+aiohttp>=3.8.0
+
+# Configuration management
+pyyaml>=6.0
+
+# HTTP requests (synchronous)
+requests>=2.28.0
+
+# Date utilities
+python-dateutil>=2.8.0
+
+# System monitoring
+psutil>=5.9.0
+
+# GUI Framework (PyQt6)
+PyQt6>=6.4.0
+
+# Development and Testing Dependencies
+# (Install with: pip install -r requirements.txt -r requirements-dev.txt)
+
+# Testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-qt>=4.2.0
+
+# Code quality
+flake8>=6.0.0
+black>=23.0.0
+
+# Type checking
+mypy>=1.0.0
+
+# Documentation
+sphinx>=5.0.0

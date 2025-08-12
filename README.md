@@ -169,6 +169,17 @@ This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) 
 
 ## 📊 Version History
 
+### **v1.0.1** (2025-08-07)       
+- Enhanced download logging system
+- Fixed unnecessary 'file not available' logs for current date
+- Improved console output during market hours
+- Better user experience with cleaner logs
+       
+### **bug_fixes**
+- Prevented current date download attempts before 6:00 PM
+- Eliminated redundant error logs in IDE console
+- Fixed console spam during trading hours
+
 ### **v1.0.0** (2025-07-30)
 - Initial production release
 - Multi-exchange support (NSE & BSE)

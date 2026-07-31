@@ -301,6 +301,15 @@ class BaseDownloader(ABC):
             return output_path
 
         except Exception as e:
+            from ..services.state_store import StateStoreError
+
+            if isinstance(e, StateStoreError):
+                raise FileOperationError(
+                    f"Repair required before symbol data can be updated: {e}",
+                    file_path=str(output_path),
+                    operation="symbol_history_repair_required",
+                    details=str(e),
+                ) from e
             raise FileOperationError(
                 f"Failed to save processed data for {target_date}",
                 file_path=str(output_path),

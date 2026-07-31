@@ -29,7 +29,7 @@ pathsને પ્રમાણિત કરતી નથી.
 
 ## Implementation status — `codex/release-hardening`
 
-2026-07-31એ remediation શરૂ કરીને પ્રથમ hardening slice પૂર્ણ કરવામાં આવી:
+2026-07-31એ remediation શરૂ કરીને પ્રથમ બે hardening slices પૂર્ણ કરવામાં આવી:
 
 - P0-1 transport: market data, corporate actions અને shared HTTP clientમાં verified
   TLS ચાલુ; unverified connector/context દૂર.
@@ -38,11 +38,20 @@ pathsને પ્રમાણિત કરતી નથી.
 - Update safety: માત્ર આ repositoryની immutable GitHub release/tag URL, SHA-256,
   download-size limit, `.part` publish, ZIP/path/link/bomb validation અને staged
   extraction સ્વીકારાય છે. Verified package metadata ન હોય તો GUI download બંધ રહે છે.
-- Regression suite બંને requested environmentsમાં `38 passed`; verified-TLS live
+- Regression suite બંને requested environmentsમાં `51 passed`; verified-TLS live
   smokeમાં NSE EQ/FO/SME/Index, BSE EQ/Index તથા NSE/BSE corporate-action feeds પાસ.
+- P0-2 exactly-once action state: prepared/committed transaction journal, staged
+  history checksum અને restart recoveryથી history publish તથા ledger commit વચ્ચેના
+  crash પછી factor ફરી લાગતું નથી.
+- P0-3 fail-closed history/state: corrupt symbol CSV, registry, action ledger અને
+  pending-delivery state quarantine થાય છે અને original bytes overwrite થતા નથી.
+  Checksummed raw snapshots/revisions પરથી symbol, exchange, registry અથવા all rebuild
+  માટે CLI repair commands ઉમેરાયા છે.
+- Missing-history action હવે backfill પછી automatically reconcile થાય છે; filesystem
+  slug collision માટે distinct stable symbol filenames બને છે.
 
-આ slice P0-2, P0-3 અથવા deterministic combined-file P1-1ને બંધ કરતું નથી. આગળનો
-release-blocking કાર્ય Phase 2 મુજબ state/history crash recovery છે.
+P0-1, P0-2 અને P0-3 માટે regression guards હવે હાજર છે. આગળનો release-blocking કાર્ય
+Phase 3/4 મુજબ strict canonical validation અને deterministic combined-file P1-1 છે.
 
 ## Severity અર્થ
 

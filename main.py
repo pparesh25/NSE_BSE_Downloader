@@ -41,6 +41,8 @@ def setup_argument_parser():
 Examples:
     python main.py                    # Launch GUI
     python main.py --config custom.yaml  # Use custom config
+    python main.py --rebuild-symbol NSE RELIANCE
+    python main.py --rebuild-exchange BSE
         """
     )
 
@@ -51,7 +53,60 @@ Examples:
         help="Path to configuration file (default: config.yaml)"
     )
 
+    repair = parser.add_mutually_exclusive_group()
+    repair.add_argument(
+        "--rebuild-symbol",
+        nargs=2,
+        metavar=("EXCHANGE", "SYMBOL"),
+        help="Rebuild one symbol history from validated raw snapshots",
+    )
+    repair.add_argument(
+        "--rebuild-exchange",
+        choices=("NSE", "BSE"),
+        help="Rebuild every symbol history for one exchange",
+    )
+    repair.add_argument(
+        "--rebuild-registry",
+        action="store_true",
+        help="Rebuild the stable-id/symbol registry from raw snapshots",
+    )
+    repair.add_argument(
+        "--rebuild-all",
+        action="store_true",
+        help="Rebuild all NSE/BSE symbol histories from raw snapshots",
+    )
+
     return parser
+
+
+def run_rebuild_mode(config_path: str, args) -> int:
+    """Run an explicit fail-closed symbol-history repair command."""
+
+    from src.services.rebuild_service import SymbolHistoryRebuilder
+
+    try:
+        config = Config(config_path)
+        rebuilder = SymbolHistoryRebuilder(config.base_data_path)
+        if args.rebuild_symbol:
+            exchange, symbol = args.rebuild_symbol
+            path = rebuilder.rebuild_symbol(exchange, symbol)
+            print(f"Rebuilt symbol history: {path}")
+        elif args.rebuild_exchange:
+            paths = rebuilder.rebuild_exchange(args.rebuild_exchange)
+            print(
+                f"Rebuilt {len(paths)} {args.rebuild_exchange} symbol histories"
+            )
+        elif args.rebuild_registry:
+            count = rebuilder.rebuild_registry()
+            print(f"Rebuilt symbol registry with {count} stable identifiers")
+        elif args.rebuild_all:
+            result = rebuilder.rebuild_all()
+            count = sum(len(paths) for paths in result.values())
+            print(f"Rebuilt {count} symbol histories across all exchanges")
+        return 0
+    except Exception as error:
+        print(f"Repair failed; existing data was left in place: {error}")
+        return 1
 
 
 def run_gui_mode(config_path: str):
@@ -105,6 +160,14 @@ def main():
         return 1
 
     try:
+        if (
+            args.rebuild_symbol
+            or args.rebuild_exchange
+            or args.rebuild_registry
+            or args.rebuild_all
+        ):
+            return run_rebuild_mode(str(config_path), args)
+
         # Run in GUI mode
         return run_gui_mode(str(config_path))
 

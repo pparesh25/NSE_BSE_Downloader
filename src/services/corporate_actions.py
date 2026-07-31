@@ -6,7 +6,6 @@ import hashlib
 from dataclasses import asdict, dataclass
 from datetime import date
 from io import StringIO
-import json
 from pathlib import Path
 import re
 from threading import Lock
@@ -16,6 +15,15 @@ import aiohttp
 import pandas as pd
 
 from .symbol_history import SymbolHistoryStore
+from .state_store import (
+    StateStoreError,
+    VersionedJSONStore,
+    default_corporate_ledger,
+    file_sha256,
+    migrate_corporate_ledger,
+    quarantine_copy,
+    validate_corporate_ledger,
+)
 
 
 SPLIT_PATTERN = re.compile(r"(\d+\.?\d*)[\/\- a-z\.]+(\d+\.?\d*)", re.I)
@@ -206,27 +214,23 @@ class CorporateActionEngine:
         self.base_path = Path(base_data_path)
         self.state_path = self.base_path / ".state"
         self.ledger_path = self.state_path / "corporate_actions.json"
+        self.transaction_path = self.state_path / "corporate_action_transactions"
         self.tick_size = tick_size
         self.histories = SymbolHistoryStore(self.base_path)
+        self._ledger_state = VersionedJSONStore(
+            self.ledger_path,
+            default=default_corporate_ledger(),
+            validator=validate_corporate_ledger,
+            quarantine_root=self.state_path / "quarantine",
+            category="corporate_actions",
+            migrate=migrate_corporate_ledger,
+        )
 
     def _read_ledger(self) -> dict:
-        if not self.ledger_path.exists():
-            return {"version": 1, "actions": {}}
-        try:
-            data = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-            if not isinstance(data.get("actions"), dict):
-                raise ValueError("invalid corporate-action ledger")
-            return data
-        except Exception:
-            return {"version": 1, "actions": {}}
+        return self._ledger_state.read()
 
     def _write_ledger(self, ledger: dict) -> None:
-        self.state_path.mkdir(parents=True, exist_ok=True)
-        temporary = self.ledger_path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(ledger, indent=2, sort_keys=True), encoding="utf-8"
-        )
-        temporary.replace(self.ledger_path)
+        self._ledger_state.write(ledger)
 
     @staticmethod
     def _ledger_record(
@@ -238,9 +242,187 @@ class CorporateActionEngine:
             "status": status,
             "rows_adjusted": rows_adjusted,
             "note": note,
-            "applied_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
+            "updated_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
         })
+        if status == "applied":
+            record["applied_at"] = record["updated_at"]
         return record
+
+    @staticmethod
+    def _action_from_record(record: dict) -> CorporateAction:
+        try:
+            return CorporateAction(
+                exchange=str(record["exchange"]),
+                symbol=str(record["symbol"]),
+                stable_id=str(record["stable_id"]),
+                ex_date=date.fromisoformat(str(record["ex_date"])),
+                action_type=str(record["action_type"]),
+                factor=float(record["factor"]),
+                description=str(record.get("description", "")),
+                series=str(record.get("series", "")),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise StateStoreError(
+                f"Invalid corporate-action audit record: {error}"
+            ) from error
+
+    def reconcile_pending(self, exchange: Optional[str] = None) -> dict:
+        """Retry actions that were recorded before their history existed."""
+
+        recovered = self.recover_incomplete_transactions()
+        ledger = self._read_ledger()
+        wanted_exchange = exchange.upper() if exchange else None
+        actions = [
+            self._action_from_record(record)
+            for record in ledger["actions"].values()
+            if record.get("status") in {
+                "symbol_not_found", "no_prior_history"
+            }
+            and (
+                wanted_exchange is None
+                or str(record.get("exchange", "")).upper() == wanted_exchange
+            )
+        ]
+        if not actions:
+            return {
+                "applied": 0,
+                "skipped": 0,
+                "manual_review": 0,
+                "recovered": recovered,
+            }
+        summary = self.apply(actions)
+        summary["recovered"] += recovered
+        return summary
+
+    def _transaction_stage(self, transaction_id: str) -> Path:
+        if re.fullmatch(r"[0-9a-f]{64}", transaction_id) is None:
+            raise StateStoreError("Invalid corporate-action transaction id")
+        return self.transaction_path / f"{transaction_id}.csv"
+
+    @staticmethod
+    def _transaction_id(group: list[CorporateAction]) -> str:
+        material = "|".join(sorted(action.key for action in group))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _write_transaction_stage(
+        self, transaction_id: str, adjusted: pd.DataFrame
+    ) -> tuple[Path, str]:
+        stage = self._transaction_stage(transaction_id)
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        temporary = stage.with_suffix(".csv.tmp")
+        normalized = self.histories._deduplicate(adjusted)
+        self.histories._validate_history(normalized)
+        try:
+            normalized.to_csv(temporary, index=False)
+            digest = file_sha256(temporary)
+            temporary.replace(stage)
+            return stage, digest
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _commit_transaction(
+        self,
+        ledger: dict,
+        transaction_id: str,
+        observed_history_hash: str,
+    ) -> None:
+        transaction = ledger["transactions"][transaction_id]
+        if observed_history_hash != transaction["after_sha256"]:
+            raise StateStoreError(
+                "Corporate-action history checksum does not match prepared state"
+            )
+        for key, record in transaction["final_action_records"].items():
+            ledger["actions"][key] = record
+        transaction["status"] = "committed"
+        transaction["observed_history_sha256"] = observed_history_hash
+        transaction["committed_at"] = pd.Timestamp.now(
+            tz="Asia/Kolkata"
+        ).isoformat()
+        self._write_ledger(ledger)
+        self._transaction_stage(transaction_id).unlink(missing_ok=True)
+
+    def _recover_transactions(self, ledger: dict) -> int:
+        recovered = 0
+        for transaction_id, transaction in sorted(
+            ledger["transactions"].items()
+        ):
+            if transaction.get("status") == "committed":
+                self._transaction_stage(transaction_id).unlink(missing_ok=True)
+                continue
+            if transaction.get("status") != "prepared":
+                raise StateStoreError(
+                    f"Unknown corporate-action transaction state: {transaction_id}"
+                )
+
+            stage = self._transaction_stage(transaction_id)
+            stage_valid = (
+                stage.exists()
+                and file_sha256(stage) == transaction.get("after_sha256")
+            )
+            if not stage_valid:
+                quarantine_path = quarantine_copy(
+                    stage,
+                    self.state_path / "quarantine",
+                    "corporate_action_transactions",
+                )
+                backup_note = (
+                    f" (backup: {quarantine_path})"
+                    if quarantine_path is not None else ""
+                )
+                raise StateStoreError(
+                    "Prepared corporate-action stage is missing or corrupt: "
+                    f"{stage}{backup_note}"
+                )
+            target = self.histories.symbol_path(
+                str(transaction["exchange"]), str(transaction["symbol"])
+            )
+            current_hash = file_sha256(target) if target.exists() else None
+            if current_hash == transaction.get("before_sha256"):
+                try:
+                    staged_history = pd.read_csv(stage, dtype=str)
+                    self.histories._validate_history(staged_history)
+                except Exception as error:
+                    quarantine_path = quarantine_copy(
+                        stage,
+                        self.state_path / "quarantine",
+                        "corporate_action_transactions",
+                    )
+                    raise StateStoreError(
+                        "Prepared corporate-action history is invalid"
+                        + (
+                            f" (backup: {quarantine_path})"
+                            if quarantine_path is not None else ""
+                        )
+                    ) from error
+                self.histories.rewrite_symbol(
+                    str(transaction["exchange"]),
+                    str(transaction["symbol"]),
+                    staged_history,
+                )
+                current_hash = file_sha256(target)
+            if current_hash != transaction.get("after_sha256"):
+                if target.exists():
+                    self.histories._read_history(target)
+                raise StateStoreError(
+                    "Corporate-action recovery found an unexpected history "
+                    f"revision for {target}"
+                )
+            if current_hash is None:
+                raise StateStoreError(
+                    f"Corporate-action history is missing during recovery: {target}"
+                )
+            self._commit_transaction(
+                ledger, transaction_id, current_hash
+            )
+            recovered += len(transaction.get("action_keys", []))
+        return recovered
+
+    def recover_incomplete_transactions(self) -> int:
+        """Complete any prepared action after an interrupted prior run."""
+
+        with self._lock:
+            ledger = self._read_ledger()
+            return self._recover_transactions(ledger)
 
     def apply(self, actions: Iterable[CorporateAction]) -> dict:
         """Apply new actions, composing same-symbol/same-date factors."""
@@ -258,6 +440,7 @@ class CorporateActionEngine:
         )
         with self._lock:
             ledger = self._read_ledger()
+            recovered = self._recover_transactions(ledger)
             pending = [
                 action for action in actions
                 if ledger["actions"].get(action.key, {}).get("status") != "applied"
@@ -268,7 +451,13 @@ class CorporateActionEngine:
                     (action.exchange, action.stable_id, action.ex_date), []
                 ).append(action)
 
-            summary = {"applied": 0, "skipped": 0, "manual_review": 0}
+            summary = {
+                "applied": 0,
+                "skipped": 0,
+                "manual_review": 0,
+                "recovered": recovered,
+            }
+            ledger_dirty = False
             for (_, _, ex_date), group in groups.items():
                 first = group[0]
                 symbol = self.histories.resolve_symbol(
@@ -280,10 +469,11 @@ class CorporateActionEngine:
                         ledger["actions"][action.key] = self._ledger_record(
                             action, "symbol_not_found", 0
                         )
+                    ledger_dirty = True
                     summary["skipped"] += len(group)
                     continue
 
-                history = pd.read_csv(path)
+                history = self.histories._read_history(path)
                 dates = pd.to_datetime(
                     history["DATE"].astype(str), format="%Y%m%d", errors="coerce"
                 )
@@ -294,6 +484,7 @@ class CorporateActionEngine:
                         ledger["actions"][action.key] = self._ledger_record(
                             action, "no_prior_history", 0
                         )
+                    ledger_dirty = True
                     summary["skipped"] += len(group)
                     continue
 
@@ -325,16 +516,51 @@ class CorporateActionEngine:
                         ledger["actions"][action.key] = self._ledger_record(
                             action, "manual_review", rows_adjusted, continuity_note
                         )
+                    ledger_dirty = True
                     summary["manual_review"] += len(group)
                     continue
 
-                self.histories.rewrite_symbol(first.exchange, symbol, adjusted)
-                for action in group:
-                    ledger["actions"][action.key] = self._ledger_record(
-                        action, "applied", rows_adjusted,
+                transaction_id = self._transaction_id(group)
+                _, after_sha256 = self._write_transaction_stage(
+                    transaction_id, adjusted
+                )
+                before_sha256 = file_sha256(path)
+                final_records = {
+                    action.key: self._ledger_record(
+                        action,
+                        "applied",
+                        rows_adjusted,
                         f"Combined factor {combined_factor:.12g}",
                     )
+                    for action in group
+                }
+                ledger["transactions"][transaction_id] = {
+                    "status": "prepared",
+                    "exchange": first.exchange.upper(),
+                    "symbol": symbol.upper(),
+                    "action_keys": sorted(final_records),
+                    "before_sha256": before_sha256,
+                    "after_sha256": after_sha256,
+                    "final_action_records": final_records,
+                    "prepared_at": pd.Timestamp.now(
+                        tz="Asia/Kolkata"
+                    ).isoformat(),
+                }
+                for action in group:
+                    ledger["actions"][action.key] = self._ledger_record(
+                        action,
+                        "prepared",
+                        rows_adjusted,
+                        f"Transaction {transaction_id}",
+                    )
+                self._write_ledger(ledger)
+                self.histories.rewrite_symbol(first.exchange, symbol, adjusted)
+                observed_sha256 = file_sha256(path)
+                self._commit_transaction(
+                    ledger, transaction_id, observed_sha256
+                )
                 summary["applied"] += len(group)
 
-            self._write_ledger(ledger)
+            if ledger_dirty:
+                self._write_ledger(ledger)
             return summary

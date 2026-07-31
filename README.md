@@ -95,6 +95,26 @@ DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,D
 
 Symbol files are sorted, idempotently updated and renamed/merged using ISIN or exchange security code when available. Split, consolidation and equity-bonus actions adjust only pre-ex-date OHLC. Volume, delivery fields and FO OI are not adjusted.
 
+State files and symbol histories are validated before any update. Damaged bytes
+are preserved under `.state/quarantine` and the operation stops with a
+repair-required error instead of treating corrupt state as empty. Corporate
+actions use a prepared/committed journal, so an interruption between history
+replacement and ledger commit is recovered without applying the factor twice.
+
+Raw snapshots include checksum metadata; replaced revisions are retained under
+`.state/raw_revisions`. They can be used for explicit repairs:
+
+```bash
+python main.py --rebuild-symbol NSE RELIANCE
+python main.py --rebuild-exchange BSE
+python main.py --rebuild-registry
+python main.py --rebuild-all
+```
+
+Rebuild commands validate snapshot checksums and replay committed corporate
+actions before publishing repaired symbol files. Existing files remain in place
+when validation or transaction recovery cannot be completed safely.
+
 ## Date-aware report support
 
 The application automatically selects the proper official source:
@@ -140,7 +160,9 @@ project:
 
 The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI,
 pending state, symbol reruns/renames, corporate-action idempotency and GUI date
-range/collapse behavior.
+range/collapse behavior. The state-integrity matrix also injects interrupted
+ledger commits, failed history publication, corrupt JSON/CSV state, unexpected
+history revisions and rebuilds from checksummed raw snapshots.
 
 ## Version history
 
@@ -150,6 +172,8 @@ range/collapse behavior.
 - Added NSE/BSE delivery fields and NSE FO OI fields.
 - Added symbol-wise histories with audited corporate-action adjustment.
 - Added pending delivery retry, atomic writes and legacy output compatibility.
+- Added fail-closed state quarantine, crash-recoverable corporate-action
+  transactions and raw-snapshot repair commands.
 - Added remembered calendar date ranges and collapsible GUI panels.
 - Fixed the NSE SME filename-era change and HTML-as-data responses.
 

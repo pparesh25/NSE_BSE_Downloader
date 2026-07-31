@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import date
-import json
 from pathlib import Path
 from threading import Lock
 from typing import List
+
+from .state_store import VersionedJSONStore
 
 
 class PendingDeliveryStore:
@@ -17,23 +18,34 @@ class PendingDeliveryStore:
     def __init__(self, base_data_path: Path):
         self.state_dir = Path(base_data_path) / ".state"
         self.path = self.state_dir / "pending_delivery.json"
+        self._state = VersionedJSONStore(
+            self.path,
+            default={"version": 1, "pending": {}},
+            validator=self._validate,
+            quarantine_root=self.state_dir / "quarantine",
+            category="pending_delivery",
+        )
+
+    @staticmethod
+    def _validate(data: dict) -> None:
+        if data.get("version") != 1:
+            raise ValueError("unsupported pending-delivery state version")
+        pending = data.get("pending")
+        if not isinstance(pending, dict):
+            raise ValueError("pending-delivery state must contain an object")
+        for key, values in pending.items():
+            if not isinstance(key, str) or not isinstance(values, list):
+                raise ValueError("invalid pending-delivery entry")
+            for value in values:
+                if not isinstance(value, str):
+                    raise ValueError("pending-delivery date must be text")
+                date.fromisoformat(value)
 
     def _read(self) -> dict:
-        if not self.path.exists():
-            return {"version": 1, "pending": {}}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(data.get("pending"), dict):
-                raise ValueError("invalid pending-delivery state")
-            return data
-        except Exception:
-            return {"version": 1, "pending": {}}
+        return self._state.read()
 
     def _write(self, data: dict) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        temporary.replace(self.path)
+        self._state.write(data)
 
     def add(self, exchange: str, segment: str, target_date: date) -> None:
         key = f"{exchange.upper()}_{segment.upper()}"

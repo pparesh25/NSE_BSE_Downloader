@@ -8,6 +8,12 @@ __version__ = "1.1.0"
 __build_date__ = "2026-07-31"
 __build_number__ = 22
 
+# Release automation must replace both values together.  The desktop updater
+# remains notification-only while either field is blank, rather than executing
+# code from a mutable branch without an integrity check.
+__update_url__ = ""
+__update_sha256__ = ""
+
 # Version history
 VERSION_HISTORY = {
 

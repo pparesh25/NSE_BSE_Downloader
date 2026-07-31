@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QApplication, QLabel
 
 from src.gui.collapsible_section import CollapsibleSection
 from src.gui.main_window import DownloadWorker
+from src.gui.update_dialog import UpdateDialog
+from src.utils.update_checker import UpdateChecker
 from src.utils.user_preferences import UserPreferences
 
 
@@ -89,3 +91,21 @@ def test_date_and_section_preferences_survive_reload(tmp_path, monkeypatch):
         "end_date": "2024-07-08",
     }
     assert not reloaded.get_section_states()["options"]
+
+
+def test_update_dialog_disables_unverified_package_download():
+    _application()
+    checker = UpdateChecker(current_version="1.1.0")
+    dialog = UpdateDialog(
+        {
+            "latest_version": "1.2.0",
+            "artifact_verified": False,
+            "artifact_error": "Verified metadata missing",
+        },
+        update_checker=checker,
+    )
+
+    assert not dialog.download_btn.isEnabled()
+    assert dialog.download_btn.text() == "Verified Package Unavailable"
+    assert dialog.download_btn.toolTip() == "Verified metadata missing"
+    dialog.close()

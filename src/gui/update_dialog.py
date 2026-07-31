@@ -25,7 +25,11 @@ class UpdateDownloadWorker(QThread):
     progress_updated = Signal(str)  # Progress message
     download_completed = Signal(bool, str)  # Success, message/path
 
-    def __init__(self, update_checker: UpdateChecker, download_location: Path = None):
+    def __init__(
+        self,
+        update_checker: UpdateChecker,
+        download_location: Optional[Path] = None,
+    ):
         super().__init__()
         self.update_checker = update_checker
         self.download_location = download_location
@@ -76,7 +80,12 @@ class UpdateDialog(QDialog):
     Dialog for showing available updates and handling user actions
     """
 
-    def __init__(self, update_info: Dict, parent=None, update_checker: UpdateChecker = None):
+    def __init__(
+        self,
+        update_info: Dict,
+        parent=None,
+        update_checker: Optional[UpdateChecker] = None,
+    ):
         super().__init__(parent)
         self.update_info = update_info
         self.update_checker = update_checker or UpdateChecker()
@@ -323,6 +332,15 @@ class UpdateDialog(QDialog):
             }
         """)
         self.download_btn.clicked.connect(self.download_update)
+        if not self.update_info.get("artifact_verified", False):
+            self.download_btn.setEnabled(False)
+            self.download_btn.setText("Verified Package Unavailable")
+            self.download_btn.setToolTip(
+                self.update_info.get(
+                    "artifact_error",
+                    "Download this version from the official GitHub release page",
+                )
+            )
         button_layout.addWidget(self.download_btn)
 
         # Remind later button

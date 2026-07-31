@@ -31,7 +31,11 @@ class BSEIndexDownloader(BaseDownloader):
         super().__init__("BSE", "INDEX", config)
         self.memory_optimizer = MemoryOptimizer()
 
-    def get_date_range(self) -> tuple[date, date]:
+    def get_date_range(
+        self,
+        custom_start: Optional[date] = None,
+        custom_end: Optional[date] = None,
+    ) -> tuple[date, date]:
         """
         Get date range for BSE Index downloads
 
@@ -42,7 +46,9 @@ class BSEIndexDownloader(BaseDownloader):
             Tuple of (start_date, end_date)
         """
         # Get the standard date range from parent
-        start_date, end_date = super().get_date_range()
+        start_date, end_date = super().get_date_range(
+            custom_start, custom_end
+        )
 
         # BSE INDEX files available from April 17, 2025
         bse_index_start = date(2025, 4, 17)

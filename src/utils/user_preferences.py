@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 
 class UserPreferences:
@@ -60,7 +60,19 @@ class UserPreferences:
                 "max_window_width": 650,
                 "min_window_height": 750,
                 "max_window_height": 1000,
-                "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update")
+                "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update"),
+                "date_selection": {
+                    "use_custom_range": False,
+                    "start_date": (date.today() - timedelta(days=7)).isoformat(),
+                    "end_date": date.today().isoformat()
+                },
+                "section_states": {
+                    "exchanges": True,
+                    "date_range": True,
+                    "options": True,
+                    "progress": False,
+                    "status": True
+                }
             },
             "advanced_options": {
                 "auto_check_updates": True,
@@ -297,6 +309,37 @@ class UserPreferences:
     def set_last_download_location(self, location: str) -> None:
         """Set last download location"""
         self.preferences["gui_settings"]["last_download_location"] = location
+        self.save_preferences()
+
+    def get_date_selection(self) -> Dict[str, Any]:
+        """Return the saved automatic/custom date-range choice."""
+        return self.preferences.get("gui_settings", {}).get(
+            "date_selection", self.default_preferences["gui_settings"]["date_selection"]
+        ).copy()
+
+    def set_date_selection(
+        self, use_custom_range: bool, start_date: date, end_date: date
+    ) -> None:
+        """Persist date-selection controls using ISO dates."""
+        self.preferences["gui_settings"]["date_selection"] = {
+            "use_custom_range": bool(use_custom_range),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+        self.save_preferences()
+
+    def get_section_states(self) -> Dict[str, bool]:
+        """Return the expanded/collapsed state of every main-window section."""
+        defaults = self.default_preferences["gui_settings"]["section_states"]
+        saved = self.preferences.get("gui_settings", {}).get("section_states", {})
+        return {key: bool(saved.get(key, value)) for key, value in defaults.items()}
+
+    def set_section_state(self, section: str, expanded: bool) -> None:
+        """Persist one disclosure section state."""
+        states = self.preferences["gui_settings"].setdefault(
+            "section_states", {}
+        )
+        states[section] = bool(expanded)
         self.save_preferences()
 
     # Advanced Options Methods

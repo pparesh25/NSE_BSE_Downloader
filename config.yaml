@@ -7,6 +7,7 @@ app_settings:
     - "Delivery volume and percentage for NSE/BSE cash data"
     - "Open interest and change in OI for NSE futures"
     - "Corporate-action-adjusted symbol-wise text histories"
+    - "Custom calendar ranges and collapsible GUI sections"
     - "Automatic update notifications"
 
 # Data storage paths

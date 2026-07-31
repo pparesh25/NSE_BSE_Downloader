@@ -19,6 +19,7 @@ VERSION_HISTORY = {
             "Stable 9-column NSE futures output with open interest and change in OI",
             "Per-symbol text histories with NSE/BSE split, consolidation and bonus adjustments",
             "Pending-delivery retry, corporate-action audit ledger and rebuildable raw snapshots",
+            "Calendar date-range selection and individually collapsible GUI sections",
             "Legacy 7-column compatibility option"
         ],
         "bug_fixes": [

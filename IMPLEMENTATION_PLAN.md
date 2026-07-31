@@ -167,6 +167,9 @@ GUI statusમાં દરેક date માટે આ સ્થિતિ દર
 - Corporate actions applied
 - Manual review required
 
+GUIમાં automatic/latest mode સાથે optional calendar start/end range અને Exchange,
+Date, Options, Progress તથા Status માટે remembered collapsible sections રહેશે.
+
 ## Backward compatibility અને update notification
 
 - આ output schema change હોવાથી version `1.1.0` રાખવું.

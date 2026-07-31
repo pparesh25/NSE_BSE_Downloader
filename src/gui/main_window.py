@@ -16,9 +16,9 @@ try:
         QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
         QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
         QGroupBox, QFrame, QSplitter, QMessageBox, QApplication,
-        QStatusBar, QMenuBar, QMenu, QSizePolicy
+        QStatusBar, QMenuBar, QMenu, QSizePolicy, QDateEdit, QScrollArea
     )
-    from PySide6.QtCore import QThread, Signal, Qt, QTimer
+    from PySide6.QtCore import QDate, QThread, Signal, Qt, QTimer
     from PySide6.QtGui import QFont, QIcon, QAction
     GUI_AVAILABLE = True
 except ImportError:
@@ -45,6 +45,11 @@ from .donate_dialog import DonateDialog
 from ..utils.user_preferences import UserPreferences
 from ..core.base_downloader import ProgressCallback
 from ..core.exceptions import GUIError
+
+if GUI_AVAILABLE:
+    from .collapsible_section import CollapsibleSection
+else:
+    CollapsibleSection = object
 
 
 
@@ -77,12 +82,22 @@ class DownloadWorker(QThread):
     download_completed = Signal(str, bool)    # exchange, success
     all_downloads_completed = Signal(bool)    # overall success
 
-    def __init__(self, config: Config, selected_exchanges: List[str], include_weekends: bool = False, timeout_seconds: int = 5):
+    def __init__(
+        self,
+        config: Config,
+        selected_exchanges: List[str],
+        include_weekends: bool = False,
+        timeout_seconds: int = 5,
+        custom_start_date: Optional[date] = None,
+        custom_end_date: Optional[date] = None,
+    ):
         super().__init__()
         self.config = config
         self.selected_exchanges = selected_exchanges
         self.include_weekends = include_weekends
         self.timeout_seconds = timeout_seconds
+        self.custom_start_date = custom_start_date
+        self.custom_end_date = custom_end_date
         self.downloaders = {}
         self.logger = logging.getLogger(__name__)
 
@@ -220,7 +235,9 @@ class DownloadWorker(QThread):
                 downloader.config.download_settings.timeout_seconds = self.timeout_seconds
 
             # Get date range
-            start_date, end_date = downloader.get_date_range()
+            start_date, end_date = downloader.get_date_range(
+                self.custom_start_date, self.custom_end_date
+            )
 
             # Check stop again before processing
             if self.stop_requested:
@@ -298,6 +315,10 @@ class MainWindow(QMainWindow):
         self.symbol_files_checkbox: Optional[QCheckBox] = None
         self.corporate_actions_checkbox: Optional[QCheckBox] = None
         self.legacy_output_checkbox: Optional[QCheckBox] = None
+        self.custom_date_checkbox: Optional[QCheckBox] = None
+        self.start_date_edit = None
+        self.end_date_edit = None
+        self.collapsible_sections: Dict[str, CollapsibleSection] = {}
 
         # Timeout option
         self.timeout_spinbox = None
@@ -368,9 +389,16 @@ class MainWindow(QMainWindow):
             self.setMaximumSize(max_width, max_height)
             self.setGeometry(100, 100, width, height)
 
+            # Keep every section reachable on smaller displays even when all
+            # disclosure panels are expanded.
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+            self.setCentralWidget(scroll_area)
+
             # Create central widget
             central_widget = QWidget()
-            self.setCentralWidget(central_widget)
+            scroll_area.setWidget(central_widget)
 
             # Create main layout
             main_layout = QVBoxLayout(central_widget)
@@ -380,15 +408,27 @@ class MainWindow(QMainWindow):
 
             # Create exchange selection area
             exchange_group = self.create_exchange_selection()
-            main_layout.addWidget(exchange_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "exchanges", "Exchange Selection", exchange_group
+            )
+
+            # Create automatic/custom date range area
+            date_group = self.create_date_selection_area()
+            self._add_collapsible_section(
+                main_layout, "date_range", "Date Range", date_group
+            )
 
             # Create options area
             options_group = self.create_options_area()
-            main_layout.addWidget(options_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "options", "Download Options", options_group
+            )
 
             # Create progress tracking area
             progress_group = self.create_progress_tracking()
-            main_layout.addWidget(progress_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "progress", "Download Progress", progress_group
+            )
 
             # Create control buttons
             button_layout = self.create_control_buttons()
@@ -396,7 +436,10 @@ class MainWindow(QMainWindow):
 
             # Create status area (expandable)
             status_group = self.create_status_area()
-            main_layout.addWidget(status_group, 1)  # Stretch factor 1 - will expand
+            self._add_collapsible_section(
+                main_layout, "status", "Status and Information", status_group
+            )
+            main_layout.addStretch(1)
 
             # Create status bar
             self.create_status_bar()
@@ -405,6 +448,41 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             raise GUIError(f"Failed to initialize GUI: {e}")
+
+    def _add_collapsible_section(
+        self,
+        layout: QVBoxLayout,
+        key: str,
+        title: str,
+        content: QWidget,
+        stretch: int = 0,
+    ) -> CollapsibleSection:
+        """Wrap a main area in a persisted disclosure section."""
+        expanded = self.user_prefs.get_section_states().get(key, True)
+        section = CollapsibleSection(
+            key,
+            title,
+            content,
+            expanded,
+            fill_available=stretch > 0,
+            parent=self,
+        )
+        section.toggled.connect(self.on_section_toggled)
+        self.collapsible_sections[key] = section
+        layout.addWidget(section, stretch)
+        return section
+
+    def on_section_toggled(self, section: str, expanded: bool) -> None:
+        """Remember which panels the user wants open."""
+        self.user_prefs.set_section_state(section, expanded)
+
+    def expand_all_sections(self) -> None:
+        for section in self.collapsible_sections.values():
+            section.set_expanded(True)
+
+    def collapse_all_sections(self) -> None:
+        for section in self.collapsible_sections.values():
+            section.set_expanded(False)
 
     def create_menu_bar(self):
         """Create application menu bar"""
@@ -422,6 +500,15 @@ class MainWindow(QMainWindow):
         exit_action = QAction('Exit', self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        view_menu = menubar.addMenu('View')
+        expand_action = QAction('Expand All Sections', self)
+        expand_action.triggered.connect(self.expand_all_sections)
+        view_menu.addAction(expand_action)
+
+        collapse_action = QAction('Collapse All Sections', self)
+        collapse_action.triggered.connect(self.collapse_all_sections)
+        view_menu.addAction(collapse_action)
 
         # Help menu
         help_menu = menubar.addMenu('Help')
@@ -461,6 +548,104 @@ class MainWindow(QMainWindow):
                 row += 1
 
         return group
+
+    def create_date_selection_area(self) -> QGroupBox:
+        """Create automatic/custom calendar controls for the download range."""
+        group = QGroupBox("Date Range")
+        layout = QGridLayout(group)
+
+        saved = self.user_prefs.get_date_selection()
+        self.custom_date_checkbox = QCheckBox(
+            "Use custom date range (otherwise download only new dates)"
+        )
+        self.custom_date_checkbox.setObjectName("useCustomDateRange")
+        self.custom_date_checkbox.setChecked(
+            bool(saved.get("use_custom_range", False))
+        )
+        layout.addWidget(self.custom_date_checkbox, 0, 0, 1, 4)
+
+        minimum = QDate(1990, 1, 1)
+        maximum = QDate.currentDate()
+        default_start = QDate.fromString(
+            self.config.date_settings.base_start_date, "yyyy-MM-dd"
+        )
+        saved_start = QDate.fromString(
+            str(saved.get("start_date", "")), "yyyy-MM-dd"
+        )
+        saved_end = QDate.fromString(
+            str(saved.get("end_date", "")), "yyyy-MM-dd"
+        )
+        if not saved_start.isValid():
+            saved_start = default_start if default_start.isValid() else maximum.addDays(-7)
+        if not saved_end.isValid():
+            saved_end = maximum
+
+        self.start_date_edit = QDateEdit(saved_start)
+        self.start_date_edit.setObjectName("customStartDate")
+        self.start_date_edit.setAccessibleName("Custom start date")
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setDateRange(minimum, maximum)
+
+        self.end_date_edit = QDateEdit(saved_end)
+        self.end_date_edit.setObjectName("customEndDate")
+        self.end_date_edit.setAccessibleName("Custom end date")
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setDateRange(minimum, maximum)
+
+        layout.addWidget(QLabel("Start:"), 1, 0)
+        layout.addWidget(self.start_date_edit, 1, 1)
+        layout.addWidget(QLabel("End:"), 1, 2)
+        layout.addWidget(self.end_date_edit, 1, 3)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
+
+        self.date_mode_label = QLabel()
+        self.date_mode_label.setStyleSheet("color: #666666;")
+        layout.addWidget(self.date_mode_label, 2, 0, 1, 4)
+
+        self.custom_date_checkbox.stateChanged.connect(
+            self.on_date_selection_changed
+        )
+        self.start_date_edit.dateChanged.connect(self.on_date_selection_changed)
+        self.end_date_edit.dateChanged.connect(self.on_date_selection_changed)
+        self._update_date_controls()
+        return group
+
+    @staticmethod
+    def _python_date(value: QDate) -> date:
+        return date(value.year(), value.month(), value.day())
+
+    def get_selected_date_range(self):
+        """Return custom Python dates, or ``(None, None)`` in auto mode."""
+        if not self.custom_date_checkbox or not self.custom_date_checkbox.isChecked():
+            return None, None
+        return (
+            self._python_date(self.start_date_edit.date()),
+            self._python_date(self.end_date_edit.date()),
+        )
+
+    def _update_date_controls(self) -> None:
+        custom = bool(
+            self.custom_date_checkbox and self.custom_date_checkbox.isChecked()
+        )
+        self.start_date_edit.setEnabled(custom)
+        self.end_date_edit.setEnabled(custom)
+        self.date_mode_label.setText(
+            "Custom range will re-download and atomically update those dates."
+            if custom
+            else "Automatic mode continues from the last downloaded market date."
+        )
+
+    def on_date_selection_changed(self, *args) -> None:
+        """Validate control state and persist the selected range."""
+        self._update_date_controls()
+        self.user_prefs.set_date_selection(
+            self.custom_date_checkbox.isChecked(),
+            self._python_date(self.start_date_edit.date()),
+            self._python_date(self.end_date_edit.date()),
+        )
 
     def create_options_area(self) -> QGroupBox:
         """Create download options area"""
@@ -807,15 +992,26 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please select at least one exchange to download.")
                 return
 
-            # Check if databases are up-to-date
-            data_manager = DataManager(self.config)
-            all_up_to_date, status_message = data_manager.check_all_databases_status(selected_exchanges)
-
-            if all_up_to_date:
-                # Show up-to-date dialog
-                message = f"Database is Up-to-Date!\n\n{status_message}"
-                QMessageBox.information(self, "Database Status", message)
+            custom_start, custom_end = self.get_selected_date_range()
+            if custom_start and custom_end and custom_start > custom_end:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Date Range",
+                    "Start date cannot be after end date.",
+                )
                 return
+
+            # Automatic mode can stop early when every selected database is
+            # current.  Custom mode intentionally permits historical reruns.
+            if custom_start is None:
+                data_manager = DataManager(self.config)
+                all_up_to_date, status_message = (
+                    data_manager.check_all_databases_status(selected_exchanges)
+                )
+                if all_up_to_date:
+                    message = f"Database is Up-to-Date!\n\n{status_message}"
+                    QMessageBox.information(self, "Database Status", message)
+                    return
 
             # Store selected exchanges for completion message
             self.selected_exchanges_for_download = selected_exchanges.copy()
@@ -825,6 +1021,10 @@ class MainWindow(QMainWindow):
             self.download_button.setEnabled(False)
             self.download_button.setText("Downloading...")
             self.stop_button.setEnabled(True)
+
+            progress_section = self.collapsible_sections.get("progress")
+            if progress_section:
+                progress_section.set_expanded(True)
 
             # Show progress bars for selected exchanges with stable layout
             for exchange in selected_exchanges:
@@ -847,7 +1047,14 @@ class MainWindow(QMainWindow):
             timeout_seconds = self.timeout_spinbox.value() if self.timeout_spinbox else 5
 
             # Create and start download worker
-            self.download_worker = DownloadWorker(self.config, selected_exchanges, include_weekends, timeout_seconds)
+            self.download_worker = DownloadWorker(
+                self.config,
+                selected_exchanges,
+                include_weekends,
+                timeout_seconds,
+                custom_start,
+                custom_end,
+            )
 
             # Connect signals
             self.download_worker.progress_updated.connect(self.update_progress)
@@ -860,7 +1067,14 @@ class MainWindow(QMainWindow):
             self.download_worker.start()
 
             self.status_bar.showMessage("Download started...")
-            self.append_status_message("Download started for selected exchanges")
+            range_message = (
+                f"custom range {custom_start} to {custom_end}"
+                if custom_start
+                else "automatic date range"
+            )
+            self.append_status_message(
+                f"Download started for selected exchanges ({range_message})"
+            )
 
         except Exception as e:
             self.logger.error(f"Error starting download: {e}")

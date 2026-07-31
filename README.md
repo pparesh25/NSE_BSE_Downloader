@@ -18,6 +18,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Split, consolidation and equity-bonus adjustments on pre-ex-date symbol OHLC.
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
 - Optional legacy seven-column output and existing SME/Index append options.
+- Calendar-based historical/custom date ranges with automatic mode retained.
+- Individually collapsible Exchange, Date, Options, Progress and Status panels.
 - Automatic version checks and update notifications.
 
 Daily bhavcopy files remain official unadjusted market records. Corporate-action adjustments are applied only to symbol-wise histories.
@@ -38,9 +40,10 @@ Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
 ## Using the app
 
 1. Select the exchange segments.
-2. Choose delivery, FO open-interest, symbol-history and compatibility options.
-3. Adjust the response timeout if necessary.
-4. Click **Start Download**.
+2. Leave **Date Range** in automatic mode, or select a custom start/end date.
+3. Choose delivery, FO open-interest, symbol-history and compatibility options.
+4. Collapse panels you do not need, or use **View → Expand/Collapse All**.
+5. Click **Start Download**.
 
 Files are stored under `~/NSE_BSE_Data/` by default.
 
@@ -123,15 +126,21 @@ download_options:
 
 If a delivery report is late or temporarily unavailable, the price bhavcopy is still saved. The date is recorded under `.state` and retried on the next run.
 
+Custom date mode intentionally allows existing historical dates to be downloaded again. Daily and symbol files are updated atomically rather than duplicated. The selected dates and each panel's expanded/collapsed state are remembered for the next launch.
+
 ## Testing
 
-The release suite is validated in the Miniforge `mark_screener` environment:
+The release suite is validated in both Miniforge environments used for this
+project:
 
 ```bash
 /Users/paresh/miniforge3/envs/mark_screener/bin/python -m pytest -q
+/Users/paresh/miniforge3/envs/opentrader313/bin/python -m pytest -q
 ```
 
-The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI, pending state, symbol reruns/renames and corporate-action idempotency.
+The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI,
+pending state, symbol reruns/renames, corporate-action idempotency and GUI date
+range/collapse behavior.
 
 ## Version history
 
@@ -141,6 +150,7 @@ The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI, pend
 - Added NSE/BSE delivery fields and NSE FO OI fields.
 - Added symbol-wise histories with audited corporate-action adjustment.
 - Added pending delivery retry, atomic writes and legacy output compatibility.
+- Added remembered calendar date ranges and collapsible GUI panels.
 - Fixed the NSE SME filename-era change and HTML-as-data responses.
 
 ### v1.0.1 (2025-08-07)

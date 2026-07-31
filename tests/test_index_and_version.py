@@ -59,6 +59,7 @@ def test_version_history_drives_update_notification():
     assert notes["release_date"] == "2026-07-31"
     assert any("delivery" in item.lower() for item in notes["features"])
     assert any("open interest" in item.lower() for item in notes["features"])
+    assert any("calendar" in item.lower() for item in notes["features"])
 
     checker = object.__new__(UpdateChecker)
     checker.logger = logging.getLogger("test.update")
@@ -69,5 +70,9 @@ def test_version_history_drives_update_notification():
     assert parsed["latest_version"] == "1.1.0"
     assert any(
         "delivery" in item.lower()
+        for item in parsed["changelog"]["features"]
+    )
+    assert any(
+        "calendar" in item.lower()
         for item in parsed["changelog"]["features"]
     )

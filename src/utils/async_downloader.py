@@ -10,8 +10,10 @@ Provides concurrent download capabilities with:
 
 import asyncio
 import aiohttp
-import ssl
 import logging
+import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -42,6 +44,8 @@ class DownloadResult:
     file_size: int = 0
     error_message: Optional[str] = None
     download_time: float = 0.0
+    status_code: Optional[int] = None
+    retry_after: Optional[float] = None
 
     def __str__(self) -> str:
         status = "SUCCESS" if self.success else "FAILED"
@@ -110,7 +114,6 @@ class AsyncDownloadManager:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Cache-Control': 'max-age=0',
@@ -129,7 +132,7 @@ class AsyncDownloadManager:
             keepalive_timeout=60,  # Keep connections alive longer for NSE
             enable_cleanup_closed=True,  # Clean up closed connections
             force_close=False,  # Reuse connections when possible
-            ssl=False  # Allow both HTTP and HTTPS
+            ssl=True,
         )
 
         self.session = aiohttp.ClientSession(
@@ -266,7 +269,12 @@ class AsyncDownloadManager:
         # Use consistent retry attempts for all servers
         return self.download_settings.retry_attempts
 
-    def _get_retry_delay(self, task: DownloadTask, attempt: int) -> float:
+    def _get_retry_delay(
+        self,
+        task: DownloadTask,
+        attempt: int,
+        retry_after: Optional[float] = None,
+    ) -> float:
         """
         Get consistent retry delay for all servers
 
@@ -277,10 +285,18 @@ class AsyncDownloadManager:
         Returns:
             Delay in seconds
         """
-        # Simple progressive delay: 1s, 2s, 3s, 4s
-        return min(5.0, 1.0 * (attempt + 1))
+        if retry_after is not None and retry_after >= 0:
+            return min(60.0, retry_after)
+        # Bounded exponential backoff with a small jitter prevents every
+        # selected segment from retrying the exchange at the same instant.
+        return min(8.0, float(2 ** attempt)) + random.uniform(0.0, 0.25)
 
-    def _classify_error(self, error_message: str, task: DownloadTask) -> dict:
+    def _classify_error(
+        self,
+        error_message: str,
+        task: DownloadTask,
+        status_code: Optional[int] = None,
+    ) -> dict:
         """
         Classify error for better user feedback
 
@@ -300,13 +316,27 @@ class AsyncDownloadManager:
         if "timeout" in error_lower:
             return {
                 "type": "timeout",
-                "user_message": f"Server response timeout for {task.date_str} - file may not be available yet",
+                "user_message": (
+                    f"Server response timeout for {task.date_str}: {error_message}"
+                ),
                 "should_retry": True,
                 "technical_details": error_message
             }
 
+        # Certificate failures are security failures, not transient downloads.
+        if any(term in error_lower for term in ["ssl", "certificate", "cert"]):
+            return {
+                "type": "ssl_error",
+                "user_message": f"SSL certificate issue for {task.date_str} - server configuration problem",
+                "should_retry": False,
+                "technical_details": error_message
+            }
+
         # Network connectivity issues
-        if any(term in error_lower for term in ["connection", "network", "reset", "refused"]):
+        if any(term in error_lower for term in [
+            "connect", "connection", "network", "reset", "refused",
+            "disconnected", "dns", "name resolution",
+        ]):
             return {
                 "type": "network",
                 "user_message": f"Network connectivity issue for {task.date_str} - will retry",
@@ -315,7 +345,21 @@ class AsyncDownloadManager:
             }
 
         # Server errors (5xx)
-        if any(code in error_lower for code in ["500", "502", "503", "504"]):
+        if status_code in {408, 425, 429} or any(
+            code in error_lower for code in ["408", "425", "429"]
+        ):
+            return {
+                "type": "server_busy",
+                "user_message": (
+                    f"Server asked to retry {task.date_str}: {error_message}"
+                ),
+                "should_retry": True,
+                "technical_details": error_message,
+            }
+
+        if (
+            status_code is not None and 500 <= status_code <= 599
+        ) or any(code in error_lower for code in ["500", "502", "503", "504"]):
             return {
                 "type": "server_error",
                 "user_message": f"Server error for {task.date_str} - server may be temporarily unavailable",
@@ -324,7 +368,7 @@ class AsyncDownloadManager:
             }
 
         # File not found (404)
-        if "404" in error_lower or "not found" in error_lower:
+        if status_code == 404 or "404" in error_lower or "not found" in error_lower:
             return {
                 "type": "file_not_found",
                 "user_message": f"File not available for {task.date_str} - may not be published yet",
@@ -333,20 +377,11 @@ class AsyncDownloadManager:
             }
 
         # Access denied (403, 401)
-        if any(code in error_lower for code in ["403", "401", "forbidden", "unauthorized"]):
+        if status_code in {401, 403} or any(code in error_lower for code in ["403", "401", "forbidden", "unauthorized"]):
             return {
                 "type": "access_denied",
                 "user_message": f"Access denied for {task.date_str} - server may be blocking requests",
                 "should_retry": False,
-                "technical_details": error_message
-            }
-
-        # SSL/Certificate issues
-        if any(term in error_lower for term in ["ssl", "certificate", "cert"]):
-            return {
-                "type": "ssl_error",
-                "user_message": f"SSL certificate issue for {task.date_str} - server configuration problem",
-                "should_retry": True,
                 "technical_details": error_message
             }
 
@@ -378,10 +413,10 @@ class AsyncDownloadManager:
                     await asyncio.sleep(delay)
 
                 # Simple retry logic for all servers
-                max_attempts = self._get_retry_attempts(task)
+                max_attempts = max(1, self._get_retry_attempts(task))
                 last_error = None
 
-                for attempt in range(max(1, max_attempts)):
+                for attempt in range(max_attempts):
                     try:
                         result = await self._attempt_download(task)
                         if result.success:
@@ -393,10 +428,16 @@ class AsyncDownloadManager:
                         else:
                             # If download failed but no exception, classify error and decide retry
                             last_error = result.error_message
-                            error_info = self._classify_error(result.error_message, task)
+                            error_info = self._classify_error(
+                                result.error_message or "Unknown error",
+                                task,
+                                result.status_code,
+                            )
 
                             if error_info["should_retry"] and attempt < max_attempts - 1:
-                                wait_time = self._get_retry_delay(task, attempt)
+                                wait_time = self._get_retry_delay(
+                                    task, attempt, result.retry_after
+                                )
                                 self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                                 await asyncio.sleep(wait_time)
                                 self.download_stats['retry_count'] += 1
@@ -406,6 +447,9 @@ class AsyncDownloadManager:
                                 if not error_info["should_retry"]:
                                     self.logger.info(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
                                 break
+
+                    except asyncio.CancelledError:
+                        raise
 
                     except asyncio.TimeoutError:
                         timeout_value = self._get_timeout(task)
@@ -480,17 +524,12 @@ class AsyncDownloadManager:
                 self.logger.info(f"🔍 {request_type} HTTP Request Debug:")
                 self.logger.info(f"  URL: {task.url}")
                 self.logger.info(f"  Timeout: {timeout_value}s")
-                self.logger.info(f"  SSL Verification: Disabled (BSE compatibility)")
+                self.logger.info("  SSL Verification: Enabled")
 
-            # Make HTTP request with SSL handling for BSE
-            ssl_context = None
-            if is_bse_request:
-                # Disable SSL verification for BSE servers
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-            async with self.session.get(task.url, ssl=ssl_context) as response:
+            request_timeout = aiohttp.ClientTimeout(total=timeout_value)
+            async with self.session.get(
+                task.url, timeout=request_timeout
+            ) as response:
                 if is_bse_request:
                     request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                     self.logger.info(f"  {request_type} Response Status: {response.status}")
@@ -503,10 +542,16 @@ class AsyncDownloadManager:
                     if is_bse_request:
                         request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                         self.logger.error(f"❌ {request_type} HTTP Error: {response.status} - {response.reason}")
-                    raise NetworkError(
-                        f"HTTP {response.status}: {response.reason}",
-                        url=task.url,
-                        status_code=response.status
+                    retry_after = self._parse_retry_after(
+                        response.headers.get("Retry-After")
+                    )
+                    return DownloadResult(
+                        task=task,
+                        success=False,
+                        error_message=f"HTTP {response.status}: {response.reason}",
+                        status_code=response.status,
+                        retry_after=retry_after,
+                        download_time=time.time() - start_time,
                     )
 
                 # Download to memory
@@ -534,12 +579,13 @@ class AsyncDownloadManager:
                     self.logger.info(f"  ✅ {request_type} Download Success:")
                     self.logger.info(f"    File Size: {file_size} bytes")
                     self.logger.info(f"    Download Time: {download_time:.2f}s")
-                    # Preview first 100 characters
-                    try:
-                        preview = file_data[:100].decode('utf-8', errors='ignore')
-                        self.logger.info(f"    Content Preview: {preview}")
-                    except Exception as e:
-                        self.logger.warning(f"    Could not preview content: {e}")
+                    # Do not decode/log ZIP bytes.  A text preview is useful only
+                    # at DEBUG level and only for a non-archive response.
+                    if bytes(file_data[:2]) != b"PK":
+                        preview_text = bytes(file_data[:100]).decode(
+                            'utf-8', errors='replace'
+                        )
+                        self.logger.debug(f"    Content Preview: {preview_text!r}")
 
                 self.logger.info(f"Downloaded {task.date_str} ({file_size} bytes, {download_time:.2f}s)")
 
@@ -551,16 +597,33 @@ class AsyncDownloadManager:
                     download_time=download_time
                 )
 
-        except Exception as e:
-            download_time = time.time() - start_time
-            error_msg = f"Download attempt failed: {e}"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Let the outer retry loop retain the concrete exception type and
+            # message.  In particular, swallowing TimeoutError here previously
+            # disabled the timeout retry branch and produced a blank error.
+            raise
 
-            return DownloadResult(
-                task=task,
-                success=False,
-                error_message=error_msg,
-                download_time=download_time
-            )
+    @staticmethod
+    def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+        """Parse Retry-After delta seconds or an RFC-compliant HTTP date."""
+
+        if value is None:
+            return None
+        try:
+            return max(0.0, float(value.strip()))
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(
+                    0.0,
+                    (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     async def download_multiple(self, tasks: List[DownloadTask]) -> List[DownloadResult]:
         """
@@ -592,9 +655,11 @@ class AsyncDownloadManager:
             results = await asyncio.gather(*download_coroutines, return_exceptions=True)
 
             # Process results and handle exceptions
-            processed_results = []
+            processed_results: List[DownloadResult] = []
             for i, result in enumerate(results):
-                if isinstance(result, Exception):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                if isinstance(result, BaseException):
                     # Handle exceptions that weren't caught in download_file
                     error_result = DownloadResult(
                         task=tasks[i],

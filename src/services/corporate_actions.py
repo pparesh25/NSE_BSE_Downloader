@@ -153,9 +153,8 @@ class CorporateActionClient:
                        "corporate-filings-actions",
         }
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(
-            timeout=timeout, connector=connector, headers=headers
+            timeout=timeout, headers=headers
         ) as session:
             async with session.get("https://www.nseindia.com/") as response:
                 await response.read()
@@ -186,9 +185,8 @@ class CorporateActionClient:
             "segment": "0",
         }
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(
-            timeout=timeout, connector=connector, headers=headers
+            timeout=timeout, headers=headers
         ) as session:
             async with session.get(
                 "https://api.bseindia.com/BseIndiaAPI/api/CorpactCSVDownload/w",
@@ -264,7 +262,7 @@ class CorporateActionEngine:
                 action for action in actions
                 if ledger["actions"].get(action.key, {}).get("status") != "applied"
             ]
-            groups = {}
+            groups: dict[tuple[str, str, date], list[CorporateAction]] = {}
             for action in pending:
                 groups.setdefault(
                     (action.exchange, action.stable_id, action.ex_date), []

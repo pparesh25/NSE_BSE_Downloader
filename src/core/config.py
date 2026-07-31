@@ -69,9 +69,13 @@ class Config:
         self.config_path = Path(config_path) if config_path else Path("config.yaml")
         self._config_data: Dict[str, Any] = {}
         self._exchange_configs: Dict[str, Dict[str, ExchangeConfig]] = {}
+        self._download_settings = DownloadSettings()
+        self._date_settings = DateSettings()
+        self._gui_settings = GUISettings()
 
         self.load_config()
         self._validate_config()
+        self._load_typed_settings()
         self._setup_paths()
 
     def load_config(self) -> None:
@@ -129,39 +133,55 @@ class Config:
         user_cache_dir = Path.home() / ".nse_bse_downloader"
         self.holiday_manager = HolidayManager(user_cache_dir)
 
+    def _load_typed_settings(self) -> None:
+        """Materialize mutable runtime settings from the YAML configuration.
+
+        Returning a fresh dataclass from each property access made GUI overrides
+        disappear immediately.  These objects deliberately live for the lifetime
+        of the Config instance and are rebuilt only by ``reload_config``.
+        """
+
+        download_data = self._config_data.get('download_settings', {})
+        self._download_settings = DownloadSettings(
+            max_concurrent_downloads=download_data.get('max_concurrent_downloads', 5),
+            retry_attempts=download_data.get('retry_attempts', 3),
+            timeout_seconds=download_data.get('timeout_seconds', 30),
+            chunk_size=download_data.get('chunk_size', 8192),
+            rate_limit_delay=download_data.get('rate_limit_delay', 0.5),
+        )
+
+        date_data = self._config_data.get('date_settings', {})
+        self._date_settings = DateSettings(
+            base_start_date=date_data.get('base_start_date', '2025-01-01'),
+            weekend_skip=date_data.get('weekend_skip', True),
+            holiday_skip=date_data.get('holiday_skip', True),
+        )
+
+        gui_data = self._config_data.get('gui_settings', {})
+        self._gui_settings = GUISettings(
+            window_title=gui_data.get('window_title', 'NSE/BSE Data Downloader'),
+            window_width=gui_data.get('window_width', 800),
+            window_height=gui_data.get('window_height', 600),
+            default_exchanges=gui_data.get(
+                'default_exchanges', ['NSE_EQ', 'BSE_EQ']
+            ),
+            progress_update_interval=gui_data.get('progress_update_interval', 100),
+        )
+
     @property
     def download_settings(self) -> DownloadSettings:
         """Get download settings"""
-        settings_data = self._config_data.get('download_settings', {})
-        return DownloadSettings(
-            max_concurrent_downloads=settings_data.get('max_concurrent_downloads', 5),
-            retry_attempts=settings_data.get('retry_attempts', 3),
-            timeout_seconds=settings_data.get('timeout_seconds', 30),
-            chunk_size=settings_data.get('chunk_size', 8192),
-            rate_limit_delay=settings_data.get('rate_limit_delay', 0.5)
-        )
+        return self._download_settings
 
     @property
     def date_settings(self) -> DateSettings:
         """Get date settings"""
-        settings_data = self._config_data.get('date_settings', {})
-        return DateSettings(
-            base_start_date=settings_data.get('base_start_date', '2025-01-01'),
-            weekend_skip=settings_data.get('weekend_skip', True),
-            holiday_skip=settings_data.get('holiday_skip', True)
-        )
+        return self._date_settings
 
     @property
     def gui_settings(self) -> GUISettings:
         """Get GUI settings"""
-        settings_data = self._config_data.get('gui_settings', {})
-        return GUISettings(
-            window_title=settings_data.get('window_title', 'NSE/BSE Data Downloader'),
-            window_width=settings_data.get('window_width', 800),
-            window_height=settings_data.get('window_height', 600),
-            default_exchanges=settings_data.get('default_exchanges', ['NSE_EQ', 'BSE_EQ']),
-            progress_update_interval=settings_data.get('progress_update_interval', 100)
-        )
+        return self._gui_settings
 
     def get_exchange_config(self, exchange: str, segment: str) -> ExchangeConfig:
         """
@@ -252,7 +272,9 @@ class Config:
     def reload_config(self) -> None:
         """Reload configuration from file"""
         self.load_config()
+        self._exchange_configs.clear()
         self._validate_config()
+        self._load_typed_settings()
         self._setup_paths()
 
     def __str__(self) -> str:

@@ -31,14 +31,14 @@ def _default_headers() -> dict:
             "NSE_BSE_Downloader/1.1 (+https://github.com/pparesh25/NSE_BSE_Downloader_PySide6)"
         ),
         "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
     }
 
 
 async def _single_use_session(timeout: Optional[float] = None) -> aiohttp.ClientSession:
     client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else aiohttp.ClientTimeout()
-    connector = aiohttp.TCPConnector(ssl=False)
+    # Keep aiohttp's verified system-CA behaviour explicit.  Update metadata,
+    # holiday calendars and update archives all pass through this helper.
+    connector = aiohttp.TCPConnector(ssl=True)
     return aiohttp.ClientSession(timeout=client_timeout, headers=_default_headers(), connector=connector)
 
 
@@ -78,7 +78,15 @@ async def fetch_bytes(url: str, timeout: Optional[float] = None, *, session: Opt
             await session.close()
 
 
-async def download_to_file(url: str, file_path: str, timeout: Optional[float] = None, *, progress: Optional[Callable[[int, int], None]] = None, session: Optional[aiohttp.ClientSession] = None) -> None:
+async def download_to_file(
+    url: str,
+    file_path: str,
+    timeout: Optional[float] = None,
+    *,
+    progress: Optional[Callable[[int, int], None]] = None,
+    session: Optional[aiohttp.ClientSession] = None,
+    max_bytes: Optional[int] = None,
+) -> None:
     owns_session = False
     if session is None:
         session = await _single_use_session(timeout)
@@ -91,10 +99,21 @@ async def download_to_file(url: str, file_path: str, timeout: Optional[float] = 
                 text = await resp.text()
                 raise HTTPStatusError(resp.status, text[:200], url)
             total = int(resp.headers.get("content-length", 0))
+            if max_bytes is not None and total > max_bytes:
+                raise ValueError(
+                    f"Download exceeds maximum size of {max_bytes} bytes"
+                )
             downloaded = 0
             with open(file_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(8192):
                     if chunk:
+                        if (
+                            max_bytes is not None
+                            and downloaded + len(chunk) > max_bytes
+                        ):
+                            raise ValueError(
+                                f"Download exceeds maximum size of {max_bytes} bytes"
+                            )
                         f.write(chunk)
                         downloaded += len(chunk)
                         if progress:
@@ -136,5 +155,20 @@ def fetch_bytes_sync(url: str, timeout: Optional[float] = None) -> bytes:
     return _run_coro_blocking(fetch_bytes(url, timeout))
 
 
-def download_to_file_sync(url: str, file_path: str, timeout: Optional[float] = None, *, progress: Optional[Callable[[int, int], None]] = None) -> None:
-    return _run_coro_blocking(download_to_file(url, file_path, timeout, progress=progress))
+def download_to_file_sync(
+    url: str,
+    file_path: str,
+    timeout: Optional[float] = None,
+    *,
+    progress: Optional[Callable[[int, int], None]] = None,
+    max_bytes: Optional[int] = None,
+) -> None:
+    return _run_coro_blocking(
+        download_to_file(
+            url,
+            file_path,
+            timeout,
+            progress=progress,
+            max_bytes=max_bytes,
+        )
+    )

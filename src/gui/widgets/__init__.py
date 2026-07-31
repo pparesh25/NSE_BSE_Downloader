@@ -1,15 +1,10 @@
 """
 GUI widgets for NSE/BSE Data Downloader
 
-Contains custom PySide6 widgets and components.
+Reserved for reusable PySide6 widgets and components.
 """
 
-from .exchange_selector import ExchangeSelector
-from .progress_widget import ProgressWidget
-from .status_widget import StatusWidget
-
-__all__ = [
-    "ExchangeSelector",
-    "ProgressWidget",
-    "StatusWidget",
-]
+# The previous initializer referenced three modules that were never migrated
+# into this PySide6 repository.  Keeping the namespace empty makes package
+# discovery deterministic for Nuitka and regular Python imports.
+__all__ = []

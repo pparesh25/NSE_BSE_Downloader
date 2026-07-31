@@ -12,16 +12,8 @@ from abc import ABC, abstractmethod
 from datetime import date
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
-try:
-    import pandas as pd
-    HAS_PANDAS = True
-    DataFrame = pd.DataFrame
-except ImportError:
-    HAS_PANDAS = False
-    pd = None
-    # Create a dummy DataFrame type for type annotations
-    class DataFrame:
-        pass
+
+import pandas as pd
 
 from .config import Config
 from .data_manager import DataManager
@@ -105,6 +97,9 @@ class BaseDownloader(ABC):
         self.progress_callback: Optional[ProgressCallback] = None
         self.total_files = 0
         self.completed_files = 0
+        self.cancel_requested: Optional[Callable[[], bool]] = None
+        self.combined_dependencies: tuple[str, ...] = ()
+        self.combined_required = False
 
     def set_progress_callback(self, callback: ProgressCallback) -> None:
         """Set progress callback for tracking download progress"""
@@ -163,7 +158,12 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[DataFrame]:
+    def process_downloaded_data(
+        self,
+        file_data: bytes,
+        file_date: date,
+        delivery_data: Optional[bytes] = None,
+    ) -> Optional[pd.DataFrame]:
         """
         Process downloaded file data in memory
 
@@ -177,7 +177,9 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def transform_data(self, df: DataFrame, file_date: date) -> DataFrame:
+    def transform_data(
+        self, df: pd.DataFrame, file_date: date
+    ) -> pd.DataFrame:
         """
         Transform DataFrame according to exchange-specific requirements
 
@@ -358,7 +360,7 @@ class BaseDownloader(ABC):
             temporary.replace(target)
         return target
 
-    def save_processed_data(self, df: DataFrame, target_date: date) -> Path:
+    def save_processed_data(self, df: pd.DataFrame, target_date: date) -> Path:
         """
         Save processed DataFrame to final location
 

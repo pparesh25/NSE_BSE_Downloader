@@ -78,6 +78,18 @@ pathsને પ્રમાણિત કરતી નથી.
   official live calendar refreshમાં 2025–2026ના `38` entries verify થયા.
 - બંને Miniforge environmentsમાં suite `85 passed`; changed-file Ruff, compileall,
   GUI smoke અને official-calendar live smoke pass છે.
+- Phase 6 packaging-preparation શરૂ: source/Nuitka બંને માટે bundle-root config/QR
+  resolution, compiled-module version detection, stable Qt/macOS identity અને
+  `com.github.pparesh25.NSEBSEDownloader` bundle ID અમલમાં છે. ખોટા missing widget
+  imports દૂર થયા છે.
+- Build tooling હવે package install કે clean આપમેળે કરતું નથી; default dry-run
+  resource/dependency/metadata validate કરીને quoted command જ બતાવે છે. Compilation
+  માટે explicit `--build` અને cleanup માટે અલગ `--clean` જરૂરી છે. આ તબક્કે userની
+  સૂચના મુજબ કોઈ Nuitka build ચલાવાયો નથી.
+- બંને envમાં suite `93 passed`; macOS dry-run બંને Python 3.10/3.13 envમાં pass અને
+  `dist/` artifact બન્યો નથી. Strict committed mypy config હવે `0` errors/39
+  source files pass કરે છે. Current overall coverage હજુ `64%` છે, એટલે Phase 6
+  complete નથી.
 
 P0-1, P0-2, P0-3 અને Phase 3–5 માટે regression guards હવે હાજર છે. આગળનું
 release-blocking કાર્ય Phase 6નું coverage/type/build/release-quality hardening છે.
@@ -563,9 +575,12 @@ GUI failure નથી અને Phase 6 packaged-app smokeમાં native font/
 
 ### Phase 6 — Release quality, packaging અને documentation
 
+Status: **in progress** — packaged-runtime code/dry-run preparation complete;
+coverage, mypy, native build, signing/notarization અને fresh-user gates બાકી.
+
 1. Core/services/downloadersમાં minimum 85% અને overall minimum 70% coverage gate;
    critical state/append/retry modules માટે branch coverage.
-2. mypy errors `77 -> 0`; formatter/linter/type/test gates CIમાં.
+2. mypy `120 -> 0` complete; formatter/linter/type/test gates CIમાં ઉમેરવા.
 3. `mark_screener` અને `opentrader313` બંને env; supported packaged Python version
    matrix સ્પષ્ટ કરવી.
 4. macOS Nuitka build, fresh-user launch, QR/resource, update notification અને data

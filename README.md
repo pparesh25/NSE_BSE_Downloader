@@ -2,7 +2,7 @@
 
 A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
 ![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
@@ -29,7 +29,7 @@ Daily bhavcopy files remain official unadjusted market records. Corporate-action
 
 ## Installation
 
-Requirements: Python 3.8 or newer and an internet connection.
+Requirements: Python 3.10 or newer and an internet connection.
 
 ```bash
 git clone https://github.com/pparesh25/NSE_BSE_Downloader_PySide6.git
@@ -39,6 +39,23 @@ python main.py
 ```
 
 Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
+
+## Nuitka packaging preparation
+
+Nuitka packaging is configured but no packaged binary has been produced yet.
+The default commands only validate resources/dependencies and print the build
+command:
+
+```bash
+/Users/paresh/miniforge3/envs/opentrader313/bin/python build_nuitka_cross_platform.py --target-platform=darwin
+./build_nuitka_macos.sh
+```
+
+Neither command installs Nuitka, deletes output nor starts compilation without
+an explicit `--build`. Runtime config/QR paths work independently of the launch
+directory; user data and preferences remain outside the read-only app bundle.
+See [PACKAGING.md](PACKAGING.md) for the future build, signing/notarization and
+fresh-user verification checklist.
 
 ## Using the app
 
@@ -201,6 +218,9 @@ commits, failed history publication, corrupt JSON/CSV state, unexpected history
 revisions and rebuilds from checksummed raw snapshots. Lifecycle coverage also
 checks cooperative cancellation/window close, settings precedence, skipped
 updates, IST boundaries, official-calendar parsing, TTL refresh and stale fallback.
+They also verify bundle-root config/QR lookup, compiled-module version detection,
+platform-specific Nuitka command generation and the default no-build guard. The
+strict project mypy configuration currently passes all 39 source files.
 
 ## Version history
 
@@ -218,6 +238,8 @@ updates, IST boundaries, official-calendar parsing, TTL refresh and stale fallba
 - Added IST-aware official holiday refresh, validated settings precedence,
   cooperative cancellation and typed GUI completion outcomes.
 - Added remembered update-check and skipped-version controls.
+- Prepared deterministic Nuitka app metadata, bundle-root resources and an
+  explicit dry-run/build split; no packaged artifact is included in this release.
 - Fixed the NSE SME filename-era change and HTML-as-data responses.
 
 ### v1.0.1 (2025-08-07)

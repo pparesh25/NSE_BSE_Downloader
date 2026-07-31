@@ -9,37 +9,17 @@ import asyncio
 from datetime import date
 from enum import Enum
 from threading import Event
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 
-try:
-    from PySide6.QtWidgets import (
-        QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
-        QGroupBox, QFrame, QMessageBox, QStatusBar, QSizePolicy, QDateEdit,
-        QScrollArea,
-    )
-    from PySide6.QtCore import QDate, QThread, Signal, Qt, QTimer
-    from PySide6.QtGui import QFont, QAction
-    GUI_AVAILABLE = True
-except ImportError:
-    GUI_AVAILABLE = False
-    # Create dummy classes for when PySide6 is not available
-    class QMainWindow:
-        pass
-
-    class QThread:
-        pass
-
-    class Signal:
-        def __init__(self, *args):
-            pass
-
-        def connect(self, *args):
-            pass
-
-        def emit(self, *args):
-            pass
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
+    QGroupBox, QFrame, QMessageBox, QStatusBar, QSizePolicy, QDateEdit,
+    QScrollArea, QSpinBox,
+)
+from PySide6.QtCore import QDate, QThread, Signal, Qt, QTimer
+from PySide6.QtGui import QFont, QAction
 
 from ..core.config import Config
 from ..core.data_manager import DataManager
@@ -52,15 +32,12 @@ from ..downloaders.bse_index_downloader import BSEIndexDownloader
 from ..utils.update_checker import UpdateChecker
 from .update_dialog import UpdateDialog
 from .donate_dialog import DonateDialog
-from ..core.base_downloader import ProgressCallback
+from ..core.base_downloader import BaseDownloader, ProgressCallback
 from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.settings import SettingsService
 
-if GUI_AVAILABLE:
-    from .collapsible_section import CollapsibleSection
-else:
-    CollapsibleSection = object
+from .collapsible_section import CollapsibleSection
 
 
 
@@ -139,7 +116,7 @@ class DownloadWorker(QThread):
         self.timeout_seconds = timeout_seconds
         self.custom_start_date = custom_start_date
         self.custom_end_date = custom_end_date
-        self.downloaders = {}
+        self.downloaders: Dict[str, BaseDownloader] = {}
         self.logger = logging.getLogger(__name__)
 
         # Cross-thread cancellation state.  QThread interruption alone does
@@ -147,7 +124,7 @@ class DownloadWorker(QThread):
         # their tasks through the worker event loop.
         self.stop_requested = False
         self._cancel_event = Event()
-        self._loop = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tasks: Dict[str, asyncio.Task] = {}
         self.final_outcome = GUIOutcome.FAILED
 
@@ -221,7 +198,7 @@ class DownloadWorker(QThread):
 
     def _initialize_downloaders(self):
         """Initialize downloader instances"""
-        downloader_classes = {
+        downloader_classes: Dict[str, Any] = {
             'NSE_EQ': NSEEQDownloader,
             'NSE_FO': NSEFODownloader,
             'NSE_SME': NSESMEDownloader,
@@ -233,15 +210,13 @@ class DownloadWorker(QThread):
         for exchange in self.selected_exchanges:
             if exchange in downloader_classes:
                 try:
-                    downloader = downloader_classes[exchange](self.config)
-
-                    # Set up progress callback
-                    progress_callback = ProgressCallback(
-                        on_progress=lambda ex, pct, msg, e=exchange: self.progress_updated.emit(e, pct, msg),
-                        on_status=lambda ex, msg, e=exchange: self.status_updated.emit(e, msg),
-                        on_error=lambda ex, err, e=exchange: self.error_occurred.emit(e, err)
+                    downloader: BaseDownloader = downloader_classes[exchange](
+                        self.config
                     )
-                    downloader.set_progress_callback(progress_callback)
+
+                    downloader.set_progress_callback(
+                        self._progress_callback_for(exchange)
+                    )
                     downloader.cancel_requested = self.is_cancel_requested
 
                     if exchange.endswith("_EQ"):
@@ -259,9 +234,25 @@ class DownloadWorker(QThread):
                 except Exception as e:
                     self.logger.error(f"Failed to initialize {exchange} downloader: {e}")
 
+    def _progress_callback_for(self, exchange: str) -> ProgressCallback:
+        """Bind downloader callbacks to the selected GUI segment."""
+
+        def on_progress(
+            _reported_exchange: str, percentage: int, message: str
+        ) -> None:
+            self.progress_updated.emit(exchange, percentage, message)
+
+        def on_status(_reported_exchange: str, message: str) -> None:
+            self.status_updated.emit(exchange, message)
+
+        def on_error(_reported_exchange: str, error: str) -> None:
+            self.error_occurred.emit(exchange, error)
+
+        return ProgressCallback(on_progress, on_status, on_error)
+
     def run(self):
         """Run downloads in background thread"""
-        loop = None
+        loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             # Set up asyncio event loop for this thread
             loop = asyncio.new_event_loop()
@@ -593,9 +584,6 @@ class MainWindow(QMainWindow):
     def __init__(self, config: Config):
         super().__init__()
 
-        if not GUI_AVAILABLE:
-            raise GUIError("PySide6 is not available. Cannot create GUI.")
-
         self.config = config
         self.data_manager = DataManager(config)
         self.logger = logging.getLogger(__name__)
@@ -604,30 +592,30 @@ class MainWindow(QMainWindow):
         self.exchange_checkboxes: Dict[str, QCheckBox] = {}
         self.progress_bars: Dict[str, QProgressBar] = {}
         self.status_labels: Dict[str, QLabel] = {}
-        self.weekend_checkbox: Optional[QCheckBox] = None
+        self.weekend_checkbox: QCheckBox
 
         # Dynamic options (shown based on exchange selection)
-        self.sme_suffix_checkbox: Optional[QCheckBox] = None
-        self.sme_append_checkbox: Optional[QCheckBox] = None
-        self.index_append_checkbox: Optional[QCheckBox] = None
-        self.bse_index_append_checkbox: Optional[QCheckBox] = None
-        self.delivery_checkbox: Optional[QCheckBox] = None
-        self.fo_oi_checkbox: Optional[QCheckBox] = None
-        self.symbol_files_checkbox: Optional[QCheckBox] = None
-        self.corporate_actions_checkbox: Optional[QCheckBox] = None
-        self.legacy_output_checkbox: Optional[QCheckBox] = None
-        self.custom_date_checkbox: Optional[QCheckBox] = None
-        self.start_date_edit = None
-        self.end_date_edit = None
+        self.sme_suffix_checkbox: QCheckBox
+        self.sme_append_checkbox: QCheckBox
+        self.index_append_checkbox: QCheckBox
+        self.bse_index_append_checkbox: QCheckBox
+        self.delivery_checkbox: QCheckBox
+        self.fo_oi_checkbox: QCheckBox
+        self.symbol_files_checkbox: QCheckBox
+        self.corporate_actions_checkbox: QCheckBox
+        self.legacy_output_checkbox: QCheckBox
+        self.custom_date_checkbox: QCheckBox
+        self.start_date_edit: QDateEdit
+        self.end_date_edit: QDateEdit
         self.collapsible_sections: Dict[str, CollapsibleSection] = {}
 
         # Timeout option
-        self.timeout_spinbox = None
+        self.timeout_spinbox: QSpinBox
 
         # Update checker (debug mode disabled to test real update checking)
         # UpdateChecker will auto-detect version from version.py
         self.update_checker = UpdateChecker(debug=False)
-        self.update_worker = None
+        self.update_worker: Optional[UpdateCheckWorker] = None
 
         # User preferences
         self.settings = SettingsService(config)
@@ -636,8 +624,8 @@ class MainWindow(QMainWindow):
 
         # Download management
         self.download_worker: Optional[DownloadWorker] = None
-        self.download_button: Optional[QPushButton] = None
-        self.stop_button: Optional[QPushButton] = None
+        self.download_button: QPushButton
+        self.stop_button: QPushButton
 
         # Status tracking
         self.download_status: Dict[str, str] = {}
@@ -684,11 +672,11 @@ class MainWindow(QMainWindow):
             self.logger.info(f"Loading window size from preferences: {width}x{height}")
 
             # Set window size constraints
-            gui_settings = self.user_prefs.get_gui_settings()
-            min_width = gui_settings.get('min_window_width', 500)
-            max_width = gui_settings.get('max_window_width', 1200)
-            min_height = gui_settings.get('min_window_height', 600)
-            max_height = gui_settings.get('max_window_height', 1400)
+            preference_gui_settings = self.user_prefs.get_gui_settings()
+            min_width = preference_gui_settings.get('min_window_width', 500)
+            max_width = preference_gui_settings.get('max_window_width', 1200)
+            min_height = preference_gui_settings.get('min_window_height', 600)
+            max_height = preference_gui_settings.get('max_window_height', 1400)
 
             self.setMinimumSize(min_width, min_height)
             self.setMaximumSize(max_width, max_height)
@@ -947,7 +935,7 @@ class MainWindow(QMainWindow):
 
     def get_selected_date_range(self):
         """Return custom Python dates, or ``(None, None)`` in auto mode."""
-        if not self.custom_date_checkbox or not self.custom_date_checkbox.isChecked():
+        if not self.custom_date_checkbox.isChecked():
             return None, None
         return (
             self._python_date(self.start_date_edit.date()),
@@ -955,9 +943,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_date_controls(self) -> None:
-        custom = bool(
-            self.custom_date_checkbox and self.custom_date_checkbox.isChecked()
-        )
+        custom = self.custom_date_checkbox.isChecked()
         self.start_date_edit.setEnabled(custom)
         self.end_date_edit.setEnabled(custom)
         self.date_mode_label.setText(
@@ -991,7 +977,6 @@ class MainWindow(QMainWindow):
         basic_row.addWidget(self.weekend_checkbox)
 
         # Response timeout option
-        from PySide6.QtWidgets import QSpinBox
         timeout_label = QLabel("Response Timeout (sec):")
         self.timeout_spinbox = QSpinBox()
         self.timeout_spinbox.setMinimum(1)
@@ -1619,11 +1604,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event"""
         try:
+            download_worker = self.download_worker
+            update_worker = self.update_worker
             download_running = bool(
-                self.download_worker and self.download_worker.isRunning()
+                download_worker and download_worker.isRunning()
             )
             update_running = bool(
-                self.update_worker and self.update_worker.isRunning()
+                update_worker and update_worker.isRunning()
             )
             if download_running and not self._close_after_workers:
                 reply = QMessageBox.question(
@@ -1640,10 +1627,10 @@ class MainWindow(QMainWindow):
 
             if download_running or update_running:
                 self._close_after_workers = True
-                if download_running:
-                    self.download_worker.request_stop()
-                if update_running:
-                    self.update_worker.request_stop()
+                if download_running and download_worker is not None:
+                    download_worker.request_stop()
+                if update_running and update_worker is not None:
+                    update_worker.request_stop()
                 self.status_bar.showMessage(
                     "Closing after background work stops safely..."
                 )

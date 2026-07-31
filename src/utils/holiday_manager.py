@@ -253,6 +253,7 @@ class HolidayManager:
         combined = set(cached)
         covered = set(cached_years)
         all_refreshed = True
+        loaded_at: Optional[datetime]
         if years_to_fetch:
             self._refresh_attempted_at = self._now()
             self._attempted_years = set(years_to_fetch)

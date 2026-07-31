@@ -12,7 +12,7 @@ import re
 import math
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 import logging
 
 from .config import Config
@@ -466,7 +466,7 @@ class DataManager:
             self.logger.error(f"Error counting files for {exchange}_{segment}: {e}")
             return 0
 
-    def get_data_summary(self) -> Dict[str, Dict[str, any]]:
+    def get_data_summary(self) -> Dict[str, Dict[str, Any]]:
         """
         Get summary of available data for all exchanges
 

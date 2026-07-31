@@ -56,7 +56,7 @@ class UpdateChecker:
         self.download_url: Optional[str] = None
         self.expected_sha256: Optional[str] = None
 
-        self.logger.info(f"Update checker initialized:")
+        self.logger.info("Update checker initialized:")
         self.logger.info(f"  Current version: {current_version}")
         self.logger.info(f"  Version info URL: {self.version_info_url}")
         self.logger.info("  Update artifact: waiting for verified release metadata")
@@ -565,6 +565,22 @@ class UpdateChecker:
             Version string from version.py, defaults to "0.0.0" if not found
         """
         try:
+            # Compiled deployments contain the version module as code; they do
+            # not need (and should not ship) a second editable version.py data
+            # file beside the executable.
+            try:
+                from version import __version__ as module_version
+
+                detected = str(module_version).strip()
+                if detected:
+                    self.logger.info(
+                        "Detected local version from compiled module: %s",
+                        detected,
+                    )
+                    return detected
+            except (ImportError, AttributeError):
+                pass
+
             # Try to find version.py in multiple possible locations
             possible_paths: list[Path] = [
                 # From src/utils/ directory, go up to project root

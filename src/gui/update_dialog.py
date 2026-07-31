@@ -92,7 +92,7 @@ class UpdateDialog(QDialog):
         self.update_info = update_info
         self.update_checker = update_checker or UpdateChecker()
         self.user_prefs = preferences or UserPreferences()
-        self.download_worker = None
+        self.download_worker: Optional[UpdateDownloadWorker] = None
         self._close_after_download = False
         self.logger = logging.getLogger(__name__)
 

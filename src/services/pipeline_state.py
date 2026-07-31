@@ -106,9 +106,11 @@ class PipelineManifest:
             exchange = record.get("exchange")
             segment = record.get("segment")
             raw_date = record.get("date")
-            if not all(isinstance(value, str) and value for value in (
-                exchange, segment, raw_date
-            )):
+            if (
+                not isinstance(exchange, str) or not exchange
+                or not isinstance(segment, str) or not segment
+                or not isinstance(raw_date, str) or not raw_date
+            ):
                 raise ValueError("pipeline record identity is invalid")
             date.fromisoformat(raw_date)
             if key != f"{exchange}_{segment}:{raw_date}":

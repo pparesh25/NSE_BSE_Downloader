@@ -24,7 +24,10 @@ class NSEIndexDownloader(BaseDownloader):
         return price_source("NSE", "INDEX", target_date).url
 
     def process_downloaded_data(
-        self, file_data: bytes, file_date: date
+        self,
+        file_data: bytes,
+        file_date: date,
+        delivery_data: Optional[bytes] = None,
     ) -> Optional[pd.DataFrame]:
         try:
             result = self.transform_data(read_report(file_data), file_date)

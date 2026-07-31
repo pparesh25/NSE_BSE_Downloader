@@ -17,12 +17,16 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add src directory to Python path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
 from src.core.config import Config
 from src.gui.main_window import MainWindow
+from runtime_paths import default_config_path
 from version import get_version
+from app_metadata import (
+    APP_NAME,
+    ORGANIZATION_DOMAIN,
+    ORGANIZATION_NAME,
+    PRODUCT_NAME,
+)
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -50,7 +54,7 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).parent / "config.yaml"),
+        default=str(default_config_path()),
         help="Path to configuration file (default: config.yaml)"
     )
 
@@ -157,8 +161,11 @@ def run_gui_mode(config_path: str):
     os.environ['QT_SCALE_FACTOR'] = '1'
 
     app = QApplication(sys.argv)
-    app.setApplicationName("NSE/BSE Data Downloader")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(PRODUCT_NAME)
     app.setApplicationVersion(get_version())
+    app.setOrganizationName(ORGANIZATION_NAME)
+    app.setOrganizationDomain(ORGANIZATION_DOMAIN)
 
     # Set application style
     app.setStyle("Fusion")

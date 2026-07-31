@@ -33,7 +33,7 @@ class UserPreferences:
 
         # Default preferences
         today = DateUtils.today_ist()
-        self.default_preferences = {
+        self.default_preferences: Dict[str, Any] = {
             "version": "1.0",
             "last_updated": DateUtils.now_ist().isoformat(),
             "exchange_selection": {

@@ -12,6 +12,7 @@ app_settings:
     - "Custom calendar ranges and collapsible GUI sections"
     - "Official NSE holiday refresh with IST-aware trading dates"
     - "Cooperative cancellation and typed GUI outcomes"
+    - "Nuitka-safe bundled resources and stable packaged-app identity"
     - "Automatic update notifications"
 
 # Data storage paths

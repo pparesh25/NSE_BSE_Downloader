@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 from .exceptions import ConfigError
+from runtime_paths import default_config_path
 
 
 @dataclass
@@ -65,7 +66,9 @@ class Config:
         Args:
             config_path: Path to configuration file. If None, uses default config.yaml
         """
-        self.config_path = Path(config_path) if config_path else Path("config.yaml")
+        self.config_path = (
+            Path(config_path) if config_path else default_config_path()
+        )
         self._config_data: Dict[str, Any] = {}
         self._exchange_configs: Dict[str, Dict[str, ExchangeConfig]] = {}
         self._download_settings = DownloadSettings()

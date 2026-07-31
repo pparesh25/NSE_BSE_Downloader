@@ -11,7 +11,7 @@ Provides memory-efficient data processing with:
 import gc
 import logging
 from pathlib import Path
-from typing import Iterator, Optional, Dict, Any, List
+from typing import Iterator, Optional, Dict, Any, Callable
 from contextlib import contextmanager
 
 try:
@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover
 
 import pandas as pd
 
-from ..core.exceptions import MemoryError as CustomMemoryError, DataProcessingError
+from ..core.exceptions import DataProcessingError
 
 
 class MemoryOptimizer:
@@ -113,7 +113,7 @@ class MemoryOptimizer:
             # Force garbage collection
             self.force_garbage_collection()
 
-    def force_garbage_collection(self) -> Dict[str, int]:
+    def force_garbage_collection(self) -> Dict[str, float]:
         """
         Force garbage collection and return statistics
 
@@ -253,7 +253,7 @@ class MemoryOptimizer:
 
     def process_large_csv(self,
                          file_path: Path,
-                         transform_func: callable,
+                         transform_func: Callable[[pd.DataFrame], pd.DataFrame],
                          output_path: Path,
                          chunk_size: Optional[int] = None,
                          **read_kwargs) -> Dict[str, Any]:
@@ -272,7 +272,7 @@ class MemoryOptimizer:
         """
         chunk_size = chunk_size or self.chunk_size
 
-        stats = {
+        stats: Dict[str, Any] = {
             'total_rows': 0,
             'chunks_processed': 0,
             'processing_time': 0,
@@ -361,7 +361,9 @@ class MemoryOptimizer:
         }
 
     @staticmethod
-    def estimate_csv_memory_usage(file_path: Path, sample_rows: int = 1000) -> Dict[str, float]:
+    def estimate_csv_memory_usage(
+        file_path: Path, sample_rows: int = 1000
+    ) -> Dict[str, Any]:
         """
         Estimate memory usage for loading a CSV file
 

@@ -43,6 +43,7 @@ Examples:
     python main.py --config custom.yaml  # Use custom config
     python main.py --rebuild-symbol NSE RELIANCE
     python main.py --rebuild-exchange BSE
+    python main.py --rebuild-combined NSE 2026-07-31
         """
     )
 
@@ -75,6 +76,12 @@ Examples:
         action="store_true",
         help="Rebuild all NSE/BSE symbol histories from raw snapshots",
     )
+    repair.add_argument(
+        "--rebuild-combined",
+        nargs=2,
+        metavar=("EXCHANGE", "YYYY-MM-DD"),
+        help="Rebuild one deterministic EQ+SME/Index output from components",
+    )
 
     return parser
 
@@ -82,10 +89,37 @@ Examples:
 def run_rebuild_mode(config_path: str, args) -> int:
     """Run an explicit fail-closed symbol-history repair command."""
 
-    from src.services.rebuild_service import SymbolHistoryRebuilder
-
     try:
         config = Config(config_path)
+        if args.rebuild_combined:
+            from datetime import date
+            from src.services.combined_file_builder import CombinedFileBuilder
+            from src.utils.user_preferences import UserPreferences
+
+            exchange, raw_date = args.rebuild_combined
+            exchange = exchange.upper()
+            if exchange not in {"NSE", "BSE"}:
+                raise ValueError("EXCHANGE must be NSE or BSE")
+            target_date = date.fromisoformat(raw_date)
+            builder = CombinedFileBuilder(config)
+            dependencies = builder.dependencies_from_options(
+                exchange,
+                UserPreferences().get_append_options(),
+            )
+            build_result = builder.reconcile(
+                exchange, target_date, dependencies
+            )
+            if not build_result.ok:
+                raise RuntimeError(build_result.error)
+            print(
+                f"Rebuilt {build_result.output_path} with "
+                f"{build_result.rows} rows from "
+                f"{', '.join(build_result.components)}"
+            )
+            return 0
+
+        from src.services.rebuild_service import SymbolHistoryRebuilder
+
         rebuilder = SymbolHistoryRebuilder(config.base_data_path)
         if args.rebuild_symbol:
             exchange, symbol = args.rebuild_symbol
@@ -165,6 +199,7 @@ def main():
             or args.rebuild_exchange
             or args.rebuild_registry
             or args.rebuild_all
+            or args.rebuild_combined
         ):
             return run_rebuild_mode(str(config_path), args)
 

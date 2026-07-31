@@ -25,7 +25,7 @@ except ImportError:
 from .config import Config
 from .data_manager import DataManager
 from .exceptions import DataProcessingError, FileOperationError
-from ..services.memory_append_manager import MemoryAppendManager
+from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.pipeline_state import PipelineManifest, SegmentResult
 
 
@@ -88,10 +88,7 @@ class BaseDownloader(ABC):
         self.data_manager = DataManager(config)
         self.logger = logging.getLogger(f"{__name__}.{self.exchange_segment}")
 
-        # Initialize memory append manager (shared instance)
-        if not hasattr(BaseDownloader, '_memory_append_manager'):
-            BaseDownloader._memory_append_manager = MemoryAppendManager(config)
-        self.memory_append_manager = BaseDownloader._memory_append_manager
+        self.combined_builder = CombinedFileBuilder(config)
         self.pipeline_manifest = PipelineManifest(config.base_data_path)
         self.last_segment_result: Optional[SegmentResult] = None
 
@@ -237,7 +234,13 @@ class BaseDownloader(ABC):
         """Return required and disabled stages for the current user options."""
 
         required = ["downloaded", "validated", "daily"]
-        disabled = ["combined"]
+        disabled = []
+        if self.segment == "EQ" and getattr(
+            self, "combined_required", False
+        ):
+            required.append("combined")
+        else:
+            disabled.append("combined")
         if self.segment in ("EQ", "SME"):
             if self.get_download_option("include_delivery_data", True):
                 required.append("delivery")
@@ -255,6 +258,22 @@ class BaseDownloader(ABC):
             disabled.extend(["symbols", "delivery", "actions"])
         return required, disabled
 
+    def _core_pipeline_ok(self, result: SegmentResult) -> bool:
+        """Return true when every pre-reconciliation enabled stage is complete."""
+
+        required, _ = self._pipeline_requirements()
+        core_required = set(required).difference({"combined"})
+        if not result.dates:
+            return False
+        for item in result.dates:
+            if item.status == "skipped":
+                continue
+            if not core_required.issubset(item.completed_stages):
+                return False
+            if set(item.failed_stages).difference({"combined"}):
+                return False
+        return True
+
     def _pipeline(self) -> PipelineManifest:
         """Return the manifest, including for lightweight test subclasses."""
 
@@ -264,15 +283,32 @@ class BaseDownloader(ABC):
             self.pipeline_manifest = manifest
         return manifest
 
+    def _combined_builder(self) -> CombinedFileBuilder:
+        """Return the persisted-component builder for lightweight subclasses."""
+
+        builder = getattr(self, "combined_builder", None)
+        if builder is None:
+            builder = CombinedFileBuilder(self.config)
+            self.combined_builder = builder
+        return builder
+
     def _begin_pipeline_date(self, target_date: date) -> None:
         required, disabled = self._pipeline_requirements()
-        self._pipeline().begin(
+        pipeline = self._pipeline()
+        pipeline.begin(
             self.exchange,
             self.segment,
             target_date,
             required,
             disabled,
         )
+        # A historical rerun may already have a completed combined stage.
+        # Reset it before replacing any component so a crash cannot make the
+        # previous recipe look current.
+        if "combined" in required:
+            pipeline.require_stage(
+                self.exchange, self.segment, target_date, "combined"
+            )
 
     def _mark_pipeline(
         self,
@@ -338,22 +374,53 @@ class BaseDownloader(ABC):
         try:
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
+            component = None
+            if self.segment in {"EQ", "SME", "INDEX"}:
+                component = self._combined_builder().save_component(
+                    self.exchange, self.segment, target_date, df
+                )
 
-            # Save without header and index (as per original code), but never
-            # expose a partially-written file if the app is interrupted.
-            temporary = output_path.with_suffix(output_path.suffix + ".tmp")
-            df.to_csv(temporary, index=False, header=False)
-            temporary.replace(output_path)
+            publication_deferred = bool(
+                self.segment == "EQ"
+                and getattr(self, "combined_required", False)
+            )
+            if not publication_deferred:
+                # Save without header and index (as per original code), but
+                # never expose a partially-written file if interrupted.
+                temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+                try:
+                    df.to_csv(temporary, index=False, header=False)
+                    temporary.replace(output_path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            component_metadata = {}
+            if component is not None:
+                component_metadata = {
+                    "component_path": str(component.path),
+                    "component_sha256": component.sha256,
+                }
+            published_sha256 = (
+                component.sha256
+                if publication_deferred and component is not None
+                else self._file_sha256(output_path)
+            )
             self._mark_pipeline(
                 target_date,
                 "daily",
                 "complete",
                 path=str(output_path),
-                sha256=self._file_sha256(output_path),
+                sha256=published_sha256,
                 rows=len(df),
+                publication_deferred=publication_deferred,
+                **component_metadata,
             )
 
-            self.logger.info(f"Saved processed data: {filename}")
+            if publication_deferred:
+                self.logger.info(
+                    f"Staged processed data for combined publication: {filename}"
+                )
+            else:
+                self.logger.info(f"Saved processed data: {filename}")
 
             options = {
                 "generate_symbol_files": self.get_download_option(
@@ -378,25 +445,6 @@ class BaseDownloader(ABC):
                 self._mark_pipeline(
                     target_date, "symbols", "complete", files=written
                 )
-
-            current_stage = "combined"
-
-            # Store data in memory for append operations
-            self.memory_append_manager.store_data(
-                exchange=self.exchange,
-                segment=self.segment,
-                target_date=target_date,
-                data=df
-            )
-
-            # Try append operations (non-blocking)
-            append_results = self.memory_append_manager.try_append_operations(target_date)
-            if append_results:
-                self.logger.info(f"Append operations completed: {append_results}")
-
-            # Special handling for BSE EQ - try direct file append if memory append failed
-            if self.exchange == 'BSE' and self.segment == 'EQ':
-                self._try_direct_bse_append(target_date, output_path)
 
             return output_path
 
@@ -670,7 +718,7 @@ class BaseDownloader(ABC):
         self.last_segment_result = self._pipeline().segment_result(
             self.exchange, self.segment, days
         )
-        return self.last_segment_result.ok
+        return self._core_pipeline_ok(self.last_segment_result)
 
     async def _download_price_implementation(
         self, working_days: List[date]
@@ -767,59 +815,7 @@ class BaseDownloader(ABC):
             self.exchange, self.segment, days
         )
         self.logger.info(self.last_segment_result.summary())
-        return self.last_segment_result.ok
-
-    def _try_direct_bse_append(self, target_date: date, bse_eq_file_path: Path) -> None:
-        """Try direct BSE INDEX to BSE EQ file append (fallback method)"""
-        try:
-            # Check if BSE append is enabled
-            user_prefs = self.memory_append_manager.user_prefs
-            if not user_prefs.get_bse_index_append_to_eq():
-                self.logger.debug("BSE Index append disabled - skipping direct append")
-                return
-
-            # Look for BSE INDEX file for the same date
-            bse_index_file_path = self.data_path.parent / "INDEX" / f"{target_date.strftime('%Y-%m-%d')}-BSE-INDEX.txt"
-
-            if not bse_index_file_path.exists():
-                self.logger.debug(f"BSE INDEX file not found for direct append: {bse_index_file_path}")
-                return
-
-            # Check if append already done (look for BSE SENSEX in EQ file)
-            with open(bse_eq_file_path, 'r') as f:
-                eq_content = f.read()
-
-            if "BSE SENSEX" in eq_content:
-                self.logger.debug("BSE INDEX data already appears to be in EQ file - skipping direct append")
-                return
-
-            # Read BSE INDEX data
-            with open(bse_index_file_path, 'r') as f:
-                index_lines = f.readlines()
-
-            if not index_lines:
-                self.logger.warning("BSE INDEX file is empty - skipping direct append")
-                return
-
-            if not self.get_download_option("legacy_seven_column_output", False):
-                index_lines = [
-                    f"{line.rstrip()},,\n" for line in index_lines if line.strip()
-                ]
-
-            # Rewrite through a sibling temporary file so the user never sees
-            # a partially appended daily bhavcopy.
-            temporary = bse_eq_file_path.with_suffix(
-                bse_eq_file_path.suffix + ".tmp"
-            )
-            temporary.write_text(
-                eq_content + "".join(index_lines), encoding="utf-8"
-            )
-            temporary.replace(bse_eq_file_path)
-
-            self.logger.info(f"✅ Direct BSE append completed: Added {len(index_lines)} INDEX rows to {bse_eq_file_path.name}")
-
-        except Exception as e:
-            self.logger.error(f"Error in direct BSE append: {e}")
+        return self._core_pipeline_ok(self.last_segment_result)
 
     def cleanup_temp_files(self) -> None:
         """Clean up temporary files for this downloader (no longer needed)"""

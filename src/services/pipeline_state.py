@@ -212,6 +212,58 @@ class PipelineManifest:
             self._refresh(data["dates"][key])
             self._state.write(data)
 
+    def has_date(
+        self, exchange: str, segment: str, target_date: date
+    ) -> bool:
+        key = self._key(exchange, segment, target_date)
+        with self._lock:
+            return key in self._state.read()["dates"]
+
+    def require_stage(
+        self, exchange: str, segment: str, target_date: date, stage: str
+    ) -> None:
+        """Make a stage part of completion and reset it for reconciliation."""
+
+        if stage not in PIPELINE_STAGES:
+            raise ValueError(f"Unknown pipeline stage: {stage}")
+        key = self._key(exchange, segment, target_date)
+        with self._lock:
+            data = self._state.read()
+            if key not in data["dates"]:
+                raise ValueError(f"Pipeline date was not started: {key}")
+            record = data["dates"][key]
+            if stage not in record["required_stages"]:
+                record["required_stages"].append(stage)
+            record["stages"][stage] = {
+                "status": "pending",
+                "updated_at": self._timestamp(),
+            }
+            self._refresh(record)
+            self._state.write(data)
+
+    def disable_stage(
+        self, exchange: str, segment: str, target_date: date, stage: str
+    ) -> None:
+        """Remove a disabled optional stage from the completion requirement."""
+
+        if stage not in PIPELINE_STAGES:
+            raise ValueError(f"Unknown pipeline stage: {stage}")
+        key = self._key(exchange, segment, target_date)
+        with self._lock:
+            data = self._state.read()
+            if key not in data["dates"]:
+                raise ValueError(f"Pipeline date was not started: {key}")
+            record = data["dates"][key]
+            record["required_stages"] = [
+                value for value in record["required_stages"] if value != stage
+            ]
+            record["stages"][stage] = {
+                "status": "disabled",
+                "updated_at": self._timestamp(),
+            }
+            self._refresh(record)
+            self._state.write(data)
+
     def skip_date(
         self, exchange: str, segment: str, target_date: date, reason: str
     ) -> None:

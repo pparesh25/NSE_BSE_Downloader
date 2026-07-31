@@ -14,21 +14,30 @@ try:
     from PySide6.QtWidgets import (
         QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
         QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
-        QGroupBox, QFrame, QSplitter, QMessageBox, QApplication,
-        QStatusBar, QMenuBar, QMenu, QSizePolicy, QDateEdit, QScrollArea
+        QGroupBox, QFrame, QMessageBox, QStatusBar, QSizePolicy, QDateEdit,
+        QScrollArea,
     )
     from PySide6.QtCore import QDate, QThread, Signal, Qt, QTimer
-    from PySide6.QtGui import QFont, QIcon, QAction
+    from PySide6.QtGui import QFont, QAction
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
     # Create dummy classes for when PySide6 is not available
-    class QMainWindow: pass
-    class QThread: pass
+    class QMainWindow:
+        pass
+
+    class QThread:
+        pass
+
     class Signal:
-        def __init__(self, *args): pass
-        def connect(self, *args): pass
-        def emit(self, *args): pass
+        def __init__(self, *args):
+            pass
+
+        def connect(self, *args):
+            pass
+
+        def emit(self, *args):
+            pass
 
 from ..core.config import Config
 from ..core.data_manager import DataManager
@@ -44,6 +53,7 @@ from .donate_dialog import DonateDialog
 from ..utils.user_preferences import UserPreferences
 from ..core.base_downloader import ProgressCallback
 from ..core.exceptions import GUIError
+from ..services.combined_file_builder import CombinedFileBuilder
 
 if GUI_AVAILABLE:
     from .collapsible_section import CollapsibleSection
@@ -89,10 +99,14 @@ class DownloadWorker(QThread):
         timeout_seconds: int = 5,
         custom_start_date: Optional[date] = None,
         custom_end_date: Optional[date] = None,
+        append_options: Optional[Dict[str, bool]] = None,
     ):
         super().__init__()
         self.config = config
-        self.selected_exchanges = selected_exchanges
+        self.append_options = append_options or {}
+        self.selected_exchanges = self.expand_selected_exchanges(
+            selected_exchanges, self.append_options
+        )
         self.include_weekends = include_weekends
         self.timeout_seconds = timeout_seconds
         self.custom_start_date = custom_start_date
@@ -108,6 +122,29 @@ class DownloadWorker(QThread):
 
         # Initialize downloaders
         self._initialize_downloaders()
+
+    @staticmethod
+    def expand_selected_exchanges(
+        selected_exchanges: List[str], append_options: Dict[str, bool]
+    ) -> List[str]:
+        """Include every segment explicitly required by a combined-file option."""
+
+        selected = list(dict.fromkeys(selected_exchanges))
+        if "NSE_EQ" in selected:
+            if append_options.get("sme_append_to_eq", False):
+                selected.append("NSE_SME")
+            if append_options.get("index_append_to_eq", False):
+                selected.append("NSE_INDEX")
+        if (
+            "BSE_EQ" in selected
+            and append_options.get("bse_index_append_to_eq", False)
+        ):
+            selected.append("BSE_INDEX")
+        order = (
+            "NSE_EQ", "NSE_FO", "NSE_SME", "NSE_INDEX", "BSE_EQ", "BSE_INDEX"
+        )
+        unique = set(selected)
+        return [name for name in order if name in unique]
 
     def update_timeout(self, new_timeout_seconds: int):
         """
@@ -149,6 +186,16 @@ class DownloadWorker(QThread):
                         on_error=lambda ex, err, e=exchange: self.error_occurred.emit(e, err)
                     )
                     downloader.set_progress_callback(progress_callback)
+
+                    if exchange.endswith("_EQ"):
+                        market = exchange.split("_", 1)[0]
+                        dependencies = CombinedFileBuilder.dependencies_from_options(
+                            market,
+                            self.append_options,
+                            self.selected_exchanges,
+                        )
+                        downloader.combined_dependencies = dependencies
+                        downloader.combined_required = bool(dependencies)
 
                     self.downloaders[exchange] = downloader
 
@@ -203,7 +250,10 @@ class DownloadWorker(QThread):
         # Wait for all downloads to complete
         results = await asyncio.gather(*download_tasks, return_exceptions=True)
 
-        # Check results
+        settled = dict(zip(self.downloaders, results))
+        self._reconcile_combined_outputs(settled)
+
+        # Emit final results only after deterministic combined reconciliation.
         success_count = 0
         for i, result in enumerate(results):
             exchange = list(self.downloaders.keys())[i]
@@ -212,12 +262,94 @@ class DownloadWorker(QThread):
                 self.error_occurred.emit(exchange, f"Download failed: {result}")
                 self.download_completed.emit(exchange, False)
             else:
-                success = bool(result)
+                downloader = self.downloaders[exchange]
+                structured = getattr(downloader, "last_segment_result", None)
+                success = bool(result) and (
+                    structured is None or structured.ok
+                )
                 self.download_completed.emit(exchange, success)
                 if success:
                     success_count += 1
 
         return success_count == len(download_tasks)
+
+    def _reconcile_combined_outputs(self, settled: Dict[str, object]) -> None:
+        """Build EQ outputs after all selected segment tasks have settled."""
+
+        builder = CombinedFileBuilder(self.config)
+        selected = set(self.downloaders)
+        for exchange in ("NSE", "BSE"):
+            eq_name = f"{exchange}_EQ"
+            if eq_name not in selected:
+                continue
+            eq_task_result = settled.get(eq_name)
+            if isinstance(eq_task_result, Exception) or not eq_task_result:
+                continue
+            eq_downloader = self.downloaders[eq_name]
+            eq_result = getattr(eq_downloader, "last_segment_result", None)
+            if eq_result is None:
+                continue
+            dependencies = builder.dependencies_from_options(
+                exchange, self.append_options, selected
+            )
+            for item in eq_result.dates:
+                if "daily" not in item.completed_stages:
+                    continue
+                unavailable = []
+                for segment in dependencies:
+                    name = f"{exchange}_{segment}"
+                    dependency_task = settled.get(name)
+                    dependency_downloader = self.downloaders.get(name)
+                    if isinstance(dependency_task, Exception) or dependency_task is False:
+                        unavailable.append(name)
+                        continue
+                    dependency_result = getattr(
+                        dependency_downloader, "last_segment_result", None
+                    )
+                    matching = (
+                        next((
+                            value for value in dependency_result.dates
+                            if value.target_date == item.target_date
+                        ), None)
+                        if dependency_result is not None else None
+                    )
+                    if matching is not None and matching.status != "success":
+                        unavailable.append(name)
+                    elif matching is None and not builder.component_exists(
+                        exchange, segment, item.target_date
+                    ):
+                        unavailable.append(name)
+
+                if unavailable:
+                    build_result = builder.record_failure(
+                        exchange,
+                        item.target_date,
+                        dependencies,
+                        "Required segment did not complete: "
+                        + ", ".join(unavailable),
+                    )
+                else:
+                    build_result = builder.reconcile(
+                        exchange, item.target_date, dependencies
+                    )
+                if build_result.ok:
+                    self.status_updated.emit(
+                        eq_name,
+                        f"Combined reconciliation {build_result.status}: "
+                        f"{build_result.rows} rows from "
+                        f"{', '.join(build_result.components)}",
+                    )
+                else:
+                    self.error_occurred.emit(
+                        eq_name,
+                        f"Combined reconciliation failed for "
+                        f"{item.target_date}: {build_result.error}",
+                    )
+            eq_downloader.last_segment_result = builder.pipeline.segment_result(
+                exchange,
+                "EQ",
+                [item.target_date for item in eq_result.dates],
+            )
 
     async def _download_exchange_data(self, exchange: str, downloader) -> bool:
         """Download data for a specific exchange"""
@@ -276,15 +408,25 @@ class DownloadWorker(QThread):
 
             result = getattr(downloader, "last_segment_result", None)
             detail = f" ({result.summary()})" if result is not None else ""
-            if success and (result is None or result.ok):
+            waiting_for_combined = bool(
+                success and getattr(downloader, "combined_required", False)
+            )
+            if waiting_for_combined:
                 self.status_updated.emit(
-                    exchange, f"Download completed successfully{detail}"
+                    exchange,
+                    f"Segment data ready; waiting for combined reconciliation{detail}",
+                )
+            elif success and (result is None or result.ok):
+                self.status_updated.emit(
+                    exchange, f"Segment data ready{detail}"
                 )
             else:
                 self.status_updated.emit(
                     exchange, f"Download completed with errors{detail}"
                 )
 
+            if waiting_for_combined:
+                return success
             return success and (result is None or result.ok)
 
         except Exception as e:
@@ -796,24 +938,35 @@ class MainWindow(QMainWindow):
 
     def update_dynamic_options(self):
         """Update visibility of dynamic options based on exchange selection"""
+        # Append controls stay visible when EQ is selected so a persisted
+        # dependency preference never becomes hidden and surprising.
+        nse_eq_selected = self.exchange_checkboxes.get(
+            'NSE_EQ', QCheckBox()
+        ).isChecked()
+
         # Check if NSE SME is selected
         nse_sme_selected = self.exchange_checkboxes.get('NSE_SME', QCheckBox()).isChecked()
 
         # Show/hide NSE SME options
         self.sme_suffix_checkbox.setVisible(nse_sme_selected)
-        self.sme_append_checkbox.setVisible(nse_sme_selected)
+        self.sme_append_checkbox.setVisible(nse_sme_selected or nse_eq_selected)
 
         # Check if NSE INDEX is selected
         nse_index_selected = self.exchange_checkboxes.get('NSE_INDEX', QCheckBox()).isChecked()
 
         # Show/hide NSE INDEX options
-        self.index_append_checkbox.setVisible(nse_index_selected)
+        self.index_append_checkbox.setVisible(nse_index_selected or nse_eq_selected)
 
         # Check if BSE INDEX is selected
         bse_index_selected = self.exchange_checkboxes.get('BSE_INDEX', QCheckBox()).isChecked()
 
         # Show/hide BSE INDEX options
-        self.bse_index_append_checkbox.setVisible(bse_index_selected)
+        bse_eq_selected = self.exchange_checkboxes.get(
+            'BSE_EQ', QCheckBox()
+        ).isChecked()
+        self.bse_index_append_checkbox.setVisible(
+            bse_index_selected or bse_eq_selected
+        )
 
         # Update layout to accommodate changes
         self.update()
@@ -1006,6 +1159,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please select at least one exchange to download.")
                 return
 
+            append_options = {
+                "sme_append_to_eq": self.sme_append_checkbox.isChecked(),
+                "index_append_to_eq": self.index_append_checkbox.isChecked(),
+                "bse_index_append_to_eq": (
+                    self.bse_index_append_checkbox.isChecked()
+                ),
+            }
+            selected_exchanges = DownloadWorker.expand_selected_exchanges(
+                selected_exchanges, append_options
+            )
+
             custom_start, custom_end = self.get_selected_date_range()
             if custom_start and custom_end and custom_start > custom_end:
                 QMessageBox.warning(
@@ -1068,6 +1232,7 @@ class MainWindow(QMainWindow):
                 timeout_seconds,
                 custom_start,
                 custom_end,
+                append_options,
             )
 
             # Connect signals

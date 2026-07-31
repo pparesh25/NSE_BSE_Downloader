@@ -7,9 +7,8 @@ import pytest
 
 from src.downloaders.bse_index_downloader import BSEIndexDownloader
 from src.downloaders.nse_index_downloader import NSEIndexDownloader
-from src.services.canonical_data import EQUITY_DAILY_COLUMNS, INDEX_DAILY_COLUMNS
+from src.services.canonical_data import INDEX_DAILY_COLUMNS
 from src.core.exceptions import DataProcessingError
-from src.services.memory_append_manager import MemoryAppendManager
 from src.utils.memory_optimizer import MemoryOptimizer
 from src.utils.update_checker import UpdateChecker
 from version import VERSION_HISTORY, get_version
@@ -63,22 +62,13 @@ def test_nse_index_allows_blank_optional_ohlc_but_rejects_bad_text():
     result = _bare_downloader(NSEIndexDownloader).transform_data(close_only, day)
     assert result.loc[0, "CLOSE"] == 100
 
+    close_only.loc[0, "Open Index Value"] = "-"
+    result = _bare_downloader(NSEIndexDownloader).transform_data(close_only, day)
+    assert pd.isna(result.loc[0, "OPEN"])
+
     close_only.loc[0, "Open Index Value"] = "not-a-number"
     with pytest.raises(DataProcessingError, match="numeric Open Index Value"):
         _bare_downloader(NSEIndexDownloader).transform_data(close_only, day)
-
-
-def test_index_append_uses_names_and_leaves_delivery_blank():
-    manager = object.__new__(MemoryAppendManager)
-    manager.logger = logging.getLogger("test.append")
-    base = pd.DataFrame([["ABC", "20260730", 1, 2, 1, 2, 100, 50, 50]],
-                        columns=EQUITY_DAILY_COLUMNS)
-    index = pd.DataFrame([["NIFTY 50", "20260730", 1, 2, 1, 2, 0]],
-                         columns=INDEX_DAILY_COLUMNS)
-    aligned = manager._align_columns_for_append(index, base)
-    assert list(aligned.columns) == EQUITY_DAILY_COLUMNS
-    assert aligned.loc[0, "DELIVERY_QTY"] == ""
-    assert aligned.loc[0, "DELIVERY_PERCENT"] == ""
 
 
 def test_version_history_drives_update_notification():

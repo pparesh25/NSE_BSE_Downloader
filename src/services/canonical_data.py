@@ -641,7 +641,11 @@ def normalize_nse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
         if column not in frame.columns:
             continue
         text = _clean_text(frame[column])
-        if _number(frame[column]).isna().ne(text.eq("")).any():
+        # NSE represents legitimate close-only index rows with a dash in the
+        # optional OHLC fields.  Treat that official sentinel as missing while
+        # continuing to reject arbitrary text.
+        missing = text.isin({"", "-"})
+        if (_number(frame[column]).isna() & ~missing).any():
             raise DataProcessingError(
                 f"nse-index report contains invalid numeric {column}"
             )

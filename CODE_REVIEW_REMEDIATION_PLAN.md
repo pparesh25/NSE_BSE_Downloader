@@ -29,7 +29,7 @@ pathsને પ્રમાણિત કરતી નથી.
 
 ## Implementation status — `codex/release-hardening`
 
-2026-07-31એ remediation શરૂ કરીને પ્રથમ બે hardening slices પૂર્ણ કરવામાં આવી:
+2026-07-31એ remediation શરૂ કરીને પ્રથમ ચાર hardening phases પૂર્ણ કરવામાં આવી:
 
 - P0-1 transport: market data, corporate actions અને shared HTTP clientમાં verified
   TLS ચાલુ; unverified connector/context દૂર.
@@ -57,9 +57,18 @@ pathsને પ્રમાણિત કરતી નથી.
   NSE EQ `2720`, FO `637`, SME `445`, Index `146`; BSE EQ `4261`, Index `76` rows.
 - બંને requested Miniforge environmentsમાં regression suite `59 passed`; compileall
   અને changed-file Ruff gate પણ pass.
+- P1-1 deterministic combined files: જૂનું arrival-order
+  `MemoryAppendManager` દૂર કરીને persisted named-column components અને fixed
+  `EQ → SME → INDEX` / `EQ → INDEX` reconciliation અમલમાં છે. Enabled dependency
+  fail થાય તો જૂની public EQ file untouched રહે છે; restart/CLI rebuild સમાન SHA
+  આપે છે અને legacy 7-column contract પણ જળવાય છે.
+- Latest 2026-07-31 live all-segment reconciliation pass: NSE combined `3311`
+  (`2720 + 445 + 146`) અને BSE combined `4337` (`4261 + 76`) rows; બંનેમાં
+  component sum, blank Index delivery fields અને restart SHA verify થયા.
+- Phase 4 પછી suite `75 passed`, changed-file Ruff/compile gates clean છે.
 
-P0-1, P0-2, P0-3 અને Phase 3 માટે regression guards હવે હાજર છે. આગળનો
-release-blocking કાર્ય Phase 4નું deterministic combined-file P1-1 છે.
+P0-1, P0-2, P0-3, Phase 3 અને Phase 4 માટે regression guards હવે હાજર છે. આગળનો
+release-blocking કાર્ય Phase 5નું calendar/configuration/GUI lifecycle hardening છે.
 
 ## Severity અર્થ
 
@@ -509,7 +518,7 @@ Target files: `canonical_data.py`, all downloaders, `base_downloader.py`,
 
 Gate: schema mutation/property tests, middle-gap recovery અને stage failure resume.
 
-### Phase 4 — Deterministic append replacement
+### Phase 4 — Deterministic append replacement — complete
 
 Target: `memory_append_manager.py`ને small deterministic `CombinedFileBuilder`થી replace
 કરવો; final orchestration `DownloadWorker`/service layerમાં.

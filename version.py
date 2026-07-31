@@ -6,7 +6,7 @@ Contains application version and build information.
 
 __version__ = "1.1.0"
 __build_date__ = "2026-07-31"
-__build_number__ = 22
+__build_number__ = 23
 
 # Release automation must replace both values together.  The desktop updater
 # remains notification-only while either field is blank, rather than executing
@@ -27,6 +27,7 @@ VERSION_HISTORY = {
             "Pending-delivery retry, corporate-action audit ledger and rebuildable raw snapshots",
             "Strict source schema/date validation with quarantined invalid reports",
             "Resumable per-date pipeline manifest with partial-success reporting and gap repair",
+            "Deterministic restart-safe combined EQ, SME and Index bhavcopy assembly",
             "Fail-closed state quarantine and command-line symbol history repair",
             "Calendar date-range selection and individually collapsible GUI sections",
             "Legacy 7-column compatibility option"
@@ -38,7 +39,8 @@ VERSION_HISTORY = {
             "Rejected JSON, header-only, wrong-date and invalid-numeric market reports",
             "Detected middle-date gaps, corrupt daily files and incomplete pipeline stages",
             "Kept daily and symbol files valid through atomic replacement",
-            "Recovered interrupted corporate actions without double-adjusting prices"
+            "Recovered interrupted corporate actions without double-adjusting prices",
+            "Prevented task arrival order or a failed dependency from publishing partial combined EQ files"
         ]
     },
 

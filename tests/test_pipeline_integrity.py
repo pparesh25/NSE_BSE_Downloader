@@ -10,6 +10,7 @@ from src.core.base_downloader import BaseDownloader
 from src.core.data_manager import DataManager
 from src.core.exceptions import DataProcessingError
 from src.services.pipeline_state import PipelineManifest
+from src.services.canonical_data import EQUITY_DAILY_COLUMNS
 
 
 def test_pipeline_manifest_resumes_partial_date_and_returns_structured_result(
@@ -158,6 +159,65 @@ class _InvalidPriceDownloader(BaseDownloader):
         self.errors.append(error)
 
 
+class _DeferredEQDownloader(BaseDownloader):
+    def __init__(self, base_path):
+        self.exchange = "NSE"
+        self.segment = "EQ"
+        self.exchange_segment = "NSE_EQ"
+        self.config = _DataConfig(Path(base_path))
+        self.logger = logging.getLogger("test.deferred.eq")
+        self.data_path = self.config.get_data_path("NSE", "EQ")
+        self.exchange_config = SimpleNamespace(file_suffix="-NSE-EQ")
+        self.combined_required = True
+        self.pipeline_manifest = PipelineManifest(base_path)
+
+    def build_url(self, target_date):
+        return "https://example.test/report.csv"
+
+    def process_downloaded_data(self, file_data, file_date):
+        return None
+
+    def transform_data(self, df, file_date):
+        return df
+
+    async def _download_implementation(self, working_days):
+        return True
+
+    def get_download_option(self, name, default=None):
+        return False
+
+
+def test_combined_rerun_defers_publication_and_resets_manifest(tmp_path):
+    day = date(2026, 7, 31)
+    downloader = _DeferredEQDownloader(tmp_path)
+    public = downloader.data_path / f"{day}-NSE-EQ.txt"
+    public.write_bytes(b"previous-combined-output\n")
+    downloader.pipeline_manifest.begin(
+        "NSE", "EQ", day, ("downloaded", "validated", "daily", "combined")
+    )
+    for stage in ("downloaded", "validated", "daily", "combined"):
+        downloader.pipeline_manifest.mark("NSE", "EQ", day, stage, "complete")
+
+    downloader._begin_pipeline_date(day)
+    assert downloader.pipeline_manifest.date_result(
+        "NSE", "EQ", day
+    ).status == "partial"
+    frame = pd.DataFrame([[
+        "FRESH", "20260731", 1, 2, 1, 2, 100, 50, 50,
+    ]], columns=EQUITY_DAILY_COLUMNS)
+    downloader.save_processed_data(frame, day)
+
+    assert public.read_bytes() == b"previous-combined-output\n"
+    component = (
+        tmp_path / ".state" / "components" / "NSE" / "EQ"
+        / "2026-07-31.csv"
+    )
+    assert component.is_file()
+    assert downloader.pipeline_manifest.date_result(
+        "NSE", "EQ", day
+    ).status != "success"
+
+
 class _InvalidPayloadManager:
     def __init__(self, config):
         pass
@@ -197,3 +257,34 @@ def test_invalid_download_is_quarantined_without_publishing_daily_file(
     )
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == b"wrong,shape\n1,2\n"
+
+
+def test_integrity_scan_accepts_documented_close_only_combined_index_row(
+    tmp_path,
+):
+    manager = DataManager(_DataConfig(tmp_path))
+    day = date(2026, 7, 31)
+    path = tmp_path / "NSE" / "EQ" / f"{day}-NSE-EQ.txt"
+    path.write_text(
+        "ABC,20260731,10,12,9,11,100,50,50\n"
+        "NIFTY TEST,20260731,,,,110,0,,\n",
+        encoding="utf-8",
+    )
+    assert manager.validate_daily_output("NSE", "EQ", day, path)
+
+
+def test_integrity_scan_rejects_nonfinite_and_fake_close_only_rows(tmp_path):
+    manager = DataManager(_DataConfig(tmp_path))
+    day = date(2026, 7, 31)
+    path = tmp_path / "NSE" / "EQ" / f"{day}-NSE-EQ.txt"
+    path.write_text(
+        "ABC,20260731,10,12,9,nan,100,50,50\n",
+        encoding="utf-8",
+    )
+    assert not manager.validate_daily_output("NSE", "EQ", day, path)
+
+    path.write_text(
+        "FAKE INDEX,20260731,,,,110,0,1,2\n",
+        encoding="utf-8",
+    )
+    assert not manager.validate_daily_output("NSE", "EQ", day, path)

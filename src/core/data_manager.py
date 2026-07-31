@@ -9,6 +9,7 @@ Centralized data management system for:
 """
 
 import re
+import math
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, List, Tuple, Dict
@@ -167,7 +168,6 @@ class DataManager:
             allowed_counts = {7}
             if segment.upper() in {"EQ", "SME", "FO"}:
                 allowed_counts.add(9)
-            numeric_columns = [5] if segment.upper() == "INDEX" else [2, 3, 4, 5, 6]
             valid = True
             for row in rows:
                 if len(row) not in allowed_counts or not row[0].strip():
@@ -177,14 +177,45 @@ class DataManager:
                     valid = False
                     break
                 try:
-                    if any(float(row[column].replace(",", "")) < 0 for column in numeric_columns):
+                    if segment.upper() == "INDEX":
+                        numeric_columns = [5]
+                    elif (
+                        segment.upper() == "EQ"
+                        and all(not row[column].strip() for column in (2, 3, 4))
+                    ):
+                        # Combined EQ files may end with an official close-only
+                        # index row.  Blank OHLC is allowed only as one explicit
+                        # profile; CLOSE remains mandatory and VOLUME may be 0.
+                        numeric_columns = [5]
+                        if row[6].strip():
+                            numeric_columns.append(6)
+                        if len(row) == 9 and (
+                            row[7].strip() or row[8].strip()
+                        ):
+                            valid = False
+                            break
+                    else:
+                        numeric_columns = [2, 3, 4, 5, 6]
+                    required_values = [
+                        float(row[column].replace(",", ""))
+                        for column in numeric_columns
+                    ]
+                    if any(
+                        not math.isfinite(value) or value < 0
+                        for value in required_values
+                    ):
                         valid = False
                         break
                     if segment.upper() == "FO" and len(row) == 9:
-                        if float(row[7].replace(",", "")) < 0:
+                        open_interest = float(row[7].replace(",", ""))
+                        change_in_oi = float(row[8].replace(",", ""))
+                        if (
+                            not math.isfinite(open_interest)
+                            or open_interest < 0
+                            or not math.isfinite(change_in_oi)
+                        ):
                             valid = False
                             break
-                        float(row[8].replace(",", ""))
                 except (IndexError, TypeError, ValueError):
                     valid = False
                     break

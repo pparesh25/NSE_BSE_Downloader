@@ -17,7 +17,7 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Symbol-wise text histories such as `NSE/SYMBOLS/reliance.txt`.
 - Split, consolidation and equity-bonus adjustments on pre-ex-date symbol OHLC.
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
-- Optional legacy seven-column output and existing SME/Index append options.
+- Optional legacy seven-column output and deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
 - Automatic version checks and update notifications.
@@ -69,11 +69,24 @@ SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME
 
 The **Legacy 7-column output** option omits delivery/OI fields for older consumers. NSE delivery is matched by `SYMBOL + SERIES`; BSE delivery is matched by security code.
 
+When the append options are enabled, the app always assembles combined cash
+files in a fixed order, independent of concurrent download completion order:
+
+- NSE: `EQ → SME → INDEX`
+- BSE: `EQ → INDEX`
+
+Each segment is first saved as a validated named-column component. The public EQ
+file is replaced atomically only after all enabled dependencies succeed. A
+failed or interrupted dependency leaves the previous public EQ file untouched
+and the manifest schedules that date for repair on the next run. Index rows are
+aligned by column name, so the two delivery fields remain blank.
+
 ## Data organization
 
 ```text
 ~/NSE_BSE_Data/
 ├── .state/                 # Internal pending/action/raw rebuild state
+│   └── components/         # Validated inputs for combined-file restart/rebuild
 ├── NSE/
 │   ├── EQ/
 │   ├── FO/
@@ -109,11 +122,14 @@ python main.py --rebuild-symbol NSE RELIANCE
 python main.py --rebuild-exchange BSE
 python main.py --rebuild-registry
 python main.py --rebuild-all
+python main.py --rebuild-combined NSE 2026-07-31
 ```
 
-Rebuild commands validate snapshot checksums and replay committed corporate
-actions before publishing repaired symbol files. Existing files remain in place
-when validation or transaction recovery cannot be completed safely.
+Symbol rebuild commands validate snapshot checksums and replay committed
+corporate actions before publishing repaired histories. `--rebuild-combined`
+uses the current append preferences and persisted EQ/SME/Index components.
+Existing files remain in place when validation or transaction recovery cannot
+be completed safely.
 
 ## Date-aware report support
 
@@ -160,9 +176,11 @@ project:
 
 The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI,
 pending state, symbol reruns/renames, corporate-action idempotency and GUI date
-range/collapse behavior. The state-integrity matrix also injects interrupted
-ledger commits, failed history publication, corrupt JSON/CSV state, unexpected
-history revisions and rebuilds from checksummed raw snapshots.
+range/collapse behavior. They also cover every NSE/BSE component arrival order,
+restart rebuilds, disabled/failed dependencies, legacy 7-column combination and
+deferred publication. The state-integrity matrix injects interrupted ledger
+commits, failed history publication, corrupt JSON/CSV state, unexpected history
+revisions and rebuilds from checksummed raw snapshots.
 
 ## Version history
 
@@ -174,6 +192,8 @@ history revisions and rebuilds from checksummed raw snapshots.
 - Added pending delivery retry, atomic writes and legacy output compatibility.
 - Added fail-closed state quarantine, crash-recoverable corporate-action
   transactions and raw-snapshot repair commands.
+- Replaced arrival-order append logic with deterministic, restart-safe combined
+  bhavcopy assembly and an explicit combined-file rebuild command.
 - Added remembered calendar date ranges and collapsible GUI panels.
 - Fixed the NSE SME filename-era change and HTML-as-data responses.
 

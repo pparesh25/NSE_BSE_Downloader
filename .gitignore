@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and Nuitka output
+build/
+dist/
+*.build/
+*.dist/
+*.onefile-build/
+*.egg-info/
+
+# Coverage and logs
+.coverage
+htmlcov/
+*.log
+
+# Local editor and environment settings
+.env
+.idea/
+.vscode/
+
+# Downloaded update archives
+update.zip
+update_*.zip

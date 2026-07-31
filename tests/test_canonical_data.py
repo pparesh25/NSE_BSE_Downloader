@@ -85,18 +85,27 @@ def test_nse_sme_and_fo_retain_new_columns():
 
 
 @pytest.mark.parametrize(
-    "raw",
+    "raw,target_date",
     [
-        "SC_CODE,SC_NAME,SC_GROUP,OPEN,HIGH,LOW,CLOSE,NO_OF_SHRS,NO_TRADES,ISIN_CODE,TRADING_DATE\n"
-        "500002,ABB LTD.,A,10,12,9,11,100,5,INE1,16-Aug-22\n",
-        "ISIN,SCRIP ID,SCRIP_CODE,SC_GROUP,OPEN PRICE,HIGH PRICE,LOW PRICE,CLOSING PRICE,NO_OF_SHRS,NO_TRADES,TRADING_DATE\n"
-        "INE1,ABB,500002,A,10,12,9,11,100,5,17-Aug-22\n",
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABB,A,10,12,9,11,100,5,INE1,500002\n",
+        (
+            "SC_CODE,SC_NAME,SC_GROUP,OPEN,HIGH,LOW,CLOSE,NO_OF_SHRS,NO_TRADES,ISIN_CODE,TRADING_DATE\n"
+            "500002,ABB LTD.,A,10,12,9,11,100,5,INE1,16-Aug-22\n",
+            date(2022, 8, 16),
+        ),
+        (
+            "ISIN,SCRIP ID,SCRIP_CODE,SC_GROUP,OPEN PRICE,HIGH PRICE,LOW PRICE,CLOSING PRICE,NO_OF_SHRS,NO_TRADES,TRADING_DATE\n"
+            "INE1,ABB,500002,A,10,12,9,11,100,5,17-Aug-22\n",
+            date(2022, 8, 17),
+        ),
+        (
+            "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
+            "2024-07-08,ABB,A,10,12,9,11,100,5,INE1,500002\n",
+            date(2024, 7, 8),
+        ),
     ],
 )
-def test_bse_three_eras_normalize_and_join_delivery(raw):
-    result = normalize_bse_equity(_csv(raw), date(2024, 7, 8))
+def test_bse_three_eras_normalize_and_join_delivery(raw, target_date):
+    result = normalize_bse_equity(_csv(raw), target_date)
     delivery = _csv(
         "SCRIP CODE|DELIVERY QTY|DELV. PER.\n500002|80|80\n"
     )
@@ -112,3 +121,60 @@ def test_bse_three_eras_normalize_and_join_delivery(raw):
 def test_html_error_page_is_not_accepted_as_csv():
     with pytest.raises(DataProcessingError):
         read_report(b"<!DOCTYPE html><html><body>missing</body></html>")
+
+
+def test_header_only_and_json_reports_are_rejected():
+    with pytest.raises(DataProcessingError, match="no data rows"):
+        read_report(b"SYMBOL,SERIES,OPEN\n")
+    with pytest.raises(DataProcessingError, match="JSON"):
+        read_report(b'{"message":"not found"}')
+
+
+def test_unknown_schema_and_wrong_source_date_fail_closed():
+    unknown = _csv("foo,bar\n1,2\n")
+    with pytest.raises(DataProcessingError, match="missing required columns"):
+        normalize_nse_equity(
+            unknown, date(2024, 7, 8), era="nse-equity-udiff"
+        )
+
+    wrong_date = _csv(
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
+        "2024-07-09,ABC,EQ,10,12,9,11,1000\n"
+    )
+    with pytest.raises(DataProcessingError, match="date mismatch"):
+        normalize_nse_equity(
+            wrong_date, date(2024, 7, 8), era="nse-equity-udiff"
+        )
+
+
+def test_invalid_ohlcv_and_duplicate_keys_are_rejected():
+    invalid = _csv(
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
+        "2024-07-08,ABC,EQ,broken,12,9,11,1000\n"
+    )
+    with pytest.raises(DataProcessingError, match="numeric OPEN"):
+        normalize_nse_equity(
+            invalid, date(2024, 7, 8), era="nse-equity-udiff"
+        )
+
+    duplicate = _csv(
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
+    )
+    with pytest.raises(DataProcessingError, match="duplicate keys"):
+        normalize_nse_equity(
+            duplicate, date(2024, 7, 8), era="nse-equity-udiff"
+        )
+
+
+def test_mixed_udiff_report_allows_unselected_rows_without_a_series():
+    mixed = _csv(
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
+        "2024-07-08,865BOND29,,100,100,100,100,1\n"
+    )
+    result = normalize_nse_equity(
+        mixed, date(2024, 7, 8), era="nse-equity-udiff"
+    )
+    assert result["SYMBOL"].tolist() == ["ABC"]

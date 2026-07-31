@@ -49,9 +49,17 @@ pathsને પ્રમાણિત કરતી નથી.
   માટે CLI repair commands ઉમેરાયા છે.
 - Missing-history action હવે backfill પછી automatically reconcile થાય છે; filesystem
   slug collision માટે distinct stable symbol filenames બને છે.
+- P1-4/P1-6/P1-7 strict data pipeline: URL-era schema registry, source-date equality,
+  segment-aware numeric/key validation, error-payload quarantine, per-date resumable
+  manifest અને strict filename/gap/integrity scan અમલમાં છે.
+- `DateResult`/`SegmentResult` હવે partial date/segmentને success ગણતા નથી અને GUI
+  stage-wise summary બતાવે છે. Latest 2026-07-31 live smokeમાં બધા છ segment pass:
+  NSE EQ `2720`, FO `637`, SME `445`, Index `146`; BSE EQ `4261`, Index `76` rows.
+- બંને requested Miniforge environmentsમાં regression suite `59 passed`; compileall
+  અને changed-file Ruff gate પણ pass.
 
-P0-1, P0-2 અને P0-3 માટે regression guards હવે હાજર છે. આગળનો release-blocking કાર્ય
-Phase 3/4 મુજબ strict canonical validation અને deterministic combined-file P1-1 છે.
+P0-1, P0-2, P0-3 અને Phase 3 માટે regression guards હવે હાજર છે. આગળનો
+release-blocking કાર્ય Phase 4નું deterministic combined-file P1-1 છે.
 
 ## Severity અર્થ
 
@@ -488,7 +496,7 @@ Target files: `symbol_history.py`, `corporate_actions.py`, `delivery_state.py`, 
 
 Gate: corruption/crash matrixમાં zero silent loss અને exactly-once adjustment.
 
-### Phase 3 — Strict canonical validation અને resumable per-date pipeline
+### Phase 3 — Strict canonical validation અને resumable per-date pipeline — complete
 
 Target files: `canonical_data.py`, all downloaders, `base_downloader.py`,
 `data_manager.py`.

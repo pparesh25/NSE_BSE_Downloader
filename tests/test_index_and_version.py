@@ -3,10 +3,12 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.downloaders.bse_index_downloader import BSEIndexDownloader
 from src.downloaders.nse_index_downloader import NSEIndexDownloader
 from src.services.canonical_data import EQUITY_DAILY_COLUMNS, INDEX_DAILY_COLUMNS
+from src.core.exceptions import DataProcessingError
 from src.services.memory_append_manager import MemoryAppendManager
 from src.utils.memory_optimizer import MemoryOptimizer
 from src.utils.update_checker import UpdateChecker
@@ -38,6 +40,32 @@ def test_nse_and_bse_index_transform_to_named_seven_columns():
     assert list(nse.columns) == INDEX_DAILY_COLUMNS
     assert list(bse.columns) == INDEX_DAILY_COLUMNS
     assert nse.loc[0, "DATE"] == bse.loc[0, "DATE"] == "20260730"
+
+
+def test_nse_index_does_not_replace_a_wrong_source_date():
+    day = date(2026, 7, 30)
+    raw = pd.DataFrame([{
+        "Index Name": "NIFTY 50", "Index Date": "29-07-2026",
+        "Open Index Value": 25000, "High Index Value": 25100,
+        "Low Index Value": 24900, "Closing Index Value": 25050,
+    }])
+    with pytest.raises(DataProcessingError, match="date mismatch"):
+        _bare_downloader(NSEIndexDownloader).transform_data(raw, day)
+
+
+def test_nse_index_allows_blank_optional_ohlc_but_rejects_bad_text():
+    day = date(2026, 7, 30)
+    close_only = pd.DataFrame([{
+        "Index Name": "NIFTY TEST", "Index Date": "30-07-2026",
+        "Open Index Value": None, "High Index Value": None,
+        "Low Index Value": None, "Closing Index Value": 100,
+    }])
+    result = _bare_downloader(NSEIndexDownloader).transform_data(close_only, day)
+    assert result.loc[0, "CLOSE"] == 100
+
+    close_only.loc[0, "Open Index Value"] = "not-a-number"
+    with pytest.raises(DataProcessingError, match="numeric Open Index Value"):
+        _bare_downloader(NSEIndexDownloader).transform_data(close_only, day)
 
 
 def test_index_append_uses_names_and_leaves_delivery_blank():

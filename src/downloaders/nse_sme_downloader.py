@@ -128,7 +128,13 @@ class NSESMEDownloader(BaseDownloader):
                 from ..utils.user_preferences import UserPreferences
                 user_prefs = UserPreferences()
                 sme_add_suffix = user_prefs.get_sme_add_suffix()
-                internal = normalize_nse_sme(df, file_date, add_suffix=sme_add_suffix)
+                source = price_source("NSE", "SME", file_date)
+                internal = normalize_nse_sme(
+                    df,
+                    file_date,
+                    add_suffix=sme_add_suffix,
+                    era=source.era,
+                )
                 internal = merge_delivery(internal, delivery_df, "NSE")
                 self._internal_equity_data = internal
                 legacy = self.get_download_option("legacy_seven_column_output", False)

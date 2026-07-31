@@ -55,7 +55,9 @@ class _CashDownloader(BaseDownloader):
         return await self._download_equity_implementation(working_days)
 
     def save_processed_data(self, df, target_date):
-        return self.config.base_data_path / f"{target_date}.txt"
+        path = self.config.base_data_path / f"{target_date}.txt"
+        self._mark_pipeline(target_date, "daily", "complete", path=str(path))
+        return path
 
     def get_download_option(self, name, default=None):
         return {
@@ -107,7 +109,8 @@ def test_missing_delivery_saves_price_and_next_run_clears_pending(
     store = PendingDeliveryStore(tmp_path)
 
     _FakeDownloadManager.delivery_available = False
-    assert asyncio.run(downloader._download_equity_implementation([day]))
+    assert not asyncio.run(downloader._download_equity_implementation([day]))
+    assert downloader.last_segment_result.partial_count == 1
     assert downloader.saved_delivery == [None]
     assert store.dates("NSE", "EQ") == [day]
 

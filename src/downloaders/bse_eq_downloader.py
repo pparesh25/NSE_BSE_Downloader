@@ -124,7 +124,10 @@ class BSEEQDownloader(BaseDownloader):
         """
         try:
             with self.memory_optimizer.memory_monitor("bse_eq_transform"):
-                internal = normalize_bse_equity(df, file_date)
+                source = price_source("BSE", "EQ", file_date)
+                internal = normalize_bse_equity(
+                    df, file_date, era=source.era
+                )
                 if self.mutual_fund_symbols:
                     internal = internal[
                         ~internal["SYMBOL"].isin(self.mutual_fund_symbols)

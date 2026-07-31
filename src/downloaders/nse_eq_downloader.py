@@ -95,7 +95,10 @@ class NSEEQDownloader(BaseDownloader):
         """
         try:
             with self.memory_optimizer.memory_monitor("nse_eq_transform"):
-                internal = normalize_nse_equity(df, file_date)
+                source = price_source("NSE", "EQ", file_date)
+                internal = normalize_nse_equity(
+                    df, file_date, era=source.era
+                )
                 internal = merge_delivery(internal, delivery_df, "NSE")
                 self._internal_equity_data = internal
                 legacy = self.get_download_option("legacy_seven_column_output", False)

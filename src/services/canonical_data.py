@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 import zipfile
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import pandas as pd
 
@@ -36,8 +37,117 @@ BSE_EQUITY_SERIES = {
 }
 
 
+@dataclass(frozen=True)
+class SourceSchema:
+    """Required shape and date authority for one official report era."""
+
+    required: frozenset[str]
+    key_columns: tuple[str, ...]
+    date_column: Optional[str] = None
+
+
+SOURCE_SCHEMAS = {
+    "nse-equity-legacy": SourceSchema(
+        frozenset({
+            "SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE",
+            "TOTTRDQTY", "TIMESTAMP",
+        }),
+        ("SYMBOL", "SERIES"),
+        "TIMESTAMP",
+    ),
+    "nse-equity-udiff": SourceSchema(
+        frozenset({
+            "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
+            "LwPric", "ClsPric", "TtlTradgVol",
+        }),
+        ("TckrSymb", "SctySrs"),
+        "TradDt",
+    ),
+    "nse-fo-legacy": SourceSchema(
+        frozenset({
+            "INSTRUMENT", "SYMBOL", "EXPIRY_DT", "OPEN", "HIGH", "LOW",
+            "CLOSE", "CONTRACTS", "OPEN_INT", "CHG_IN_OI", "TIMESTAMP",
+        }),
+        ("INSTRUMENT", "SYMBOL", "EXPIRY_DT"),
+        "TIMESTAMP",
+    ),
+    "nse-fo-udiff": SourceSchema(
+        frozenset({
+            "FinInstrmTp", "TckrSymb", "XpryDt", "TradDt", "OpnPric",
+            "HghPric", "LwPric", "ClsPric", "TtlTradgVol", "OpnIntrst",
+            "ChngInOpnIntrst",
+        }),
+        ("FinInstrmTp", "TckrSymb", "XpryDt"),
+        "TradDt",
+    ),
+    "nse-sme-two-digit-year": SourceSchema(
+        frozenset({
+            "SERIES", "SYMBOL", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE",
+            "CLOSE_PRICE", "NET_TRDQTY",
+        }),
+        ("SERIES", "SYMBOL"),
+    ),
+    "nse-sme-four-digit-year": SourceSchema(
+        frozenset({
+            "SERIES", "SYMBOL", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE",
+            "CLOSE_PRICE", "NET_TRDQTY",
+        }),
+        ("SERIES", "SYMBOL"),
+    ),
+    "bse-equity-isin-legacy": SourceSchema(
+        frozenset({
+            "SC_CODE", "SC_NAME", "SC_GROUP", "OPEN", "HIGH", "LOW",
+            "CLOSE", "NO_OF_SHRS", "TRADING_DATE",
+        }),
+        ("SC_CODE",),
+        "TRADING_DATE",
+    ),
+    "bse-equity-bhavcopy-legacy": SourceSchema(
+        frozenset({
+            "SCRIP ID", "SCRIP_CODE", "SC_GROUP", "OPEN PRICE",
+            "HIGH PRICE", "LOW PRICE", "CLOSING PRICE", "NO_OF_SHRS",
+            "TRADING_DATE",
+        }),
+        ("SCRIP_CODE",),
+        "TRADING_DATE",
+    ),
+    "bse-equity-udiff": SourceSchema(
+        frozenset({
+            "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
+            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId",
+        }),
+        ("FinInstrmId",),
+        "TradDt",
+    ),
+    "nse-index": SourceSchema(
+        frozenset({
+            "Index Name", "Index Date", "Open Index Value",
+            "High Index Value", "Low Index Value", "Closing Index Value",
+        }),
+        ("Index Name",),
+        "Index Date",
+    ),
+    "bse-index": SourceSchema(
+        frozenset({
+            "IndexName", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice",
+        }),
+        ("IndexName",),
+    ),
+    "nse-delivery": SourceSchema(
+        frozenset({
+            "SYMBOL", "SERIES", "NO_OF_TRADES", "DELIV_QTY", "DELIV_PER",
+        }),
+        ("SYMBOL", "SERIES"),
+    ),
+    "bse-delivery": SourceSchema(
+        frozenset({"SCRIP CODE", "DELIVERY QTY"}),
+        ("SCRIP CODE",),
+    ),
+}
+
+
 def read_report(payload: bytes, separator: str = ",") -> pd.DataFrame:
-    """Read a plain or zipped exchange report and reject HTML error pages."""
+    """Read a report while rejecting common server-error payloads."""
 
     if not payload:
         raise DataProcessingError("Downloaded report is empty")
@@ -59,6 +169,8 @@ def read_report(payload: bytes, separator: str = ",") -> pd.DataFrame:
     preview = data.lstrip()[:100].lower()
     if preview.startswith((b"<!doctype html", b"<html")):
         raise DataProcessingError("Server returned an HTML page instead of market data")
+    if preview.startswith((b"{", b"[")):
+        raise DataProcessingError("Server returned JSON instead of market data")
 
     try:
         frame = pd.read_csv(BytesIO(data), sep=separator, dtype=str)
@@ -66,9 +178,55 @@ def read_report(payload: bytes, separator: str = ",") -> pd.DataFrame:
         raise DataProcessingError(f"Unable to parse market report: {error}") from error
 
     frame.columns = [str(column).strip() for column in frame.columns]
-    if frame.empty and not len(frame.columns):
+    if not len(frame.columns):
         raise DataProcessingError("Market report has no columns")
+    if frame.empty:
+        raise DataProcessingError("Market report has no data rows")
     return frame
+
+
+def _parse_dates(values: pd.Series) -> pd.Series:
+    text = _clean_text(values)
+    parsed = pd.to_datetime(text, format="%Y-%m-%d", errors="coerce")
+    missing = parsed.isna()
+    if missing.any():
+        parsed.loc[missing] = pd.to_datetime(
+            text.loc[missing], errors="coerce", dayfirst=True
+        )
+    return parsed
+
+
+def validate_source_schema(
+    frame: pd.DataFrame, era: str, target_date: Optional[date]
+) -> None:
+    """Fail closed when an official report does not match its expected era."""
+
+    schema = SOURCE_SCHEMAS.get(era)
+    if schema is None:
+        raise DataProcessingError(f"No source schema registered for era: {era}")
+    if frame.empty:
+        raise DataProcessingError(f"{era} report has no data rows")
+    missing = sorted(schema.required.difference(frame.columns))
+    if missing:
+        raise DataProcessingError(
+            f"{era} report is missing required columns: {missing}"
+        )
+    if schema.date_column:
+        if target_date is None:
+            raise DataProcessingError(
+                f"{era} validation requires a requested date"
+            )
+        parsed = _parse_dates(frame[schema.date_column])
+        if parsed.isna().any():
+            raise DataProcessingError(
+                f"{era} report contains an invalid {schema.date_column}"
+            )
+        source_dates = set(parsed.dt.date)
+        if source_dates != {target_date}:
+            found = ", ".join(sorted(value.isoformat() for value in source_dates))
+            raise DataProcessingError(
+                f"{era} report date mismatch: requested {target_date}, found {found}"
+            )
 
 
 def _column(frame: pd.DataFrame, *names: str, default=None) -> pd.Series:
@@ -92,18 +250,60 @@ def _number(values: pd.Series) -> pd.Series:
 
 
 def _date_values(values: pd.Series, target_date: date) -> pd.Series:
-    text = _clean_text(values)
-    # UDiFF reports use ISO dates while legacy reports use values such as
-    # 05-JUL-2024.  Parse ISO explicitly first so pandas does not reinterpret
-    # year-first dates when ``dayfirst`` is enabled.
-    parsed = pd.to_datetime(text, format="%Y-%m-%d", errors="coerce")
-    missing = parsed.isna()
-    if missing.any():
-        parsed.loc[missing] = pd.to_datetime(
-            text.loc[missing], errors="coerce", dayfirst=True
+    parsed = _parse_dates(values)
+    if parsed.isna().any() or set(parsed.dt.date) != {target_date}:
+        raise DataProcessingError(
+            f"Source report date does not match requested date {target_date}"
         )
-    fallback = pd.Timestamp(target_date)
-    return parsed.fillna(fallback).dt.strftime("%Y%m%d")
+    return parsed.dt.strftime("%Y%m%d")
+
+
+def validate_canonical_data(
+    frame: pd.DataFrame,
+    target_date: date,
+    columns: Sequence[str],
+    *,
+    key_columns: Sequence[str] = ("SYMBOL",),
+    index_profile: bool = False,
+) -> None:
+    """Validate keys, date and numeric market fields before any file is saved."""
+
+    if frame.empty:
+        raise DataProcessingError("Normalized market report has no usable rows")
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise DataProcessingError(
+            f"Normalized market report is missing columns: {missing}"
+        )
+    expected_date = target_date.strftime("%Y%m%d")
+    actual_dates = _clean_text(frame["DATE"])
+    if actual_dates.ne(expected_date).any():
+        raise DataProcessingError(
+            f"Normalized report date does not match requested date {target_date}"
+        )
+    for key in key_columns:
+        if _clean_text(frame[key]).eq("").any():
+            raise DataProcessingError(f"Normalized report contains blank {key}")
+    if frame.duplicated(list(key_columns)).any():
+        raise DataProcessingError(
+            f"Normalized report contains duplicate keys: {list(key_columns)}"
+        )
+
+    required_numeric = ["CLOSE"] if index_profile else [
+        "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"
+    ]
+    if "OPEN_INTEREST" in columns:
+        required_numeric.extend(["OPEN_INTEREST", "CHANGE_IN_OI"])
+    for column in required_numeric:
+        values = _number(frame[column])
+        if values.isna().any():
+            raise DataProcessingError(
+                f"Normalized report contains invalid numeric {column}"
+            )
+        if values.lt(0).any() and column != "CHANGE_IN_OI":
+            raise DataProcessingError(
+                f"Normalized report contains negative {column}"
+            )
 
 
 def _finalize_equity(frame: pd.DataFrame) -> pd.DataFrame:
@@ -128,10 +328,16 @@ def normalize_nse_equity(
     target_date: date,
     series: Iterable[str] = NSE_EQUITY_SERIES,
     add_sme_suffix: bool = False,
+    era: Optional[str] = None,
 ) -> pd.DataFrame:
     """Normalize either legacy or UDiFF NSE cash data."""
 
-    if "TckrSymb" in frame.columns:
+    era = era or (
+        "nse-equity-udiff" if "TckrSymb" in frame.columns
+        else "nse-equity-legacy"
+    )
+    validate_source_schema(frame, era, target_date)
+    if era == "nse-equity-udiff":
         normalized = pd.DataFrame({
             "SYMBOL": _column(frame, "TckrSymb"),
             "DATE": _date_values(_column(frame, "TradDt"), target_date),
@@ -145,7 +351,7 @@ def normalize_nse_equity(
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "FinInstrmId"),
         })
-    else:
+    elif era == "nse-equity-legacy":
         normalized = pd.DataFrame({
             "SYMBOL": _column(frame, "SYMBOL"),
             "DATE": _date_values(_column(frame, "TIMESTAMP"), target_date),
@@ -165,14 +371,24 @@ def normalize_nse_equity(
     normalized = normalized[normalized["SERIES"].isin(wanted)].copy()
     if add_sme_suffix:
         normalized["SYMBOL"] = _clean_text(normalized["SYMBOL"]) + "_SME"
-    return _finalize_equity(normalized)
+    result = _finalize_equity(normalized)
+    validate_canonical_data(
+        result, target_date, INTERNAL_EQUITY_COLUMNS,
+        key_columns=("SYMBOL", "SERIES"),
+    )
+    return result
 
 
 def normalize_nse_sme(
-    frame: pd.DataFrame, target_date: date, add_suffix: bool = True
+    frame: pd.DataFrame,
+    target_date: date,
+    add_suffix: bool = True,
+    era: Optional[str] = None,
 ) -> pd.DataFrame:
     """Normalize both NSE SME filename eras (their internal schema is shared)."""
 
+    era = era or "nse-sme-four-digit-year"
+    validate_source_schema(frame, era, target_date)
     normalized = pd.DataFrame({
         "SYMBOL": _column(frame, "SYMBOL"),
         "DATE": pd.Series([target_date.strftime("%Y%m%d")] * len(frame), index=frame.index),
@@ -189,13 +405,28 @@ def normalize_nse_sme(
     normalized = normalized[normalized["SERIES"].isin(NSE_SME_SERIES)].copy()
     if add_suffix:
         normalized["SYMBOL"] = _clean_text(normalized["SYMBOL"]) + "_SME"
-    return _finalize_equity(normalized)
+    result = _finalize_equity(normalized)
+    validate_canonical_data(
+        result, target_date, INTERNAL_EQUITY_COLUMNS,
+        key_columns=("SYMBOL", "SERIES"),
+    )
+    return result
 
 
-def normalize_bse_equity(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
+def normalize_bse_equity(
+    frame: pd.DataFrame, target_date: date, era: Optional[str] = None
+) -> pd.DataFrame:
     """Normalize all three supported BSE cash-market schemas."""
 
-    if "TckrSymb" in frame.columns:
+    if era is None:
+        if "TckrSymb" in frame.columns:
+            era = "bse-equity-udiff"
+        elif "SCRIP ID" in frame.columns:
+            era = "bse-equity-bhavcopy-legacy"
+        else:
+            era = "bse-equity-isin-legacy"
+    validate_source_schema(frame, era, target_date)
+    if era == "bse-equity-udiff":
         mapping = {
             "SYMBOL": _column(frame, "TckrSymb"),
             "DATE": _date_values(_column(frame, "TradDt"), target_date),
@@ -209,7 +440,7 @@ def normalize_bse_equity(frame: pd.DataFrame, target_date: date) -> pd.DataFrame
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "FinInstrmId"),
         }
-    elif "SCRIP ID" in frame.columns:
+    elif era == "bse-equity-bhavcopy-legacy":
         mapping = {
             "SYMBOL": _column(frame, "SCRIP ID"),
             "DATE": _date_values(_column(frame, "TRADING_DATE"), target_date),
@@ -223,7 +454,7 @@ def normalize_bse_equity(frame: pd.DataFrame, target_date: date) -> pd.DataFrame
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "SCRIP_CODE"),
         }
-    else:
+    elif era == "bse-equity-isin-legacy":
         mapping = {
             "SYMBOL": _column(frame, "SC_NAME"),
             "DATE": _date_values(_column(frame, "TRADING_DATE"), target_date),
@@ -238,13 +469,21 @@ def normalize_bse_equity(frame: pd.DataFrame, target_date: date) -> pd.DataFrame
             "SECURITY_ID": _column(frame, "SC_CODE"),
         }
 
+    else:
+        raise DataProcessingError(f"Unsupported BSE equity era: {era}")
     normalized = pd.DataFrame(mapping)
     normalized["SERIES"] = _clean_text(normalized["SERIES"]).str.upper()
     normalized = normalized[normalized["SERIES"].isin(BSE_EQUITY_SERIES)].copy()
-    return _finalize_equity(normalized)
+    result = _finalize_equity(normalized)
+    validate_canonical_data(
+        result, target_date, INTERNAL_EQUITY_COLUMNS,
+        key_columns=("SYMBOL", "SERIES"),
+    )
+    return result
 
 
 def normalize_nse_delivery(frame: pd.DataFrame) -> pd.DataFrame:
+    validate_source_schema(frame, "nse-delivery", None)
     result = pd.DataFrame({
         "JOIN_SYMBOL": _clean_text(_column(frame, "SYMBOL")).str.upper(),
         "JOIN_SERIES": _clean_text(_column(frame, "SERIES")).str.upper(),
@@ -252,15 +491,20 @@ def normalize_nse_delivery(frame: pd.DataFrame) -> pd.DataFrame:
         "DLV_QTY": _number(_column(frame, "DELIV_QTY")),
         "DLV_PERCENT": _number(_column(frame, "DELIV_PER")),
     })
+    if result[["JOIN_SYMBOL", "JOIN_SERIES"]].eq("").any().any():
+        raise DataProcessingError("NSE delivery report contains a blank key")
     return result.drop_duplicates(["JOIN_SYMBOL", "JOIN_SERIES"], keep="last")
 
 
 def normalize_bse_delivery(frame: pd.DataFrame) -> pd.DataFrame:
+    validate_source_schema(frame, "bse-delivery", None)
     result = pd.DataFrame({
         "JOIN_SECURITY_ID": _clean_identifier(_column(frame, "SCRIP CODE")),
         "DLV_QTY": _number(_column(frame, "DELIVERY QTY")),
         "DLV_PERCENT": _number(_column(frame, "DELV. PER.", "DELV.PER.")),
     })
+    if result["JOIN_SECURITY_ID"].eq("").any():
+        raise DataProcessingError("BSE delivery report contains a blank key")
     return result.drop_duplicates("JOIN_SECURITY_ID", keep="last")
 
 
@@ -317,15 +561,26 @@ def _roman(value: int) -> str:
     return "".join(output)
 
 
-def normalize_nse_fo(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
+def normalize_nse_fo(
+    frame: pd.DataFrame, target_date: date, era: Optional[str] = None
+) -> pd.DataFrame:
     """Normalize legacy and UDiFF NSE futures while retaining OI fields."""
 
-    if "TckrSymb" in frame.columns:
+    era = era or (
+        "nse-fo-udiff" if "TckrSymb" in frame.columns else "nse-fo-legacy"
+    )
+    validate_source_schema(frame, era, target_date)
+    if era == "nse-fo-udiff":
         instrument = _clean_text(_column(frame, "FinInstrmTp")).str.upper()
         source = frame[instrument.isin({"STF", "IDF"})].copy()
+        expiry = pd.to_datetime(_column(source, "XpryDt"), errors="coerce")
+        if expiry.isna().any():
+            raise DataProcessingError(
+                "nse-fo-udiff report contains an invalid XpryDt"
+            )
         normalized = pd.DataFrame({
             "BASE_SYMBOL": _column(source, "TckrSymb"),
-            "EXPIRY": pd.to_datetime(_column(source, "XpryDt"), errors="coerce"),
+            "EXPIRY": expiry,
             "DATE": _date_values(_column(source, "TradDt"), target_date),
             "OPEN": _column(source, "OpnPric"),
             "HIGH": _column(source, "HghPric"),
@@ -335,12 +590,19 @@ def normalize_nse_fo(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
             "OPEN_INTEREST": _column(source, "OpnIntrst"),
             "CHANGE_IN_OI": _column(source, "ChngInOpnIntrst"),
         })
-    else:
+    elif era == "nse-fo-legacy":
         instrument = _clean_text(_column(frame, "INSTRUMENT")).str.upper()
         source = frame[instrument.isin({"FUTSTK", "FUTIDX"})].copy()
+        expiry = pd.to_datetime(
+            _column(source, "EXPIRY_DT"), errors="coerce", dayfirst=True
+        )
+        if expiry.isna().any():
+            raise DataProcessingError(
+                "nse-fo-legacy report contains an invalid EXPIRY_DT"
+            )
         normalized = pd.DataFrame({
             "BASE_SYMBOL": _column(source, "SYMBOL"),
-            "EXPIRY": pd.to_datetime(_column(source, "EXPIRY_DT"), errors="coerce", dayfirst=True),
+            "EXPIRY": expiry,
             "DATE": _date_values(_column(source, "TIMESTAMP"), target_date),
             "OPEN": _column(source, "OPEN"),
             "HIGH": _column(source, "HIGH"),
@@ -351,6 +613,8 @@ def normalize_nse_fo(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
             "CHANGE_IN_OI": _column(source, "CHG_IN_OI"),
         })
 
+    else:
+        raise DataProcessingError(f"Unsupported NSE FO era: {era}")
     normalized["BASE_SYMBOL"] = _clean_text(normalized["BASE_SYMBOL"]).str.upper()
     normalized = normalized.sort_values(["BASE_SYMBOL", "EXPIRY"], kind="stable")
     normalized["EXPIRY_RANK"] = (
@@ -362,7 +626,68 @@ def normalize_nse_fo(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
     )
     for column in FO_DAILY_COLUMNS[2:]:
         normalized[column] = _number(normalized[column])
-    return normalized.loc[:, FO_DAILY_COLUMNS].reset_index(drop=True)
+    result = normalized.loc[:, FO_DAILY_COLUMNS].reset_index(drop=True)
+    validate_canonical_data(result, target_date, FO_DAILY_COLUMNS)
+    return result
+
+
+def normalize_nse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
+    """Normalize NSE index data without replacing an invalid source date."""
+
+    validate_source_schema(frame, "nse-index", target_date)
+    for column in (
+        "Open Index Value", "High Index Value", "Low Index Value", "Volume"
+    ):
+        if column not in frame.columns:
+            continue
+        text = _clean_text(frame[column])
+        if _number(frame[column]).isna().ne(text.eq("")).any():
+            raise DataProcessingError(
+                f"nse-index report contains invalid numeric {column}"
+            )
+    if _number(frame["Closing Index Value"]).isna().any():
+        raise DataProcessingError(
+            "nse-index report contains invalid numeric Closing Index Value"
+        )
+    result = pd.DataFrame({
+        "SYMBOL": _clean_text(_column(frame, "Index Name")),
+        "DATE": _date_values(_column(frame, "Index Date"), target_date),
+        "OPEN": _number(_column(frame, "Open Index Value")),
+        "HIGH": _number(_column(frame, "High Index Value")),
+        "LOW": _number(_column(frame, "Low Index Value")),
+        "CLOSE": _number(_column(frame, "Closing Index Value")),
+        "VOLUME": _number(_column(frame, "Volume", default=0)).fillna(0),
+    })
+    result = result.loc[:, INDEX_DAILY_COLUMNS]
+    validate_canonical_data(
+        result, target_date, INDEX_DAILY_COLUMNS, index_profile=True
+    )
+    return result.reset_index(drop=True)
+
+
+def normalize_bse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
+    """Normalize filename-dated BSE index data to the common contract."""
+
+    validate_source_schema(frame, "bse-index", target_date)
+    for column in ("OpenPrice", "HighPrice", "LowPrice", "ClosePrice"):
+        if _number(frame[column]).isna().any():
+            raise DataProcessingError(
+                f"bse-index report contains invalid numeric {column}"
+            )
+    result = pd.DataFrame({
+        "SYMBOL": _clean_text(_column(frame, "IndexName")),
+        "DATE": target_date.strftime("%Y%m%d"),
+        "OPEN": _number(_column(frame, "OpenPrice")),
+        "HIGH": _number(_column(frame, "HighPrice")),
+        "LOW": _number(_column(frame, "LowPrice")),
+        "CLOSE": _number(_column(frame, "ClosePrice")),
+        "VOLUME": 0,
+    })
+    result = result.loc[:, INDEX_DAILY_COLUMNS]
+    validate_canonical_data(
+        result, target_date, INDEX_DAILY_COLUMNS, index_profile=True
+    )
+    return result.reset_index(drop=True)
 
 
 def public_equity(equity: pd.DataFrame, legacy_seven_columns: bool = False) -> pd.DataFrame:

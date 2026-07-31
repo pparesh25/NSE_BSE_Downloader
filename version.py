@@ -25,6 +25,8 @@ VERSION_HISTORY = {
             "Stable 9-column NSE futures output with open interest and change in OI",
             "Per-symbol text histories with NSE/BSE split, consolidation and bonus adjustments",
             "Pending-delivery retry, corporate-action audit ledger and rebuildable raw snapshots",
+            "Strict source schema/date validation with quarantined invalid reports",
+            "Resumable per-date pipeline manifest with partial-success reporting and gap repair",
             "Fail-closed state quarantine and command-line symbol history repair",
             "Calendar date-range selection and individually collapsible GUI sections",
             "Legacy 7-column compatibility option"
@@ -33,6 +35,8 @@ VERSION_HISTORY = {
             "Fixed NSE SME filename switch from two-digit to four-digit year",
             "Matched NSE delivery by symbol and series and BSE delivery by security code",
             "Rejected HTML error pages returned with successful HTTP status",
+            "Rejected JSON, header-only, wrong-date and invalid-numeric market reports",
+            "Detected middle-date gaps, corrupt daily files and incomplete pipeline stages",
             "Kept daily and symbol files valid through atomic replacement",
             "Recovered interrupted corporate actions without double-adjusting prices"
         ]

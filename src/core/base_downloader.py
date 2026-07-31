@@ -5,10 +5,10 @@ Abstract base class providing common functionality for all exchange downloaders.
 Includes date management, folder operations, and data processing interfaces.
 """
 
-import asyncio
+import hashlib
 import logging
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 try:
@@ -22,15 +22,11 @@ except ImportError:
     class DataFrame:
         pass
 
-from .config import Config, ExchangeConfig
+from .config import Config
 from .data_manager import DataManager
-from .exceptions import (
-    DownloaderError,
-    DataProcessingError,
-    NetworkError,
-    FileOperationError
-)
+from .exceptions import DataProcessingError, FileOperationError
 from ..services.memory_append_manager import MemoryAppendManager
+from ..services.pipeline_state import PipelineManifest, SegmentResult
 
 
 class ProgressCallback:
@@ -96,6 +92,8 @@ class BaseDownloader(ABC):
         if not hasattr(BaseDownloader, '_memory_append_manager'):
             BaseDownloader._memory_append_manager = MemoryAppendManager(config)
         self.memory_append_manager = BaseDownloader._memory_append_manager
+        self.pipeline_manifest = PipelineManifest(config.base_data_path)
+        self.last_segment_result: Optional[SegmentResult] = None
 
         # Get exchange-specific configuration
         self.exchange_config = config.get_exchange_config(exchange, segment)
@@ -235,6 +233,92 @@ class BaseDownloader(ABC):
         suffix = self.exchange_config.file_suffix
         return f"{date_str}{suffix}.{extension}"
 
+    def _pipeline_requirements(self) -> tuple[list[str], list[str]]:
+        """Return required and disabled stages for the current user options."""
+
+        required = ["downloaded", "validated", "daily"]
+        disabled = ["combined"]
+        if self.segment in ("EQ", "SME"):
+            if self.get_download_option("include_delivery_data", True):
+                required.append("delivery")
+            else:
+                disabled.append("delivery")
+            if self.get_download_option("generate_symbol_files", True):
+                required.append("symbols")
+                if self.get_download_option("apply_corporate_actions", True):
+                    required.append("actions")
+                else:
+                    disabled.append("actions")
+            else:
+                disabled.extend(["symbols", "actions"])
+        else:
+            disabled.extend(["symbols", "delivery", "actions"])
+        return required, disabled
+
+    def _pipeline(self) -> PipelineManifest:
+        """Return the manifest, including for lightweight test subclasses."""
+
+        manifest = getattr(self, "pipeline_manifest", None)
+        if manifest is None:
+            manifest = PipelineManifest(self.config.base_data_path)
+            self.pipeline_manifest = manifest
+        return manifest
+
+    def _begin_pipeline_date(self, target_date: date) -> None:
+        required, disabled = self._pipeline_requirements()
+        self._pipeline().begin(
+            self.exchange,
+            self.segment,
+            target_date,
+            required,
+            disabled,
+        )
+
+    def _mark_pipeline(
+        self,
+        target_date: date,
+        stage: str,
+        status: str,
+        **metadata: Any,
+    ) -> None:
+        self._pipeline().mark(
+            self.exchange,
+            self.segment,
+            target_date,
+            stage,
+            status,
+            **metadata,
+        )
+
+    def _quarantine_download_payload(
+        self, payload: Optional[bytes], target_date: date, label: str
+    ) -> Optional[Path]:
+        """Keep an unexpected exchange response for diagnosis without publishing it."""
+
+        if not payload:
+            return None
+        digest = hashlib.sha256(payload).hexdigest()
+        directory = (
+            self.config.base_data_path
+            / ".state"
+            / "quarantine"
+            / "source_reports"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        safe_label = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in label
+        )
+        target = directory / (
+            f"{self.exchange_segment}-{target_date.isoformat()}-"
+            f"{safe_label}-{digest[:12]}.bin"
+        )
+        if not target.exists():
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_bytes(payload)
+            temporary.replace(target)
+        return target
+
     def save_processed_data(self, df: DataFrame, target_date: date) -> Path:
         """
         Save processed DataFrame to final location
@@ -249,6 +333,8 @@ class BaseDownloader(ABC):
         Raises:
             FileOperationError: If save operation fails
         """
+        current_stage = "daily"
+        output_path: Optional[Path] = None
         try:
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
@@ -258,6 +344,14 @@ class BaseDownloader(ABC):
             temporary = output_path.with_suffix(output_path.suffix + ".tmp")
             df.to_csv(temporary, index=False, header=False)
             temporary.replace(output_path)
+            self._mark_pipeline(
+                target_date,
+                "daily",
+                "complete",
+                path=str(output_path),
+                sha256=self._file_sha256(output_path),
+                rows=len(df),
+            )
 
             self.logger.info(f"Saved processed data: {filename}")
 
@@ -272,6 +366,7 @@ class BaseDownloader(ABC):
                 and internal_equity is not None
                 and self.segment in ("EQ", "SME")
             ):
+                current_stage = "symbols"
                 from ..services.symbol_history import SymbolHistoryStore
 
                 written = SymbolHistoryStore(self.config.base_data_path).upsert(
@@ -280,6 +375,11 @@ class BaseDownloader(ABC):
                 self.logger.info(
                     f"Updated {written} {self.exchange} symbol history files"
                 )
+                self._mark_pipeline(
+                    target_date, "symbols", "complete", files=written
+                )
+
+            current_stage = "combined"
 
             # Store data in memory for append operations
             self.memory_append_manager.store_data(
@@ -303,18 +403,33 @@ class BaseDownloader(ABC):
         except Exception as e:
             from ..services.state_store import StateStoreError
 
+            try:
+                self._mark_pipeline(
+                    target_date, current_stage, "failed", error=str(e)
+                )
+            except Exception:
+                pass
+
             if isinstance(e, StateStoreError):
                 raise FileOperationError(
                     f"Repair required before symbol data can be updated: {e}",
-                    file_path=str(output_path),
+                    file_path=str(output_path) if output_path else None,
                     operation="symbol_history_repair_required",
                     details=str(e),
                 ) from e
             raise FileOperationError(
                 f"Failed to save processed data for {target_date}",
-                file_path=str(output_path),
+                file_path=str(output_path) if output_path else None,
                 operation="save_csv"
             ) from e
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _with_pending_delivery_days(self, working_days: List[date]) -> List[date]:
         """Include older dates whose delivery report was published late."""
@@ -331,19 +446,31 @@ class BaseDownloader(ABC):
         )
         return sorted(set(working_days).union(pending))
 
+    def _with_incomplete_pipeline_days(
+        self, working_days: List[date]
+    ) -> List[date]:
+        """Resume dates left partial by a prior crash or stage failure."""
+
+        pending = self._pipeline().incomplete_dates(
+            self.exchange, self.segment
+        )
+        return sorted(set(working_days).union(pending))
+
     async def _download_equity_implementation(self, working_days: List[date]) -> bool:
         """Shared price + optional delivery workflow for cash-market segments."""
 
         from ..services.delivery_state import PendingDeliveryStore
-        from ..services.source_resolver import delivery_source
+        from ..services.source_resolver import delivery_source, price_source
         from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
         from ..utils.date_utils import DateUtils
 
         days = self._with_pending_delivery_days(working_days)
+        days = self._with_incomplete_pipeline_days(days)
         self.total_files = len(days)
         pending_store = PendingDeliveryStore(self.config.base_data_path)
         include_delivery = self.get_download_option("include_delivery_data", True)
         success_count = 0
+        processed_days: List[date] = []
 
         for target_date in days:
             if (
@@ -354,9 +481,19 @@ class BaseDownloader(ABC):
                 self.logger.info(
                     f"Skipping {target_date} (current trading day; data is not ready)"
                 )
+                self._pipeline().skip_date(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    "Current trading-day data is not available yet",
+                )
                 continue
 
+            self._begin_pipeline_date(target_date)
             self._update_progress(f"Processing {target_date}")
+            price_result = None
+            delivery_data = None
+            validated = False
             tasks = [DownloadTask(
                 url=self.build_url(target_date),
                 date_str=target_date.isoformat(),
@@ -386,15 +523,33 @@ class BaseDownloader(ABC):
                         f"{self.exchange_segment} price report failed for "
                         f"{target_date}: {error}"
                     )
+                    self._mark_pipeline(
+                        target_date, "downloaded", "failed", error=error
+                    )
                     continue
 
-                delivery_data = None
+                source = price_source(self.exchange, self.segment, target_date)
+                self._mark_pipeline(
+                    target_date,
+                    "downloaded",
+                    "complete",
+                    sha256=hashlib.sha256(price_result.file_data).hexdigest(),
+                    source_era=source.era,
+                    source_url=source.url,
+                )
+
                 delivery_ready = not include_delivery
                 if include_delivery:
                     delivery_result = results[1] if len(results) > 1 else None
                     if delivery_result and delivery_result.success:
                         delivery_data = delivery_result.file_data
                         delivery_ready = True
+                        self._mark_pipeline(
+                            target_date,
+                            "delivery",
+                            "complete",
+                            sha256=hashlib.sha256(delivery_data).hexdigest(),
+                        )
                     else:
                         pending_store.add(self.exchange, self.segment, target_date)
                         detail = (
@@ -405,27 +560,65 @@ class BaseDownloader(ABC):
                             f"{self.exchange_segment} delivery pending for "
                             f"{target_date}: {detail}"
                         )
+                        self._mark_pipeline(
+                            target_date,
+                            "delivery",
+                            "failed",
+                            error=detail,
+                            pending=True,
+                        )
 
                 processed = self.process_downloaded_data(
                     price_result.file_data, target_date, delivery_data
                 )
                 if processed is None:
+                    self._mark_pipeline(
+                        target_date,
+                        "validated",
+                        "failed",
+                        error="Processor returned no data",
+                    )
                     self._report_error(f"Failed to process data for {target_date}")
                     continue
 
+                self._mark_pipeline(
+                    target_date, "validated", "complete", rows=len(processed)
+                )
+                validated = True
                 self.save_processed_data(processed, target_date)
                 if delivery_ready and include_delivery:
                     pending_store.discard(self.exchange, self.segment, target_date)
                 success_count += 1
+                processed_days.append(target_date)
                 self.completed_files += 1
                 self._update_progress(f"Completed {target_date}")
             except Exception as error:
+                price_payload = price_result.file_data if price_result else None
+                quarantined = None
+                if not validated:
+                    quarantined = self._quarantine_download_payload(
+                        price_payload, target_date, "price"
+                    )
+                    self._quarantine_download_payload(
+                        delivery_data, target_date, "delivery"
+                    )
+                    try:
+                        self._mark_pipeline(
+                            target_date,
+                            "validated",
+                            "failed",
+                            error=str(error),
+                            quarantine=(
+                                str(quarantined) if quarantined else None
+                            ),
+                        )
+                    except Exception:
+                        pass
                 self._report_error(f"Error processing {target_date}: {error}")
 
         self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
         if (
-            success_count
-            and days
+            processed_days
             and self.get_download_option("apply_corporate_actions", True)
             and self.get_download_option("generate_symbol_files", True)
         ):
@@ -445,24 +638,136 @@ class BaseDownloader(ABC):
                 actions = await client.fetch(
                     self.exchange,
                     self.segment,
-                    min(days),
-                    max(days),
+                    min(processed_days),
+                    max(processed_days),
                     add_sme_suffix=add_sme_suffix,
                 )
                 summary = CorporateActionEngine(
                     self.config.base_data_path
                 ).apply(actions)
                 self.logger.info(f"Corporate-action summary: {summary}")
+                for target_date in processed_days:
+                    self._mark_pipeline(
+                        target_date,
+                        "actions",
+                        "complete",
+                        applied=summary.get("applied", 0),
+                        manual_review=summary.get("manual_review", 0),
+                    )
                 if summary.get("manual_review"):
                     self._report_notice(
                         f"{summary['manual_review']} corporate action(s) require "
                         "manual review; symbol files were left unchanged"
                     )
             except Exception as error:
+                for target_date in processed_days:
+                    self._mark_pipeline(
+                        target_date, "actions", "failed", error=str(error)
+                    )
                 self._report_notice(
                     f"Corporate-action update could not be completed: {error}"
                 )
-        return success_count > 0
+        self.last_segment_result = self._pipeline().segment_result(
+            self.exchange, self.segment, days
+        )
+        return self.last_segment_result.ok
+
+    async def _download_price_implementation(
+        self, working_days: List[date]
+    ) -> bool:
+        """Shared validated workflow for FO and index price-only reports."""
+
+        from ..services.source_resolver import price_source
+        from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
+        from ..utils.date_utils import DateUtils
+
+        days = self._with_incomplete_pipeline_days(working_days)
+        self.total_files = len(days)
+        for target_date in days:
+            if (
+                target_date == date.today()
+                and DateUtils.is_trading_day(target_date)
+                and not DateUtils.is_data_available_time()
+            ):
+                self._pipeline().skip_date(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    "Current trading-day data is not available yet",
+                )
+                continue
+
+            self._begin_pipeline_date(target_date)
+            source = price_source(self.exchange, self.segment, target_date)
+            payload: Optional[bytes] = None
+            validated = False
+            try:
+                task = DownloadTask(
+                    url=source.url,
+                    date_str=target_date.isoformat(),
+                    target_date=target_date,
+                )
+                async with AsyncDownloadManager(self.config) as manager:
+                    await self.update_async_session_timeout(
+                        manager, self.config.download_settings.timeout_seconds
+                    )
+                    results = await manager.download_multiple([task])
+                result = results[0] if results else None
+                if not result or not result.success:
+                    error = result.error_message if result else "No result returned"
+                    self._mark_pipeline(
+                        target_date, "downloaded", "failed", error=error
+                    )
+                    self._report_error(
+                        f"{self.exchange_segment} report failed for "
+                        f"{target_date}: {error}"
+                    )
+                    continue
+
+                payload = result.file_data
+                self._mark_pipeline(
+                    target_date,
+                    "downloaded",
+                    "complete",
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    source_era=source.era,
+                    source_url=source.url,
+                )
+                processed = self.process_downloaded_data(payload, target_date)
+                if processed is None or processed.empty:
+                    raise DataProcessingError("Processor returned no data")
+                self._mark_pipeline(
+                    target_date, "validated", "complete", rows=len(processed)
+                )
+                validated = True
+                self.save_processed_data(processed, target_date)
+                self.completed_files += 1
+                self._update_progress(f"Completed {target_date}")
+            except Exception as error:
+                quarantined = None
+                if not validated:
+                    quarantined = self._quarantine_download_payload(
+                        payload, target_date, "price"
+                    )
+                    try:
+                        self._mark_pipeline(
+                            target_date,
+                            "validated",
+                            "failed",
+                            error=str(error),
+                            quarantine=(
+                                str(quarantined) if quarantined else None
+                            ),
+                        )
+                    except Exception:
+                        pass
+                self._report_error(f"Error processing {target_date}: {error}")
+
+        self.last_segment_result = self._pipeline().segment_result(
+            self.exchange, self.segment, days
+        )
+        self.logger.info(self.last_segment_result.summary())
+        return self.last_segment_result.ok
 
     def _try_direct_bse_append(self, target_date: date, bse_eq_file_path: Path) -> None:
         """Try direct BSE INDEX to BSE EQ file append (fallback method)"""
@@ -615,7 +920,12 @@ class BaseDownloader(ABC):
 
             # Get working days
             working_days = self.get_working_days(start_date, end_date)
+            gap_days = self.data_manager.get_missing_file_dates(
+                self.exchange, self.segment
+            )
+            working_days = sorted(set(working_days).union(gap_days))
             working_days = self._with_pending_delivery_days(working_days)
+            working_days = self._with_incomplete_pipeline_days(working_days)
 
             if not working_days:
                 self._update_status("No working days in date range")
@@ -630,12 +940,23 @@ class BaseDownloader(ABC):
             # to handle the actual download logic
             success = await self._download_implementation(working_days)
 
-            if success:
-                self._update_status("Download completed successfully")
-            else:
-                self._update_status("Download completed with errors")
+            result = self.last_segment_result
+            if result is None:
+                result = self._pipeline().segment_result(
+                    self.exchange, self.segment, working_days
+                )
+                self.last_segment_result = result
 
-            return success
+            if success and result.ok:
+                self._update_status(
+                    f"Download completed successfully ({result.summary()})"
+                )
+            else:
+                self._update_status(
+                    f"Download completed with errors ({result.summary()})"
+                )
+
+            return success and result.ok
 
         except Exception as e:
             error_msg = f"Download failed: {e}"

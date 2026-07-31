@@ -5,7 +5,6 @@ PySide6-based main window with exchange selection, progress tracking,
 and background download management.
 """
 
-import sys
 import asyncio
 from datetime import date
 from typing import Dict, List, Optional
@@ -218,7 +217,7 @@ class DownloadWorker(QThread):
                 if success:
                     success_count += 1
 
-        return success_count > 0
+        return success_count == len(download_tasks)
 
     async def _download_exchange_data(self, exchange: str, downloader) -> bool:
         """Download data for a specific exchange"""
@@ -254,6 +253,15 @@ class DownloadWorker(QThread):
             # later app run must retry those dates even when there is no new
             # price date in the normal range.
             working_days = downloader._with_pending_delivery_days(working_days)
+            if hasattr(downloader, "data_manager"):
+                gap_days = downloader.data_manager.get_missing_file_dates(
+                    downloader.exchange, downloader.segment
+                )
+                working_days = sorted(set(working_days).union(gap_days))
+            if hasattr(downloader, "_with_incomplete_pipeline_days"):
+                working_days = downloader._with_incomplete_pipeline_days(
+                    working_days
+                )
 
             if not working_days:
                 self.status_updated.emit(exchange, "No working days in date range")
@@ -266,12 +274,18 @@ class DownloadWorker(QThread):
             # Start download with working days
             success = await downloader._download_implementation(working_days)
 
-            if success:
-                self.status_updated.emit(exchange, "Download completed successfully")
+            result = getattr(downloader, "last_segment_result", None)
+            detail = f" ({result.summary()})" if result is not None else ""
+            if success and (result is None or result.ok):
+                self.status_updated.emit(
+                    exchange, f"Download completed successfully{detail}"
+                )
             else:
-                self.status_updated.emit(exchange, "Download completed with errors")
+                self.status_updated.emit(
+                    exchange, f"Download completed with errors{detail}"
+                )
 
-            return success
+            return success and (result is None or result.ok)
 
         except Exception as e:
             self.error_occurred.emit(exchange, f"Download error: {e}")

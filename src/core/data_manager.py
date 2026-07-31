@@ -8,7 +8,6 @@ Centralized data management system for:
 - Data validation and cleanup
 """
 
-import os
 import re
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -37,15 +36,16 @@ class DataManager:
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self._validation_cache: Dict[Path, tuple[int, int, bool]] = {}
 
         # Date patterns for different exchanges
         self.date_patterns = {
-            'NSE_EQ': r'(\d{4}-\d{2}-\d{2})-NSE-EQ\.(txt|csv)',
-            'NSE_FO': r'(\d{4}-\d{2}-\d{2})-NSE-FO\.(txt|csv)',
-            'NSE_SME': r'(\d{4}-\d{2}-\d{2})-NSE-SME\.(txt|csv)',
-            'NSE_INDEX': r'(\d{4}-\d{2}-\d{2})-NSE-INDEX\.(txt|csv)',
-            'BSE_EQ': r'(\d{4}-\d{2}-\d{2})-BSE-EQ\.(txt|csv)',
-            'BSE_INDEX': r'(\d{4}-\d{2}-\d{2})-BSE-INDEX\.(txt|csv)',
+            'NSE_EQ': r'(\d{4}-\d{2}-\d{2})-NSE-EQ\.(?:txt|csv)',
+            'NSE_FO': r'(\d{4}-\d{2}-\d{2})-NSE-FO\.(?:txt|csv)',
+            'NSE_SME': r'(\d{4}-\d{2}-\d{2})-NSE-SME\.(?:txt|csv)',
+            'NSE_INDEX': r'(\d{4}-\d{2}-\d{2})-NSE-INDEX\.(?:txt|csv)',
+            'BSE_EQ': r'(\d{4}-\d{2}-\d{2})-BSE-EQ\.(?:txt|csv)',
+            'BSE_INDEX': r'(\d{4}-\d{2}-\d{2})-BSE-INDEX\.(?:txt|csv)',
         }
 
         self._ensure_folder_structure()
@@ -84,27 +84,16 @@ class DataManager:
         Raises:
             DataProcessingError: If there's an error reading files
         """
+        data_path = self.config.get_data_path(exchange, segment)
         try:
-            data_path = self.config.get_data_path(exchange, segment)
             exchange_segment = f"{exchange}_{segment}"
 
             if exchange_segment not in self.date_patterns:
                 raise DataProcessingError(f"No date pattern defined for {exchange_segment}")
 
-            pattern = self.date_patterns[exchange_segment]
-            dates = []
-
-            # Scan directory for files matching the pattern
-            for file_path in data_path.iterdir():
-                if file_path.is_file():
-                    match = re.match(pattern, file_path.name)
-                    if match:
-                        date_str = match.group(1)
-                        try:
-                            file_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                            dates.append(file_date)
-                        except ValueError:
-                            self.logger.warning(f"Invalid date format in filename: {file_path.name}")
+            dates = self.get_available_file_dates(
+                exchange, segment, validate_contents=True
+            )
 
             if dates:
                 last_date = max(dates)
@@ -119,6 +108,146 @@ class DataManager:
                 f"Error getting last file date for {exchange}_{segment}: {e}",
                 file_path=str(data_path)
             )
+
+    def _matching_files(
+        self, exchange: str, segment: str
+    ) -> Dict[date, Path]:
+        """Return only filenames that exactly match the public contract."""
+
+        key = f"{exchange.upper()}_{segment.upper()}"
+        pattern = self.date_patterns.get(key)
+        if pattern is None:
+            raise DataProcessingError(f"No date pattern defined for {key}")
+        result: Dict[date, Path] = {}
+        for path in self.config.get_data_path(exchange, segment).iterdir():
+            if not path.is_file():
+                continue
+            match = re.fullmatch(pattern, path.name)
+            if not match:
+                continue
+            try:
+                target_date = date.fromisoformat(match.group(1))
+            except ValueError:
+                self.logger.warning(f"Invalid date in filename: {path.name}")
+                continue
+            result[target_date] = path
+        return result
+
+    def validate_daily_output(
+        self, exchange: str, segment: str, target_date: date, path: Path
+    ) -> bool:
+        """Check boundary rows, column contract, date and required numbers."""
+
+        try:
+            import csv
+
+            if not path.is_file() or path.stat().st_size == 0:
+                return False
+            stat = path.stat()
+            cache_key = (stat.st_mtime_ns, stat.st_size)
+            cached = self._validation_cache.get(path)
+            if cached and cached[:2] == cache_key:
+                return cached[2]
+
+            with path.open("rb") as handle:
+                first = handle.readline()
+                offset = max(0, stat.st_size - 8192)
+                handle.seek(offset)
+                tail = handle.read()
+            tail_lines = [line for line in tail.splitlines() if line.strip()]
+            raw_rows = [first]
+            if tail_lines and tail_lines[-1] != first.rstrip(b"\r\n"):
+                raw_rows.append(tail_lines[-1])
+            rows = []
+            for raw in raw_rows:
+                decoded = raw.decode("utf-8-sig").strip("\r\n")
+                parsed = next(csv.reader([decoded]))
+                rows.append(parsed)
+
+            allowed_counts = {7}
+            if segment.upper() in {"EQ", "SME", "FO"}:
+                allowed_counts.add(9)
+            numeric_columns = [5] if segment.upper() == "INDEX" else [2, 3, 4, 5, 6]
+            valid = True
+            for row in rows:
+                if len(row) not in allowed_counts or not row[0].strip():
+                    valid = False
+                    break
+                if row[1].strip().removesuffix(".0") != target_date.strftime("%Y%m%d"):
+                    valid = False
+                    break
+                try:
+                    if any(float(row[column].replace(",", "")) < 0 for column in numeric_columns):
+                        valid = False
+                        break
+                    if segment.upper() == "FO" and len(row) == 9:
+                        if float(row[7].replace(",", "")) < 0:
+                            valid = False
+                            break
+                        float(row[8].replace(",", ""))
+                except (IndexError, TypeError, ValueError):
+                    valid = False
+                    break
+            self._validation_cache[path] = (
+                stat.st_mtime_ns, stat.st_size, valid
+            )
+            return valid
+        except Exception as error:
+            self.logger.warning(f"Invalid daily output {path}: {error}")
+            return False
+
+    def get_available_file_dates(
+        self,
+        exchange: str,
+        segment: str,
+        *,
+        validate_contents: bool = True,
+    ) -> List[date]:
+        files = self._matching_files(exchange, segment)
+        if not validate_contents:
+            return sorted(files)
+        return sorted(
+            target_date
+            for target_date, path in files.items()
+            if self.validate_daily_output(exchange, segment, target_date, path)
+        )
+
+    def get_invalid_file_dates(
+        self, exchange: str, segment: str
+    ) -> List[date]:
+        files = self._matching_files(exchange, segment)
+        return sorted(
+            target_date
+            for target_date, path in files.items()
+            if not self.validate_daily_output(
+                exchange, segment, target_date, path
+            )
+        )
+
+    def get_missing_file_dates(
+        self, exchange: str, segment: str
+    ) -> List[date]:
+        """Find invalid or absent trading dates between first and last file."""
+
+        named_dates = self.get_available_file_dates(
+            exchange, segment, validate_contents=False
+        )
+        if len(named_dates) < 2:
+            return self.get_invalid_file_dates(exchange, segment)
+        valid = set(self.get_available_file_dates(exchange, segment))
+        expected = set(self.get_working_days(named_dates[0], named_dates[-1]))
+        return sorted(expected.difference(valid))
+
+    def get_repair_dates(self, exchange: str, segment: str) -> List[date]:
+        """Return missing/corrupt files and dates with incomplete enabled stages."""
+
+        from ..services.pipeline_state import PipelineManifest
+
+        file_repairs = self.get_missing_file_dates(exchange, segment)
+        pipeline_repairs = PipelineManifest(
+            self.config.base_data_path
+        ).incomplete_dates(exchange, segment)
+        return sorted(set(file_repairs).union(pipeline_repairs))
 
     def is_first_run(self, exchange: str, segment: str) -> bool:
         """
@@ -195,7 +324,7 @@ class DataManager:
             # Validate date range
             if start_date > end_date:
                 self.logger.info(f"No new data to download for {exchange}_{segment} (start: {start_date}, end: {end_date})")
-                return start_date, start_date  # Return same date to indicate no download needed
+                return start_date, end_date
 
             self.logger.info(f"Date range for {exchange}_{segment}: {start_date} to {end_date}")
             return start_date, end_date
@@ -254,20 +383,12 @@ class DataManager:
             Number of data files
         """
         try:
-            data_path = self.config.get_data_path(exchange, segment)
             exchange_segment = f"{exchange}_{segment}"
 
             if exchange_segment not in self.date_patterns:
                 return 0
 
-            pattern = self.date_patterns[exchange_segment]
-            count = 0
-
-            for file_path in data_path.iterdir():
-                if file_path.is_file() and re.match(pattern, file_path.name):
-                    count += 1
-
-            return count
+            return len(self.get_available_file_dates(exchange, segment))
 
         except Exception as e:
             self.logger.error(f"Error counting files for {exchange}_{segment}: {e}")
@@ -322,9 +443,20 @@ class DataManager:
         try:
             last_file_date = self.get_last_file_date(exchange, segment)
             expected_last_date = DateUtils.get_expected_last_trading_date()
+            repair_dates = self.get_repair_dates(exchange, segment)
 
             if last_file_date is None:
                 return False, f"No data files found for {exchange}_{segment}"
+
+            if repair_dates:
+                preview = ", ".join(
+                    value.isoformat() for value in repair_dates[:5]
+                )
+                suffix = "..." if len(repair_dates) > 5 else ""
+                return False, (
+                    f"Database needs repair for {exchange}_{segment}: "
+                    f"{len(repair_dates)} date(s) ({preview}{suffix})"
+                )
 
             if last_file_date >= expected_last_date:
                 # Base message
@@ -366,10 +498,16 @@ class DataManager:
                 # Get last file date for this exchange
                 last_file_date = self.get_last_file_date(exchange, segment)
                 expected_last_date = DateUtils.get_expected_last_trading_date()
+                repair_dates = self.get_repair_dates(exchange, segment)
 
                 if last_file_date is None:
                     all_up_to_date = False
                     error_exchanges.append(f"{exchange_segment} (No data found)")
+                elif repair_dates:
+                    all_up_to_date = False
+                    error_exchanges.append(
+                        f"{exchange_segment} ({len(repair_dates)} repair date(s))"
+                    )
                 elif last_file_date < expected_last_date:
                     all_up_to_date = False
                     missing_days = DateUtils.get_trading_days(last_file_date + timedelta(days=1), expected_last_date)

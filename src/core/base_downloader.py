@@ -5,6 +5,7 @@ Abstract base class providing common functionality for all exchange downloaders.
 Includes date management, folder operations, and data processing interfaces.
 """
 
+import asyncio
 import hashlib
 import logging
 from abc import ABC, abstractmethod
@@ -27,6 +28,7 @@ from .data_manager import DataManager
 from .exceptions import DataProcessingError, FileOperationError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.pipeline_state import PipelineManifest, SegmentResult
+from ..services.settings import SettingsService
 
 
 class ProgressCallback:
@@ -89,6 +91,7 @@ class BaseDownloader(ABC):
         self.logger = logging.getLogger(f"{__name__}.{self.exchange_segment}")
 
         self.combined_builder = CombinedFileBuilder(config)
+        self.settings = SettingsService(config)
         self.pipeline_manifest = PipelineManifest(config.base_data_path)
         self.last_segment_result: Optional[SegmentResult] = None
 
@@ -140,15 +143,11 @@ class BaseDownloader(ABC):
     def get_download_option(self, name: str, default: Any = None) -> Any:
         """Return a user preference, falling back to application config."""
 
-        try:
-            from ..utils.user_preferences import UserPreferences
-
-            user_options = UserPreferences().get_download_options()
-            if name in user_options:
-                return user_options[name]
-        except Exception:
-            pass
-        return self.config.get_download_options().get(name, default)
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            settings = SettingsService(self.config)
+            self.settings = settings
+        return settings.get_download_option(name, default)
 
     @abstractmethod
     def build_url(self, target_date: date) -> str:
@@ -273,6 +272,10 @@ class BaseDownloader(ABC):
             if set(item.failed_stages).difference({"combined"}):
                 return False
         return True
+
+    def _is_cancel_requested(self) -> bool:
+        callback = getattr(self, "cancel_requested", None)
+        return bool(callback and callback())
 
     def _pipeline(self) -> PipelineManifest:
         """Return the manifest, including for lightweight test subclasses."""
@@ -521,9 +524,11 @@ class BaseDownloader(ABC):
         processed_days: List[date] = []
 
         for target_date in days:
+            if self._is_cancel_requested():
+                raise asyncio.CancelledError
             if (
-                target_date == date.today()
-                and DateUtils.is_trading_day(target_date)
+                target_date == DateUtils.today_ist()
+                and self.data_manager.is_trading_day(target_date)
                 and not DateUtils.is_data_available_time()
             ):
                 self.logger.info(
@@ -633,6 +638,8 @@ class BaseDownloader(ABC):
                     target_date, "validated", "complete", rows=len(processed)
                 )
                 validated = True
+                if self._is_cancel_requested():
+                    raise asyncio.CancelledError
                 self.save_processed_data(processed, target_date)
                 if delivery_ready and include_delivery:
                     pending_store.discard(self.exchange, self.segment, target_date)
@@ -667,6 +674,7 @@ class BaseDownloader(ABC):
         self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
         if (
             processed_days
+            and not self._is_cancel_requested()
             and self.get_download_option("apply_corporate_actions", True)
             and self.get_download_option("generate_symbol_files", True)
         ):
@@ -675,9 +683,9 @@ class BaseDownloader(ABC):
                     CorporateActionClient,
                     CorporateActionEngine,
                 )
-                from ..utils.user_preferences import UserPreferences
-
-                add_sme_suffix = UserPreferences().get_sme_add_suffix()
+                add_sme_suffix = SettingsService(
+                    self.config
+                ).preferences.get_sme_add_suffix()
                 client = CorporateActionClient(
                     timeout=max(
                         30, self.config.download_settings.timeout_seconds
@@ -732,9 +740,11 @@ class BaseDownloader(ABC):
         days = self._with_incomplete_pipeline_days(working_days)
         self.total_files = len(days)
         for target_date in days:
+            if self._is_cancel_requested():
+                raise asyncio.CancelledError
             if (
-                target_date == date.today()
-                and DateUtils.is_trading_day(target_date)
+                target_date == DateUtils.today_ist()
+                and self.data_manager.is_trading_day(target_date)
                 and not DateUtils.is_data_available_time()
             ):
                 self._pipeline().skip_date(
@@ -788,6 +798,8 @@ class BaseDownloader(ABC):
                     target_date, "validated", "complete", rows=len(processed)
                 )
                 validated = True
+                if self._is_cancel_requested():
+                    raise asyncio.CancelledError
                 self.save_processed_data(processed, target_date)
                 self.completed_files += 1
                 self._update_progress(f"Completed {target_date}")

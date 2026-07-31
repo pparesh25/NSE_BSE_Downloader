@@ -10,6 +10,8 @@ app_settings:
     - "Strict source validation and resumable per-date repair"
     - "Deterministic restart-safe EQ, SME and Index reconciliation"
     - "Custom calendar ranges and collapsible GUI sections"
+    - "Official NSE holiday refresh with IST-aware trading dates"
+    - "Cooperative cancellation and typed GUI outcomes"
     - "Automatic update notifications"
 
 # Data storage paths

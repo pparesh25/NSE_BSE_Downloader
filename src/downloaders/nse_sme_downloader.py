@@ -126,7 +126,7 @@ class NSESMEDownloader(BaseDownloader):
         try:
             with self.memory_optimizer.memory_monitor("nse_sme_transform"):
                 from ..utils.user_preferences import UserPreferences
-                user_prefs = UserPreferences()
+                user_prefs = UserPreferences(self.config)
                 sme_add_suffix = user_prefs.get_sme_add_suffix()
                 source = price_source("NSE", "SME", file_date)
                 internal = normalize_nse_sme(

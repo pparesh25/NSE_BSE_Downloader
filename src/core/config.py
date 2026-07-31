@@ -5,7 +5,6 @@ Handles loading and validation of configuration from YAML files.
 Provides cross-platform path resolution and default settings.
 """
 
-import os
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -131,7 +130,14 @@ class Config:
         # Setup holiday manager (use user home directory)
         from ..utils.holiday_manager import HolidayManager
         user_cache_dir = Path.home() / ".nse_bse_downloader"
-        self.holiday_manager = HolidayManager(user_cache_dir)
+        try:
+            holiday_start_year = int(self.date_settings.base_start_date[:4])
+        except (TypeError, ValueError):
+            holiday_start_year = 2025
+        self.holiday_manager = HolidayManager(
+            user_cache_dir,
+            start_year=holiday_start_year,
+        )
 
     def _load_typed_settings(self) -> None:
         """Materialize mutable runtime settings from the YAML configuration.

@@ -6,9 +6,12 @@ Manages user preferences and settings persistence.
 
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-from datetime import date, datetime, timedelta
+from typing import Dict, List, Any
+from datetime import date, timedelta
+
+from .date_utils import DateUtils
 
 
 class UserPreferences:
@@ -16,9 +19,10 @@ class UserPreferences:
     Manages user preferences and settings persistence
     """
 
-    def __init__(self):
+    def __init__(self, config=None):
         """Initialize user preferences manager"""
         self.logger = logging.getLogger(__name__)
+        self.config = config
 
         # User config directory
         self.config_dir = Path.home() / ".nse_bse_downloader"
@@ -28,9 +32,10 @@ class UserPreferences:
         self.config_file = self.config_dir / "user_preferences.json"
 
         # Default preferences
+        today = DateUtils.today_ist()
         self.default_preferences = {
             "version": "1.0",
-            "last_updated": datetime.now().isoformat(),
+            "last_updated": DateUtils.now_ist().isoformat(),
             "exchange_selection": {
                 "NSE_EQ": True,
                 "NSE_FO": False,
@@ -63,8 +68,8 @@ class UserPreferences:
                 "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update"),
                 "date_selection": {
                     "use_custom_range": False,
-                    "start_date": (date.today() - timedelta(days=7)).isoformat(),
-                    "end_date": date.today().isoformat()
+                    "start_date": (today - timedelta(days=7)).isoformat(),
+                    "end_date": today.isoformat()
                 },
                 "section_states": {
                     "exchanges": True,
@@ -76,13 +81,42 @@ class UserPreferences:
             },
             "advanced_options": {
                 "auto_check_updates": True,
+                "skipped_update_version": "",
                 "show_debug_logs": False,
                 "cache_enabled": True
             }
         }
+        self._apply_config_defaults()
 
         # Load existing preferences
         self.preferences = self.load_preferences()
+
+    def _apply_config_defaults(self) -> None:
+        """Apply application config before persisted user overrides."""
+
+        if self.config is None:
+            return
+        try:
+            options = self.config.get_download_options()
+            for key in self.default_preferences["download_options"]:
+                if key in options:
+                    self.default_preferences["download_options"][key] = options[key]
+            timeout = self.config.download_settings.timeout_seconds
+            self.default_preferences["download_options"]["timeout_seconds"] = timeout
+            gui = self.config.gui_settings
+            selected = set(gui.default_exchanges)
+            self.default_preferences["exchange_selection"] = {
+                key: key in selected
+                for key in self.default_preferences["exchange_selection"]
+            }
+            self.default_preferences["gui_settings"]["window_width"] = (
+                gui.window_width
+            )
+            self.default_preferences["gui_settings"]["window_height"] = (
+                gui.window_height
+            )
+        except Exception as error:
+            self.logger.warning("Could not apply config defaults: %s", error)
 
     def load_preferences(self) -> Dict[str, Any]:
         """
@@ -100,15 +134,15 @@ class UserPreferences:
                 merged_prefs = self._merge_preferences(self.default_preferences, saved_prefs)
 
                 self.logger.info(f"Loaded user preferences from: {self.config_file}")
-                return merged_prefs
+                return self._validate_preferences(merged_prefs)
             else:
                 self.logger.info("No existing preferences found, using defaults")
-                return self.default_preferences.copy()
+                return self._validate_preferences({})
 
         except Exception as e:
             self.logger.error(f"Error loading preferences: {e}")
             self.logger.info("Using default preferences")
-            return self.default_preferences.copy()
+            return self._validate_preferences({})
 
     def save_preferences(self) -> bool:
         """
@@ -119,11 +153,13 @@ class UserPreferences:
         """
         try:
             # Update last_updated timestamp
-            self.preferences["last_updated"] = datetime.now().isoformat()
+            self.preferences = self._validate_preferences(self.preferences)
+            self.preferences["last_updated"] = DateUtils.now_ist().isoformat()
 
-            # Save to file with pretty formatting
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            temporary = self.config_file.with_suffix(".json.tmp")
+            with open(temporary, 'w', encoding='utf-8') as f:
                 json.dump(self.preferences, f, indent=2, ensure_ascii=False)
+            temporary.replace(self.config_file)
 
             self.logger.info(f"Saved user preferences to: {self.config_file}")
             return True
@@ -143,7 +179,7 @@ class UserPreferences:
         Returns:
             Merged preferences dictionary
         """
-        merged = defaults.copy()
+        merged = deepcopy(defaults)
 
         for key, value in saved.items():
             if key in merged:
@@ -151,10 +187,96 @@ class UserPreferences:
                     merged[key] = self._merge_preferences(merged[key], value)
                 else:
                     merged[key] = value
-            else:
-                # New key from saved preferences
-                merged[key] = value
+        return merged
 
+    @staticmethod
+    def _boolean(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "1", "on"}:
+                return True
+            if lowered in {"false", "no", "0", "off"}:
+                return False
+        return default
+
+    def _validate_preferences(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a schema-bounded, type-safe preference snapshot."""
+
+        merged = self._merge_preferences(self.default_preferences, values)
+        defaults = self.default_preferences
+        for key, default in defaults["exchange_selection"].items():
+            merged["exchange_selection"][key] = self._boolean(
+                merged["exchange_selection"].get(key), default
+            )
+        for key, default in defaults["download_options"].items():
+            value = merged["download_options"].get(key, default)
+            if key == "timeout_seconds":
+                try:
+                    value = max(1, min(30, int(value)))
+                except (TypeError, ValueError):
+                    value = int(default)
+            else:
+                value = self._boolean(value, bool(default))
+            merged["download_options"][key] = value
+
+        gui = merged["gui_settings"]
+        gui_defaults = defaults["gui_settings"]
+        for key in (
+            "min_window_width", "max_window_width",
+            "min_window_height", "max_window_height",
+        ):
+            try:
+                gui[key] = max(200, int(gui.get(key, gui_defaults[key])))
+            except (TypeError, ValueError):
+                gui[key] = gui_defaults[key]
+        gui["max_window_width"] = max(
+            gui["min_window_width"], gui["max_window_width"]
+        )
+        gui["max_window_height"] = max(
+            gui["min_window_height"], gui["max_window_height"]
+        )
+        for key, minimum, maximum in (
+            ("window_width", gui["min_window_width"], gui["max_window_width"]),
+            ("window_height", gui["min_window_height"], gui["max_window_height"]),
+        ):
+            try:
+                gui[key] = max(minimum, min(maximum, int(gui[key])))
+            except (TypeError, ValueError, KeyError):
+                gui[key] = gui_defaults[key]
+        gui["last_download_location"] = str(
+            gui.get("last_download_location")
+            or gui_defaults["last_download_location"]
+        )
+        date_selection = gui["date_selection"]
+        try:
+            start = date.fromisoformat(str(date_selection["start_date"]))
+            end = date.fromisoformat(str(date_selection["end_date"]))
+            if start > end:
+                raise ValueError("start date is after end date")
+        except (KeyError, TypeError, ValueError):
+            date_selection = deepcopy(gui_defaults["date_selection"])
+        date_selection["use_custom_range"] = self._boolean(
+            date_selection.get("use_custom_range"), False
+        )
+        gui["date_selection"] = date_selection
+        for key, default in gui_defaults["section_states"].items():
+            gui["section_states"][key] = self._boolean(
+                gui["section_states"].get(key), default
+            )
+
+        advanced = merged["advanced_options"]
+        advanced_defaults = defaults["advanced_options"]
+        for key in ("auto_check_updates", "show_debug_logs", "cache_enabled"):
+            advanced[key] = self._boolean(
+                advanced.get(key), advanced_defaults[key]
+            )
+        advanced["skipped_update_version"] = str(
+            advanced.get("skipped_update_version", "") or ""
+        ).strip()
         return merged
 
     # Exchange Selection Methods
@@ -175,11 +297,14 @@ class UserPreferences:
     # Download Options Methods
     def get_download_options(self) -> Dict[str, Any]:
         """Get download options"""
-        return self.preferences.get("download_options", {})
+        return self.preferences.get("download_options", {}).copy()
 
     def set_download_options(self, options: Dict[str, Any]) -> None:
         """Set download options"""
-        self.preferences["download_options"].update(options)
+        allowed = set(self.default_preferences["download_options"])
+        self.preferences["download_options"].update({
+            key: value for key, value in options.items() if key in allowed
+        })
         self.save_preferences()
 
     def get_include_weekends(self) -> bool:
@@ -197,7 +322,9 @@ class UserPreferences:
 
     def set_timeout_seconds(self, timeout: int) -> None:
         """Set timeout seconds setting"""
-        self.preferences["download_options"]["timeout_seconds"] = timeout
+        self.preferences["download_options"]["timeout_seconds"] = max(
+            1, min(30, int(timeout))
+        )
         self.save_preferences()
 
     def get_data_options(self) -> Dict[str, bool]:
@@ -297,7 +424,7 @@ class UserPreferences:
         self.preferences["gui_settings"]["window_width"] = width
         self.preferences["gui_settings"]["window_height"] = height
         self.save_preferences()
-        self.logger.debug(f"Window size saved successfully")
+        self.logger.debug("Window size saved successfully")
 
     def get_last_download_location(self) -> str:
         """Get last download location"""
@@ -352,10 +479,23 @@ class UserPreferences:
         self.preferences["advanced_options"]["auto_check_updates"] = auto_check
         self.save_preferences()
 
+    def get_skipped_update_version(self) -> str:
+        """Return the exact version hidden from automatic notifications."""
+
+        return str(self.preferences.get("advanced_options", {}).get(
+            "skipped_update_version", ""
+        ))
+
+    def set_skipped_update_version(self, version: str) -> None:
+        self.preferences["advanced_options"]["skipped_update_version"] = (
+            str(version).strip()
+        )
+        self.save_preferences()
+
     # Utility Methods
     def reset_to_defaults(self) -> None:
         """Reset all preferences to defaults"""
-        self.preferences = self.default_preferences.copy()
+        self.preferences = deepcopy(self.default_preferences)
         self.save_preferences()
         self.logger.info("Reset preferences to defaults")
 

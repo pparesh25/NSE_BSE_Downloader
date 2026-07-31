@@ -6,7 +6,7 @@ Contains application version and build information.
 
 __version__ = "1.1.0"
 __build_date__ = "2026-07-31"
-__build_number__ = 23
+__build_number__ = 24
 
 # Release automation must replace both values together.  The desktop updater
 # remains notification-only while either field is blank, rather than executing
@@ -30,6 +30,9 @@ VERSION_HISTORY = {
             "Deterministic restart-safe combined EQ, SME and Index bhavcopy assembly",
             "Fail-closed state quarantine and command-line symbol history repair",
             "Calendar date-range selection and individually collapsible GUI sections",
+            "IST-aware official NSE holiday calendar with daily refresh and stale-cache fallback",
+            "Remembered automatic-update, skipped-version and validated effective settings",
+            "Cooperative GUI cancellation with typed per-segment completion outcomes",
             "Legacy 7-column compatibility option"
         ],
         "bug_fixes": [
@@ -40,7 +43,10 @@ VERSION_HISTORY = {
             "Detected middle-date gaps, corrupt daily files and incomplete pipeline stages",
             "Kept daily and symbol files valid through atomic replacement",
             "Recovered interrupted corporate actions without double-adjusting prices",
-            "Prevented task arrival order or a failed dependency from publishing partial combined EQ files"
+            "Prevented task arrival order or a failed dependency from publishing partial combined EQ files",
+            "Removed forced QThread termination during Stop and application close",
+            "Prevented stale hard-coded holidays and host-timezone drift from selecting the wrong trading date",
+            "Preserved update preferences through the same config and user-setting precedence path"
         ]
     },
 

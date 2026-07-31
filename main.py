@@ -104,7 +104,7 @@ def run_rebuild_mode(config_path: str, args) -> int:
             builder = CombinedFileBuilder(config)
             dependencies = builder.dependencies_from_options(
                 exchange,
-                UserPreferences().get_append_options(),
+                UserPreferences(config).get_append_options(),
             )
             build_result = builder.reconcile(
                 exchange, target_date, dependencies

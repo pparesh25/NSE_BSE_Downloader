@@ -9,24 +9,40 @@ Provides date-related utility functions including:
 """
 
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import Callable, Iterable, List, Optional
 import calendar
+from zoneinfo import ZoneInfo
 
 
 class DateUtils:
     """Utility class for date operations"""
 
-    # Indian stock market holidays (approximate - should be updated annually)
-    INDIAN_HOLIDAYS_2025 = [
-        date(2025, 1, 26),  # Republic Day
-        date(2025, 3, 14),  # Holi
-        date(2025, 4, 14),  # Ram Navami
-        date(2025, 4, 18),  # Good Friday
-        date(2025, 8, 15),  # Independence Day
-        date(2025, 10, 2),   # Gandhi Jayanti
-        date(2025, 11, 1),   # Diwali (approximate)
-        # Add more holidays as needed
-    ]
+    MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
+    _clock: Optional[Callable[[], datetime]] = None
+
+    @classmethod
+    def set_clock(cls, provider: Callable[[], datetime]) -> None:
+        """Inject a clock for deterministic tests."""
+
+        cls._clock = provider
+
+    @classmethod
+    def reset_clock(cls) -> None:
+        cls._clock = None
+
+    @classmethod
+    def now_ist(cls, value: Optional[datetime] = None) -> datetime:
+        current = value or (
+            cls._clock() if cls._clock is not None
+            else datetime.now(cls.MARKET_TIMEZONE)
+        )
+        if current.tzinfo is None:
+            return current.replace(tzinfo=cls.MARKET_TIMEZONE)
+        return current.astimezone(cls.MARKET_TIMEZONE)
+
+    @classmethod
+    def today_ist(cls) -> date:
+        return cls.now_ist().date()
 
     @staticmethod
     def is_weekend(target_date: date) -> bool:
@@ -42,27 +58,26 @@ class DateUtils:
         return target_date.weekday() >= 5  # Saturday = 5, Sunday = 6
 
     @staticmethod
-    def is_holiday(target_date: date, holidays: Optional[List[date]] = None) -> bool:
+    def is_holiday(
+        target_date: date, holidays: Optional[Iterable[date]] = None
+    ) -> bool:
         """
         Check if date is a holiday
 
         Args:
             target_date: Date to check
-            holidays: List of holiday dates (uses default if None)
+            holidays: Explicit market-holiday dates; none means no holidays
 
         Returns:
             True if holiday, False otherwise
         """
-        if holidays is None:
-            holidays = DateUtils.INDIAN_HOLIDAYS_2025
-
-        return target_date in holidays
+        return target_date in (() if holidays is None else holidays)
 
     @staticmethod
     def is_trading_day(target_date: date,
                       skip_weekends: bool = True,
                       skip_holidays: bool = True,
-                      holidays: Optional[List[date]] = None) -> bool:
+                      holidays: Optional[Iterable[date]] = None) -> bool:
         """
         Check if date is a trading day
 
@@ -88,7 +103,7 @@ class DateUtils:
                         end_date: date,
                         skip_weekends: bool = True,
                         skip_holidays: bool = True,
-                        holidays: Optional[List[date]] = None) -> List[date]:
+                        holidays: Optional[Iterable[date]] = None) -> List[date]:
         """
         Get list of trading days between start and end dates
 
@@ -163,7 +178,10 @@ class DateUtils:
             return None
 
     @staticmethod
-    def get_last_trading_day(reference_date: Optional[date] = None) -> date:
+    def get_last_trading_day(
+        reference_date: Optional[date] = None,
+        holidays: Optional[Iterable[date]] = None,
+    ) -> date:
         """
         Get the last trading day before or on the reference date
 
@@ -174,18 +192,21 @@ class DateUtils:
             Last trading day
         """
         if reference_date is None:
-            reference_date = date.today()
+            reference_date = DateUtils.today_ist()
 
         current_date = reference_date
 
         # Go back until we find a trading day
-        while not DateUtils.is_trading_day(current_date):
+        while not DateUtils.is_trading_day(current_date, holidays=holidays):
             current_date -= timedelta(days=1)
 
         return current_date
 
     @staticmethod
-    def get_next_trading_day(reference_date: Optional[date] = None) -> date:
+    def get_next_trading_day(
+        reference_date: Optional[date] = None,
+        holidays: Optional[Iterable[date]] = None,
+    ) -> date:
         """
         Get the next trading day after the reference date
 
@@ -196,12 +217,12 @@ class DateUtils:
             Next trading day
         """
         if reference_date is None:
-            reference_date = date.today()
+            reference_date = DateUtils.today_ist()
 
         current_date = reference_date + timedelta(days=1)
 
         # Go forward until we find a trading day
-        while not DateUtils.is_trading_day(current_date):
+        while not DateUtils.is_trading_day(current_date, holidays=holidays):
             current_date += timedelta(days=1)
 
         return current_date
@@ -261,34 +282,37 @@ class DateUtils:
         return current_date
 
     @staticmethod
-    def is_market_hours() -> bool:
+    def is_market_hours(now: Optional[datetime] = None) -> bool:
         """
         Check if current time is within market hours (9:15 AM to 3:30 PM IST)
 
         Returns:
             True if within market hours, False otherwise
         """
-        now = datetime.now()
+        now = DateUtils.now_ist(now)
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
         return market_start <= now <= market_end
 
     @staticmethod
-    def is_data_available_time() -> bool:
+    def is_data_available_time(now: Optional[datetime] = None) -> bool:
         """
         Check if current time is after 6:00 PM (when data files are typically available)
 
         Returns:
             True if after 6:00 PM, False otherwise
         """
-        now = datetime.now()
+        now = DateUtils.now_ist(now)
         data_available_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
 
         return now >= data_available_time
 
     @staticmethod
-    def get_expected_last_trading_date() -> date:
+    def get_expected_last_trading_date(
+        holidays: Optional[Iterable[date]] = None,
+        now: Optional[datetime] = None,
+    ) -> date:
         """
         Get the expected last trading date based on current date and time
 
@@ -299,16 +323,19 @@ class DateUtils:
         Returns:
             Expected last trading date
         """
-        today = date.today()
+        market_now = DateUtils.now_ist(now)
+        today = market_now.date()
 
         # If today is not a trading day, get the last trading day
-        if not DateUtils.is_trading_day(today):
-            return DateUtils.get_last_trading_day(today)
+        if not DateUtils.is_trading_day(today, holidays=holidays):
+            return DateUtils.get_last_trading_day(today, holidays=holidays)
 
         # If today is a trading day
-        if DateUtils.is_data_available_time():
+        if DateUtils.is_data_available_time(market_now):
             # After 6:00 PM - today's data should be available
             return today
         else:
             # Before 6:00 PM - today's data not yet available
-            return DateUtils.get_last_trading_day(today - timedelta(days=1))
+            return DateUtils.get_last_trading_day(
+                today - timedelta(days=1), holidays=holidays
+            )

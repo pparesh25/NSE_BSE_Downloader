@@ -29,7 +29,7 @@ pathsને પ્રમાણિત કરતી નથી.
 
 ## Implementation status — `codex/release-hardening`
 
-2026-07-31એ remediation શરૂ કરીને પ્રથમ ચાર hardening phases પૂર્ણ કરવામાં આવી:
+2026-07-31એ remediation શરૂ કરીને પ્રથમ પાંચ hardening phases પૂર્ણ કરવામાં આવી:
 
 - P0-1 transport: market data, corporate actions અને shared HTTP clientમાં verified
   TLS ચાલુ; unverified connector/context દૂર.
@@ -66,9 +66,21 @@ pathsને પ્રમાણિત કરતી નથી.
   (`2720 + 445 + 146`) અને BSE combined `4337` (`4261 + 76`) rows; બંનેમાં
   component sum, blank Index delivery fields અને restart SHA verify થયા.
 - Phase 4 પછી suite `75 passed`, changed-file Ruff/compile gates clean છે.
+- Phase 5 calendar/settings/GUI lifecycle hardening: built-in → `config.yaml` →
+  validated user preference precedence એક serviceમાં છે; market clock
+  Asia/Kolkata-aware અને injectable છે; NSE official CM holiday API year-wise
+  24-hour atomic cache તથા stale fallback સાથે વપરાય છે.
+- GUI Stop/close હવે asyncio tasksને cooperatively cancel કરે છે; કોઈ `terminate()`
+  path નથી. Segment/overall outcomes success, partial, pending, warning,
+  repair-required, cancelled અને failed તરીકે typed signalsથી render થાય છે.
+- Automatic update preference, skipped-version persistence/reset, manual forced check
+  અને active update worker close guard પૂર્ણ છે. Offscreen real GUI startup pass અને
+  official live calendar refreshમાં 2025–2026ના `38` entries verify થયા.
+- બંને Miniforge environmentsમાં suite `85 passed`; changed-file Ruff, compileall,
+  GUI smoke અને official-calendar live smoke pass છે.
 
-P0-1, P0-2, P0-3, Phase 3 અને Phase 4 માટે regression guards હવે હાજર છે. આગળનો
-release-blocking કાર્ય Phase 5નું calendar/configuration/GUI lifecycle hardening છે.
+P0-1, P0-2, P0-3 અને Phase 3–5 માટે regression guards હવે હાજર છે. આગળનું
+release-blocking કાર્ય Phase 6નું coverage/type/build/release-quality hardening છે.
 
 ## Severity અર્થ
 
@@ -531,7 +543,7 @@ Target: `memory_append_manager.py`ને small deterministic `CombinedFileBuilde
 Gate: arrival-order permutation, restart, one dependency failed/disabled અને legacy
 7-column matrices byte-equivalent pass.
 
-### Phase 5 — Calendar, configuration અને GUI lifecycle
+### Phase 5 — Calendar, configuration અને GUI lifecycle — complete
 
 Target files: `config.py`, `user_preferences.py`, `holiday_manager.py`, `date_utils.py`,
 `main_window.py`.
@@ -543,6 +555,11 @@ Target files: `config.py`, `user_preferences.py`, `holiday_manager.py`, `date_ut
 5. Auto-update/skip preferences અમલમાં મૂકવી અને active update worker close guard.
 
 Gate: pytest-qt cancel/close/settings/calendar tests અને real GUI smoke.
+
+Result: `85 passed` in both requested environments; real offscreen GUI startup,
+cooperative close/cancel regression અને official NSE 2025–2026 calendar live refresh
+pass. Qt offscreen platformે one-time fallback-font diagnostic આપ્યો; production
+GUI failure નથી અને Phase 6 packaged-app smokeમાં native font/resource gate રહેશે.
 
 ### Phase 6 — Release quality, packaging અને documentation
 

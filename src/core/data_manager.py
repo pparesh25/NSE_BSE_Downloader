@@ -48,8 +48,41 @@ class DataManager:
             'BSE_EQ': r'(\d{4}-\d{2}-\d{2})-BSE-EQ\.(?:txt|csv)',
             'BSE_INDEX': r'(\d{4}-\d{2}-\d{2})-BSE-INDEX\.(?:txt|csv)',
         }
-
         self._ensure_folder_structure()
+
+    def is_trading_day(
+        self, target_date: date, include_weekends: bool = False
+    ) -> bool:
+        """Use configured weekend and official holiday policies."""
+
+        if (
+            getattr(self.config.date_settings, "weekend_skip", True)
+            and not include_weekends
+            and target_date.weekday() >= 5
+        ):
+            return False
+        if (
+            getattr(self.config.date_settings, "holiday_skip", True)
+            and self.config.holiday_manager.is_holiday(target_date)
+        ):
+            return False
+        return True
+
+    def get_expected_last_trading_date(self) -> date:
+        """Return the IST-aware expected date using the configured calendar."""
+
+        today = DateUtils.today_ist()
+        if not self.is_trading_day(today):
+            current = today
+            while not self.is_trading_day(current):
+                current -= timedelta(days=1)
+            return current
+        if DateUtils.is_data_available_time():
+            return today
+        current = today - timedelta(days=1)
+        while not self.is_trading_day(current):
+            current -= timedelta(days=1)
+        return current
 
     def _ensure_folder_structure(self) -> None:
         """Ensure all required folders exist"""
@@ -326,12 +359,14 @@ class DataManager:
             if custom_end:
                 end_date = custom_end
             else:
-                today = date.today()
+                today = DateUtils.today_ist()
                 # If today is a trading day and it's before 6:00 PM, exclude today
-                if (DateUtils.is_trading_day(today) and
+                if (self.is_trading_day(today) and
                     not DateUtils.is_data_available_time()):
                     # Use previous trading day as end date
-                    end_date = DateUtils.get_last_trading_day(today - timedelta(days=1))
+                    end_date = today - timedelta(days=1)
+                    while not self.is_trading_day(end_date):
+                        end_date -= timedelta(days=1)
                 else:
                     end_date = today
 
@@ -383,7 +418,10 @@ class DataManager:
         current_date = start_date
 
         # Determine if weekends should be skipped
-        skip_weekends = self.config.date_settings.weekend_skip and not include_weekends
+        skip_weekends = (
+            getattr(self.config.date_settings, "weekend_skip", True)
+            and not include_weekends
+        )
 
         while current_date <= end_date:
             # Skip weekends if configured and not overridden
@@ -391,8 +429,11 @@ class DataManager:
                 current_date += timedelta(days=1)
                 continue
 
-            # Skip market holidays
-            if self.config.holiday_manager.is_holiday(current_date):
+            # Skip market holidays only when configured.
+            if (
+                getattr(self.config.date_settings, "holiday_skip", True)
+                and self.config.holiday_manager.is_holiday(current_date)
+            ):
                 self.logger.debug(f"Skipping holiday: {current_date}")
                 current_date += timedelta(days=1)
                 continue
@@ -473,7 +514,7 @@ class DataManager:
         """
         try:
             last_file_date = self.get_last_file_date(exchange, segment)
-            expected_last_date = DateUtils.get_expected_last_trading_date()
+            expected_last_date = self.get_expected_last_trading_date()
             repair_dates = self.get_repair_dates(exchange, segment)
 
             if last_file_date is None:
@@ -494,14 +535,16 @@ class DataManager:
                 base_message = f"Database is up-to-date. Last file date: {last_file_date}"
 
                 # Add today's data availability info if relevant
-                today = date.today()
-                if DateUtils.is_trading_day(today) and not DateUtils.is_data_available_time():
+                today = DateUtils.today_ist()
+                if self.is_trading_day(today) and not DateUtils.is_data_available_time():
                     # Today is a trading day and it's before 6:00 PM
                     base_message += f"\n\nNote: Today's data ({today.strftime('%Y-%m-%d')}) will be available after 6:00 PM."
 
                 return True, base_message
             else:
-                missing_days = DateUtils.get_trading_days(last_file_date + timedelta(days=1), expected_last_date)
+                missing_days = self.get_working_days(
+                    last_file_date + timedelta(days=1), expected_last_date
+                )
                 return False, f"Database needs update. Missing {len(missing_days)} trading days since {last_file_date}"
 
         except Exception as e:
@@ -528,7 +571,7 @@ class DataManager:
 
                 # Get last file date for this exchange
                 last_file_date = self.get_last_file_date(exchange, segment)
-                expected_last_date = DateUtils.get_expected_last_trading_date()
+                expected_last_date = self.get_expected_last_trading_date()
                 repair_dates = self.get_repair_dates(exchange, segment)
 
                 if last_file_date is None:
@@ -541,7 +584,9 @@ class DataManager:
                     )
                 elif last_file_date < expected_last_date:
                     all_up_to_date = False
-                    missing_days = DateUtils.get_trading_days(last_file_date + timedelta(days=1), expected_last_date)
+                    missing_days = self.get_working_days(
+                        last_file_date + timedelta(days=1), expected_last_date
+                    )
                     error_exchanges.append(f"{exchange_segment} (Missing {len(missing_days)} days)")
                 else:
                     # Up-to-date, collect the date
@@ -563,8 +608,8 @@ class DataManager:
                 message = f"Database is up-to-date. Last file date: {latest_date}"
 
                 # Add today's data availability info if relevant
-                today = date.today()
-                if DateUtils.is_trading_day(today) and not DateUtils.is_data_available_time():
+                today = DateUtils.today_ist()
+                if self.is_trading_day(today) and not DateUtils.is_data_available_time():
                     message += f"\n\nNote: Today's data ({today.strftime('%Y-%m-%d')}) will be available after 6:00 PM."
             else:
                 message = "Database status could not be determined."
@@ -586,8 +631,8 @@ class DataManager:
         Returns:
             Completion message string
         """
-        today = date.today()
-        is_trading_day = DateUtils.is_trading_day(today)
+        today = DateUtils.today_ist()
+        is_trading_day = self.is_trading_day(today)
         is_data_available = DateUtils.is_data_available_time()
 
         # Base success message

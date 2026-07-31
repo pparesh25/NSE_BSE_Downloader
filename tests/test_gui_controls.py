@@ -242,3 +242,14 @@ def test_update_dialog_disables_unverified_package_download():
     assert dialog.download_btn.text() == "Verified Package Unavailable"
     assert dialog.download_btn.toolTip() == "Verified metadata missing"
     dialog.close()
+
+
+def test_update_dialog_persists_skipped_version(tmp_path, monkeypatch):
+    _application()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    dialog = UpdateDialog(
+        {"latest_version": "1.2.0", "artifact_verified": False},
+        update_checker=UpdateChecker(current_version="1.1.0"),
+    )
+    dialog.skip_version()
+    assert UserPreferences().get_skipped_update_version() == "1.2.0"

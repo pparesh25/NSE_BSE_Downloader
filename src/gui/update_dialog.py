@@ -10,13 +10,14 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QScrollArea, QWidget, QProgressBar, QTextEdit,
-    QMessageBox, QApplication, QFileDialog, QLineEdit
+    QGroupBox, QScrollArea, QWidget, QProgressBar,
+    QMessageBox, QFileDialog, QLineEdit
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QFont
 
 from ..utils.update_checker import UpdateChecker
+from ..utils.user_preferences import UserPreferences
 
 
 class UpdateDownloadWorker(QThread):
@@ -85,11 +86,14 @@ class UpdateDialog(QDialog):
         update_info: Dict,
         parent=None,
         update_checker: Optional[UpdateChecker] = None,
+        preferences: Optional[UserPreferences] = None,
     ):
         super().__init__(parent)
         self.update_info = update_info
         self.update_checker = update_checker or UpdateChecker()
+        self.user_prefs = preferences or UserPreferences()
         self.download_worker = None
+        self._close_after_download = False
         self.logger = logging.getLogger(__name__)
 
         self.setup_ui()
@@ -144,7 +148,7 @@ class UpdateDialog(QDialog):
         header_layout = QVBoxLayout(header_widget)
 
         # Title
-        title = QLabel(f"🎉 Update Available!")
+        title = QLabel("🎉 Update Available!")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
@@ -176,7 +180,7 @@ class UpdateDialog(QDialog):
         changelog = self.update_info.get("changelog", {})
         release_date = changelog.get("release_date", "Unknown")
 
-        info_group = QGroupBox(f"📋 Release Information")
+        info_group = QGroupBox("📋 Release Information")
         info_layout = QVBoxLayout(info_group)
 
         info_text = f"Release Date: {release_date}\n"
@@ -239,10 +243,8 @@ class UpdateDialog(QDialog):
 
         # Default location (from user preferences or Downloads folder)
         try:
-            from ..utils.user_preferences import UserPreferences
-            user_prefs = UserPreferences()
-            default_location = user_prefs.get_last_download_location()
-        except:
+            default_location = self.user_prefs.get_last_download_location()
+        except Exception:
             default_location = str(Path.home() / "Downloads" / "NSE_BSE_Update")
 
         self.location_input = QLineEdit(default_location)
@@ -344,8 +346,8 @@ class UpdateDialog(QDialog):
         button_layout.addWidget(self.download_btn)
 
         # Remind later button
-        remind_btn = QPushButton("⏰ Remind Me Later")
-        remind_btn.setStyleSheet("""
+        self.remind_btn = QPushButton("⏰ Remind Me Later")
+        self.remind_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
                 color: white;
@@ -358,12 +360,12 @@ class UpdateDialog(QDialog):
                 background-color: #1976D2;
             }
         """)
-        remind_btn.clicked.connect(self.remind_later)
-        button_layout.addWidget(remind_btn)
+        self.remind_btn.clicked.connect(self.remind_later)
+        button_layout.addWidget(self.remind_btn)
 
         # Skip button
-        skip_btn = QPushButton("❌ Skip This Version")
-        skip_btn.setStyleSheet("""
+        self.skip_btn = QPushButton("❌ Skip This Version")
+        self.skip_btn.setStyleSheet("""
             QPushButton {
                 background-color: #757575;
                 color: white;
@@ -376,8 +378,8 @@ class UpdateDialog(QDialog):
                 background-color: #616161;
             }
         """)
-        skip_btn.clicked.connect(self.skip_version)
-        button_layout.addWidget(skip_btn)
+        self.skip_btn.clicked.connect(self.skip_version)
+        button_layout.addWidget(self.skip_btn)
 
         layout.addWidget(button_widget)
 
@@ -395,11 +397,14 @@ class UpdateDialog(QDialog):
             # Show progress
             self.progress_widget.setVisible(True)
             self.download_btn.setEnabled(False)
+            self.remind_btn.setEnabled(False)
+            self.skip_btn.setEnabled(False)
 
             # Start download worker with selected location
             self.download_worker = UpdateDownloadWorker(self.update_checker, download_location)
             self.download_worker.progress_updated.connect(self.update_progress)
             self.download_worker.download_completed.connect(self.download_finished)
+            self.download_worker.finished.connect(self._download_worker_stopped)
             self.download_worker.start()
 
         except Exception as e:
@@ -413,16 +418,13 @@ class UpdateDialog(QDialog):
     def download_finished(self, success: bool, result: str):
         """Handle download completion"""
         self.progress_widget.setVisible(False)
-        self.download_btn.setEnabled(True)
 
         if success:
             # Save download location to preferences
             try:
-                from ..utils.user_preferences import UserPreferences
-                user_prefs = UserPreferences()
                 location = self.location_input.text().strip()
                 if location:
-                    user_prefs.set_last_download_location(location)
+                    self.user_prefs.set_last_download_location(location)
             except Exception as e:
                 self.logger.warning(f"Could not save download location: {e}")
 
@@ -439,10 +441,28 @@ class UpdateDialog(QDialog):
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.exec()
 
-            self.accept()  # Close dialog
+            self._close_after_download = True
         else:
             # Show error message
             QMessageBox.critical(self, "Download Failed", f"Failed to download update:\n{result}")
+
+    def _download_worker_stopped(self) -> None:
+        self.download_btn.setEnabled(
+            self.update_info.get("artifact_verified", False)
+        )
+        self.remind_btn.setEnabled(True)
+        self.skip_btn.setEnabled(True)
+        if self._close_after_download:
+            self.accept()
+
+    def closeEvent(self, event) -> None:
+        if self.download_worker and self.download_worker.isRunning():
+            self.progress_label.setText(
+                "Update operation is finishing safely; please wait..."
+            )
+            event.ignore()
+            return
+        event.accept()
 
     def remind_later(self):
         """Remind user later"""
@@ -450,5 +470,11 @@ class UpdateDialog(QDialog):
 
     def skip_version(self):
         """Skip this version"""
-        # TODO: Implement version skipping logic
+        try:
+            version = str(self.update_info.get("latest_version", "")).strip()
+            if version:
+                self.user_prefs.set_skipped_update_version(version)
+                self.logger.info("Skipped update notification for %s", version)
+        except Exception as error:
+            self.logger.warning("Could not save skipped update version: %s", error)
         self.reject()

@@ -7,6 +7,8 @@ and background download management.
 
 import asyncio
 from datetime import date
+from enum import Enum
+from threading import Event
 from typing import Dict, List, Optional
 import logging
 
@@ -50,16 +52,28 @@ from ..downloaders.bse_index_downloader import BSEIndexDownloader
 from ..utils.update_checker import UpdateChecker
 from .update_dialog import UpdateDialog
 from .donate_dialog import DonateDialog
-from ..utils.user_preferences import UserPreferences
 from ..core.base_downloader import ProgressCallback
 from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.settings import SettingsService
 
 if GUI_AVAILABLE:
     from .collapsible_section import CollapsibleSection
 else:
     CollapsibleSection = object
 
+
+
+class GUIOutcome(str, Enum):
+    """Stable outcome vocabulary shared by workers and GUI rendering."""
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    PENDING = "pending"
+    WARNING = "warning"
+    REPAIR_REQUIRED = "repair-required"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class UpdateCheckWorker(QThread):
@@ -72,14 +86,26 @@ class UpdateCheckWorker(QThread):
         self.update_checker = update_checker
         self.logger = logging.getLogger(__name__)
 
+    def request_stop(self) -> None:
+        """Suppress results after a close request without killing the thread."""
+
+        self.requestInterruption()
+
     def run(self):
         """Check for updates in background"""
         try:
+            if self.isInterruptionRequested():
+                return
             result = self.update_checker.check_for_updates()
-            self.update_checked.emit(result)
+            if not self.isInterruptionRequested():
+                self.update_checked.emit(result)
         except Exception as e:
             self.logger.error(f"Error in update check worker: {e}")
-            self.update_checked.emit({"update_available": False, "error": str(e)})
+            if not self.isInterruptionRequested():
+                self.update_checked.emit({
+                    "update_available": False,
+                    "error": str(e),
+                })
 
 
 class DownloadWorker(QThread):
@@ -90,6 +116,8 @@ class DownloadWorker(QThread):
     error_occurred = Signal(str, str)         # exchange, error
     download_completed = Signal(str, bool)    # exchange, success
     all_downloads_completed = Signal(bool)    # overall success
+    segment_outcome = Signal(str, str)        # exchange, GUIOutcome value
+    overall_outcome = Signal(str)             # GUIOutcome value
 
     def __init__(
         self,
@@ -114,14 +142,42 @@ class DownloadWorker(QThread):
         self.downloaders = {}
         self.logger = logging.getLogger(__name__)
 
-        # Stop flag for graceful shutdown
+        # Cross-thread cancellation state.  QThread interruption alone does
+        # not wake asyncio network operations, so request_stop also cancels
+        # their tasks through the worker event loop.
         self.stop_requested = False
+        self._cancel_event = Event()
+        self._loop = None
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self.final_outcome = GUIOutcome.FAILED
 
         # Update config timeout
         self.config.download_settings.timeout_seconds = timeout_seconds
 
         # Initialize downloaders
         self._initialize_downloaders()
+
+    def is_cancel_requested(self) -> bool:
+        return (
+            self.stop_requested
+            or self._cancel_event.is_set()
+            or self.isInterruptionRequested()
+        )
+
+    def request_stop(self) -> None:
+        """Cooperatively cancel active asyncio work from the GUI thread."""
+
+        self.stop_requested = True
+        self._cancel_event.set()
+        self.requestInterruption()
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._cancel_active_tasks)
+
+    def _cancel_active_tasks(self) -> None:
+        for task in tuple(self._tasks.values()):
+            if not task.done():
+                task.cancel()
 
     @staticmethod
     def expand_selected_exchanges(
@@ -186,6 +242,7 @@ class DownloadWorker(QThread):
                         on_error=lambda ex, err, e=exchange: self.error_occurred.emit(e, err)
                     )
                     downloader.set_progress_callback(progress_callback)
+                    downloader.cancel_requested = self.is_cancel_requested
 
                     if exchange.endswith("_EQ"):
                         market = exchange.split("_", 1)[0]
@@ -204,9 +261,11 @@ class DownloadWorker(QThread):
 
     def run(self):
         """Run downloads in background thread"""
+        loop = None
         try:
             # Set up asyncio event loop for this thread
             loop = asyncio.new_event_loop()
+            self._loop = loop
             asyncio.set_event_loop(loop)
 
             # Run downloads
@@ -214,64 +273,143 @@ class DownloadWorker(QThread):
 
             # Emit completion signal
             self.all_downloads_completed.emit(overall_success)
+            self.overall_outcome.emit(self.final_outcome.value)
 
         except Exception as e:
             self.logger.error(f"Error in download worker: {e}")
+            self.final_outcome = (
+                GUIOutcome.CANCELLED
+                if self.is_cancel_requested() else GUIOutcome.FAILED
+            )
             self.all_downloads_completed.emit(False)
+            self.overall_outcome.emit(self.final_outcome.value)
         finally:
             # Clean up event loop
             try:
-                loop.close()
+                if loop is not None:
+                    loop.close()
             except Exception:
                 pass
+            self._loop = None
+            self._tasks.clear()
 
     async def _run_downloads(self) -> bool:
         """Run all downloads asynchronously"""
-        download_tasks = []
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        self._tasks = {}
 
         for exchange, downloader in self.downloaders.items():
             try:
                 # Check if stop requested
-                if self.stop_requested:
+                if self.is_cancel_requested():
                     self.logger.info("Download stopped by user request")
+                    self.final_outcome = GUIOutcome.CANCELLED
                     return False
                 # Create download task
                 task = asyncio.create_task(
                     self._download_exchange_data(exchange, downloader)
                 )
-                download_tasks.append(task)
+                self._tasks[exchange] = task
 
             except Exception as e:
                 self.error_occurred.emit(exchange, f"Failed to start download: {e}")
 
-        if not download_tasks:
+        if not self._tasks:
+            self.final_outcome = (
+                GUIOutcome.CANCELLED
+                if self.is_cancel_requested() else GUIOutcome.FAILED
+            )
             return False
 
         # Wait for all downloads to complete
-        results = await asyncio.gather(*download_tasks, return_exceptions=True)
+        results = await asyncio.gather(
+            *self._tasks.values(), return_exceptions=True
+        )
+        settled = dict(zip(self._tasks, results))
 
-        settled = dict(zip(self.downloaders, results))
-        self._reconcile_combined_outputs(settled)
+        if not self.is_cancel_requested():
+            self._reconcile_combined_outputs(settled)
 
-        # Emit final results only after deterministic combined reconciliation.
-        success_count = 0
-        for i, result in enumerate(results):
-            exchange = list(self.downloaders.keys())[i]
-
-            if isinstance(result, Exception):
+        outcomes = []
+        for exchange, result in settled.items():
+            outcome = self._classify_segment_outcome(exchange, result)
+            outcomes.append(outcome)
+            self.segment_outcome.emit(exchange, outcome.value)
+            success = outcome == GUIOutcome.SUCCESS
+            self.download_completed.emit(exchange, success)
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
                 self.error_occurred.emit(exchange, f"Download failed: {result}")
-                self.download_completed.emit(exchange, False)
-            else:
-                downloader = self.downloaders[exchange]
-                structured = getattr(downloader, "last_segment_result", None)
-                success = bool(result) and (
-                    structured is None or structured.ok
-                )
-                self.download_completed.emit(exchange, success)
-                if success:
-                    success_count += 1
 
-        return success_count == len(download_tasks)
+        self.final_outcome = self._classify_overall_outcome(outcomes)
+        return self.final_outcome == GUIOutcome.SUCCESS
+
+    def _classify_segment_outcome(
+        self, exchange: str, result: object
+    ) -> GUIOutcome:
+        if self.is_cancel_requested() or isinstance(
+            result, asyncio.CancelledError
+        ):
+            return GUIOutcome.CANCELLED
+        if isinstance(result, BaseException):
+            if "repair required" in str(result).lower():
+                return GUIOutcome.REPAIR_REQUIRED
+            return GUIOutcome.FAILED
+
+        structured = getattr(
+            self.downloaders[exchange], "last_segment_result", None
+        )
+        if getattr(self.downloaders[exchange], "no_work", False):
+            return GUIOutcome.WARNING
+        if structured is None:
+            return GUIOutcome.SUCCESS if bool(result) else GUIOutcome.FAILED
+        errors = " ".join(
+            item.error or "" for item in structured.dates
+        ).lower()
+        if "repair required" in errors:
+            return GUIOutcome.REPAIR_REQUIRED
+        if structured.ok and bool(result):
+            if structured.skipped_count == len(structured.dates):
+                return GUIOutcome.WARNING
+            return GUIOutcome.SUCCESS
+        has_daily = any(
+            "daily" in item.completed_stages for item in structured.dates
+        )
+        has_pending_delivery = any(
+            "delivery" in item.failed_stages for item in structured.dates
+        )
+        if has_daily and has_pending_delivery:
+            return GUIOutcome.PENDING
+        if structured.any_success or structured.partial_count or has_daily:
+            return GUIOutcome.PARTIAL
+        return GUIOutcome.FAILED
+
+    @staticmethod
+    def _classify_overall_outcome(
+        outcomes: List[GUIOutcome],
+    ) -> GUIOutcome:
+        if not outcomes:
+            return GUIOutcome.FAILED
+        if GUIOutcome.CANCELLED in outcomes:
+            return GUIOutcome.CANCELLED
+        if all(value == GUIOutcome.SUCCESS for value in outcomes):
+            return GUIOutcome.SUCCESS
+        if all(value in {GUIOutcome.SUCCESS, GUIOutcome.WARNING} for value in outcomes):
+            return GUIOutcome.WARNING
+        if GUIOutcome.REPAIR_REQUIRED in outcomes:
+            return GUIOutcome.REPAIR_REQUIRED
+        if all(value == GUIOutcome.PENDING for value in outcomes):
+            return GUIOutcome.PENDING
+        if any(value in {
+            GUIOutcome.SUCCESS,
+            GUIOutcome.WARNING,
+            GUIOutcome.PENDING,
+            GUIOutcome.PARTIAL,
+        } for value in outcomes):
+            return GUIOutcome.PARTIAL
+        return GUIOutcome.FAILED
 
     def _reconcile_combined_outputs(self, settled: Dict[str, object]) -> None:
         """Build EQ outputs after all selected segment tasks have settled."""
@@ -283,7 +421,7 @@ class DownloadWorker(QThread):
             if eq_name not in selected:
                 continue
             eq_task_result = settled.get(eq_name)
-            if isinstance(eq_task_result, Exception) or not eq_task_result:
+            if isinstance(eq_task_result, BaseException) or not eq_task_result:
                 continue
             eq_downloader = self.downloaders[eq_name]
             eq_result = getattr(eq_downloader, "last_segment_result", None)
@@ -300,7 +438,10 @@ class DownloadWorker(QThread):
                     name = f"{exchange}_{segment}"
                     dependency_task = settled.get(name)
                     dependency_downloader = self.downloaders.get(name)
-                    if isinstance(dependency_task, Exception) or dependency_task is False:
+                    if (
+                        isinstance(dependency_task, BaseException)
+                        or dependency_task is False
+                    ):
                         unavailable.append(name)
                         continue
                     dependency_result = getattr(
@@ -355,7 +496,7 @@ class DownloadWorker(QThread):
         """Download data for a specific exchange"""
         try:
             # Check if stop requested
-            if self.stop_requested:
+            if self.is_cancel_requested():
                 self.status_updated.emit(exchange, "Download stopped")
                 return False
 
@@ -371,7 +512,7 @@ class DownloadWorker(QThread):
             )
 
             # Check stop again before processing
-            if self.stop_requested:
+            if self.is_cancel_requested():
                 self.status_updated.emit(exchange, "Download stopped")
                 return False
 
@@ -396,6 +537,7 @@ class DownloadWorker(QThread):
                 )
 
             if not working_days:
+                downloader.no_work = True
                 self.status_updated.emit(exchange, "No working days in date range")
                 return True
 
@@ -429,6 +571,9 @@ class DownloadWorker(QThread):
                 return success
             return success and (result is None or result.ok)
 
+        except asyncio.CancelledError:
+            self.status_updated.emit(exchange, "Download cancelled safely")
+            raise
         except Exception as e:
             self.error_occurred.emit(exchange, f"Download error: {e}")
             return False
@@ -485,7 +630,8 @@ class MainWindow(QMainWindow):
         self.update_worker = None
 
         # User preferences
-        self.user_prefs = UserPreferences()
+        self.settings = SettingsService(config)
+        self.user_prefs = self.settings.preferences
         self.logger.info(f"User preferences loaded from: {self.user_prefs.get_config_file_path()}")
 
         # Download management
@@ -495,8 +641,11 @@ class MainWindow(QMainWindow):
 
         # Status tracking
         self.download_status: Dict[str, str] = {}
+        self.segment_outcomes: Dict[str, GUIOutcome] = {}
         self.successful_downloads: List[str] = []
         self.selected_exchanges_for_download: List[str] = []
+        self._close_after_workers = False
+        self._update_check_forced = False
 
         # Update throttling to prevent flickering
         self.last_update_time: Dict[str, float] = {}
@@ -666,8 +815,31 @@ class MainWindow(QMainWindow):
         collapse_action.triggered.connect(self.collapse_all_sections)
         view_menu.addAction(collapse_action)
 
+        settings_menu = menubar.addMenu('Settings')
+        auto_update_action = QAction('Check for Updates Automatically', self)
+        auto_update_action.setCheckable(True)
+        auto_update_action.setChecked(
+            self.user_prefs.get_auto_check_updates()
+        )
+        auto_update_action.toggled.connect(
+            self.user_prefs.set_auto_check_updates
+        )
+        settings_menu.addAction(auto_update_action)
+
+        clear_skip_action = QAction('Reset Skipped Update Version', self)
+        clear_skip_action.triggered.connect(
+            lambda: self.user_prefs.set_skipped_update_version("")
+        )
+        settings_menu.addAction(clear_skip_action)
+
         # Help menu
         help_menu = menubar.addMenu('Help')
+
+        check_update_action = QAction('Check for Updates', self)
+        check_update_action.triggered.connect(
+            lambda: self.check_for_updates(force=True)
+        )
+        help_menu.addAction(check_update_action)
 
         about_action = QAction('About', self)
         about_action.triggered.connect(self.show_about)
@@ -1194,6 +1366,7 @@ class MainWindow(QMainWindow):
             # Store selected exchanges for completion message
             self.selected_exchanges_for_download = selected_exchanges.copy()
             self.successful_downloads = []
+            self.segment_outcomes = {}
 
             # Disable download button and enable stop button
             self.download_button.setEnabled(False)
@@ -1239,8 +1412,13 @@ class MainWindow(QMainWindow):
             self.download_worker.progress_updated.connect(self.update_progress)
             self.download_worker.status_updated.connect(self.update_status)
             self.download_worker.error_occurred.connect(self.handle_error)
-            self.download_worker.download_completed.connect(self.handle_download_completed)
-            self.download_worker.all_downloads_completed.connect(self.handle_all_downloads_completed)
+            self.download_worker.segment_outcome.connect(
+                self.handle_segment_outcome
+            )
+            self.download_worker.overall_outcome.connect(
+                self.handle_overall_outcome
+            )
+            self.download_worker.finished.connect(self._maybe_finish_close)
 
             # Start worker thread
             self.download_worker.start()
@@ -1264,82 +1442,46 @@ class MainWindow(QMainWindow):
         """Stop download process gracefully"""
         if self.download_worker and self.download_worker.isRunning():
             try:
-                # Set stop flag for graceful shutdown
-                self.download_worker.stop_requested = True
-                self.append_status_message("Stopping download... Please wait.")
+                self.download_worker.request_stop()
+                self.append_status_message(
+                    "Cancellation requested; waiting for the current atomic "
+                    "operation to finish safely..."
+                )
 
                 # Disable stop button to prevent multiple clicks
                 self.stop_button.setEnabled(False)
                 self.stop_button.setText("Stopping...")
 
-                # Use QTimer to check if worker stopped gracefully
-                self.stop_timer = QTimer()
-                self.stop_timer.timeout.connect(self.check_worker_stopped)
-                self.stop_timer.start(500)  # Check every 500ms
-
-                # Set timeout for forced termination
-                self.stop_timeout = QTimer()
-                self.stop_timeout.timeout.connect(self.force_stop_worker)
-                self.stop_timeout.setSingleShot(True)
-                self.stop_timeout.start(5000)  # Force stop after 5 seconds
+                QTimer.singleShot(5000, self._report_slow_safe_stop)
 
             except Exception as e:
                 self.logger.error(f"Error stopping download: {e}")
-                self.force_stop_worker()
 
-    def check_worker_stopped(self):
-        """Check if worker stopped gracefully"""
-        if not self.download_worker or not self.download_worker.isRunning():
-            # Worker stopped gracefully
-            self.stop_timer.stop()
-            self.stop_timeout.stop()
-            self.append_status_message("Download stopped successfully")
-            self.reset_download_ui()
+    def _report_slow_safe_stop(self) -> None:
+        if self.download_worker and self.download_worker.isRunning():
+            self.append_status_message(
+                "Still waiting for safe cancellation; no thread will be "
+                "forcibly terminated."
+            )
 
-    def force_stop_worker(self):
-        """Force stop worker if graceful stop failed"""
-        try:
-            if self.download_worker and self.download_worker.isRunning():
-                self.append_status_message("Force stopping download...")
-                self.download_worker.terminate()
-
-                # Don't wait() in main thread - use QTimer
-                self.force_timer = QTimer()
-                self.force_timer.timeout.connect(self.finalize_stop)
-                self.force_timer.setSingleShot(True)
-                self.force_timer.start(1000)  # Wait 1 second then finalize
-            else:
-                self.finalize_stop()
-        except Exception as e:
-            self.logger.error(f"Error force stopping: {e}")
-            self.finalize_stop()
-
-    def finalize_stop(self):
-        """Finalize stop process"""
-        try:
-            # Stop all timers
-            if hasattr(self, 'stop_timer'):
-                self.stop_timer.stop()
-            if hasattr(self, 'stop_timeout'):
-                self.stop_timeout.stop()
-            if hasattr(self, 'force_timer'):
-                self.force_timer.stop()
-
-            self.append_status_message("Download stopped")
-            self.reset_download_ui()
-
-        except Exception as e:
-            self.logger.error(f"Error finalizing stop: {e}")
-            self.reset_download_ui()
-
-    def check_for_updates(self):
+    def check_for_updates(self, force: bool = False):
         """Check for application updates in background"""
         try:
+            if self._close_after_workers:
+                return
+            if not force and not self.user_prefs.get_auto_check_updates():
+                self.logger.info("Automatic update checks are disabled")
+                return
+            if self.update_worker and self.update_worker.isRunning():
+                self.logger.debug("Update check is already running")
+                return
             self.logger.info("Checking for updates...")
+            self._update_check_forced = force
 
             # Create update worker thread
             self.update_worker = UpdateCheckWorker(self.update_checker)
             self.update_worker.update_checked.connect(self.handle_update_result)
+            self.update_worker.finished.connect(self._maybe_finish_close)
             self.update_worker.start()
 
         except Exception as e:
@@ -1348,12 +1490,25 @@ class MainWindow(QMainWindow):
     def handle_update_result(self, result: dict):
         """Handle update check result"""
         try:
+            if self._close_after_workers:
+                return
             self.logger.info(f"🔍 DEBUG: Update check result received: {result}")
 
             if result.get("update_available", False):
                 update_info = result.get("update_info")
                 if update_info:
                     latest_version = update_info.get('latest_version', 'Unknown')
+                    if (
+                        not self._update_check_forced
+                        and
+                        latest_version
+                        == self.user_prefs.get_skipped_update_version()
+                    ):
+                        self.logger.info(
+                            "Skipping update notification for version %s",
+                            latest_version,
+                        )
+                        return
                     self.logger.info(f"🔍 DEBUG: Update available - showing dialog for version {latest_version}")
                     self.show_update_dialog(update_info)
                 else:
@@ -1366,11 +1521,18 @@ class MainWindow(QMainWindow):
             self.logger.error(f"🔍 DEBUG: Error handling update result: {e}")
             import traceback
             self.logger.error(f"🔍 DEBUG: Traceback: {traceback.format_exc()}")
+        finally:
+            self._update_check_forced = False
 
     def show_update_dialog(self, update_info: dict):
         """Show update dialog to user"""
         try:
-            dialog = UpdateDialog(update_info, self, self.update_checker)
+            dialog = UpdateDialog(
+                update_info,
+                self,
+                self.update_checker,
+                preferences=self.user_prefs,
+            )
             dialog.exec()
 
         except Exception as e:
@@ -1457,8 +1619,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event"""
         try:
-            # Check if download is in progress
-            if self.download_worker and self.download_worker.isRunning():
+            download_running = bool(
+                self.download_worker and self.download_worker.isRunning()
+            )
+            update_running = bool(
+                self.update_worker and self.update_worker.isRunning()
+            )
+            if download_running and not self._close_after_workers:
                 reply = QMessageBox.question(
                     self,
                     "Confirm Exit",
@@ -1470,30 +1637,53 @@ class MainWindow(QMainWindow):
                 if reply == QMessageBox.StandardButton.No:
                     event.ignore()
                     return
-                else:
-                    # User confirmed exit, stop download
-                    self.download_worker.terminate()
-                    self.download_worker.wait()
 
-            # Save window size to preferences
-            size = self.size()
-            self.logger.info(f"Current window size before saving: {size.width()}x{size.height()}")
-            self.user_prefs.set_window_size(size.width(), size.height())
+            if download_running or update_running:
+                self._close_after_workers = True
+                if download_running:
+                    self.download_worker.request_stop()
+                if update_running:
+                    self.update_worker.request_stop()
+                self.status_bar.showMessage(
+                    "Closing after background work stops safely..."
+                )
+                event.ignore()
+                QTimer.singleShot(0, self._maybe_finish_close)
+                return
 
-            # Save current download options
-            download_options = {
-                "include_weekends": self.weekend_checkbox.isChecked(),
-                "timeout_seconds": self.timeout_spinbox.value()
-            }
-            self.user_prefs.set_download_options(download_options)
-
-            self.logger.info(f"Saved user preferences on exit - Window size: {size.width()}x{size.height()}")
+            self._save_exit_preferences()
 
         except Exception as e:
             self.logger.error(f"Error saving preferences on exit: {e}")
 
         # Accept the close event
         event.accept()
+
+    def _save_exit_preferences(self) -> None:
+        size = self.size()
+        self.user_prefs.set_window_size(size.width(), size.height())
+        self.user_prefs.set_download_options({
+            "include_weekends": self.weekend_checkbox.isChecked(),
+            "timeout_seconds": self.timeout_spinbox.value(),
+        })
+        self.logger.info(
+            "Saved user preferences on exit - Window size: %sx%s",
+            size.width(),
+            size.height(),
+        )
+
+    def _maybe_finish_close(self) -> None:
+        if not self._close_after_workers:
+            return
+        download_running = bool(
+            self.download_worker and self.download_worker.isRunning()
+        )
+        update_running = bool(
+            self.update_worker and self.update_worker.isRunning()
+        )
+        if not download_running and not update_running:
+            self._close_after_workers = False
+            QTimer.singleShot(0, self.close)
 
     def update_progress(self, exchange: str, percentage: int, message: str):
         """Update progress for specific exchange with batching"""
@@ -1520,28 +1710,50 @@ class MainWindow(QMainWindow):
 
     def handle_download_completed(self, exchange: str, success: bool):
         """Handle completion of download for specific exchange"""
-        if success:
+        outcome = GUIOutcome.SUCCESS if success else GUIOutcome.FAILED
+        self.handle_segment_outcome(exchange, outcome.value)
+
+    def handle_segment_outcome(self, exchange: str, raw_outcome: str):
+        """Render a typed segment outcome without inferring from log text."""
+
+        outcome = GUIOutcome(raw_outcome)
+        self.segment_outcomes[exchange] = outcome
+        labels = {
+            GUIOutcome.SUCCESS: ("Completed", "green"),
+            GUIOutcome.PARTIAL: ("Partial", "#d97706"),
+            GUIOutcome.PENDING: ("Pending", "#d97706"),
+            GUIOutcome.WARNING: ("Warning", "#b45309"),
+            GUIOutcome.REPAIR_REQUIRED: ("Repair required", "#7e22ce"),
+            GUIOutcome.CANCELLED: ("Cancelled", "gray"),
+            GUIOutcome.FAILED: ("Failed", "red"),
+        }
+        text, color = labels[outcome]
+        if exchange in self.status_labels:
+            self.status_labels[exchange].setText(text)
+            self.status_labels[exchange].setStyleSheet(f"color: {color};")
+
+        if outcome in {GUIOutcome.SUCCESS, GUIOutcome.WARNING}:
             if exchange in self.status_labels:
-                self.status_labels[exchange].setText("Completed")
-                self.status_labels[exchange].setStyleSheet("color: green;")
+                self.status_labels[exchange].setText(text)
             if exchange in self.progress_bars:
                 self.progress_bars[exchange].setValue(100)
-
-            self.append_status_message(f"[{exchange}] Download completed successfully")
-
-            # Track successful downloads
             if exchange not in self.successful_downloads:
                 self.successful_downloads.append(exchange)
-        else:
-            if exchange in self.status_labels:
-                self.status_labels[exchange].setText("Failed")
-                self.status_labels[exchange].setStyleSheet("color: red;")
-
-            self.append_status_message(f"[{exchange}] Download failed")
+        self.append_status_message(f"[{exchange}] Outcome: {outcome.value}")
 
     def handle_all_downloads_completed(self, overall_success: bool):
         """Handle completion of all downloads"""
-        self.reset_download_ui()
+        outcome = GUIOutcome.SUCCESS if overall_success else GUIOutcome.FAILED
+        self.handle_overall_outcome(outcome.value)
+
+    def handle_overall_outcome(self, raw_outcome: str):
+        """Finish the run using the worker's typed aggregate outcome."""
+
+        outcome = GUIOutcome(raw_outcome)
+        self.reset_download_ui(preserve_status=True)
+
+        if self._close_after_workers:
+            return
 
         # Generate smart completion message
         data_manager = DataManager(self.config)
@@ -1549,18 +1761,50 @@ class MainWindow(QMainWindow):
             self.selected_exchanges_for_download,
             self.successful_downloads
         )
+        attention_messages = {
+            GUIOutcome.PENDING: (
+                "Price data was saved, but one or more enabled reports are "
+                "pending and will be retried."
+            ),
+            GUIOutcome.PARTIAL: (
+                "Only part of the requested pipeline completed. Incomplete "
+                "dates remain scheduled for repair."
+            ),
+            GUIOutcome.WARNING: (
+                "The request completed with a warning, such as data not yet "
+                "being published for the selected date."
+            ),
+            GUIOutcome.REPAIR_REQUIRED: (
+                "Validated state is damaged or inconsistent. Existing data "
+                "was preserved; run the documented repair command."
+            ),
+        }
+        if outcome in attention_messages:
+            completion_message = (
+                attention_messages[outcome] + "\n\n" + completion_message
+            )
 
-        success_count = len(self.successful_downloads)
-        total_count = len(self.selected_exchanges_for_download)
-
-        if success_count == total_count and success_count > 0:
+        if outcome == GUIOutcome.SUCCESS:
             self.status_bar.showMessage("All downloads completed successfully")
             self.append_status_message("All downloads completed successfully")
             QMessageBox.information(self, "Download Complete", completion_message)
-        elif success_count > 0:
+        elif outcome == GUIOutcome.CANCELLED:
+            self.status_bar.showMessage("Download cancelled safely")
+            self.append_status_message("Download cancelled safely")
+        elif outcome in {
+            GUIOutcome.PARTIAL, GUIOutcome.PENDING, GUIOutcome.WARNING
+        }:
             self.status_bar.showMessage("Downloads completed with some errors")
-            self.append_status_message("Downloads completed with some errors")
-            QMessageBox.warning(self, "Download Partially Complete", completion_message)
+            self.append_status_message(f"Download outcome: {outcome.value}")
+            QMessageBox.warning(
+                self, "Download Needs Attention", completion_message
+            )
+        elif outcome == GUIOutcome.REPAIR_REQUIRED:
+            self.status_bar.showMessage("Data repair is required")
+            self.append_status_message("Download stopped: data repair required")
+            QMessageBox.critical(
+                self, "Repair Required", completion_message
+            )
         else:
             self.status_bar.showMessage("Downloads completed with errors")
             self.append_status_message("Downloads completed with errors")
@@ -1569,7 +1813,7 @@ class MainWindow(QMainWindow):
         # Refresh data summary without clearing console
         self.load_data_summary(clear_console=False)
 
-    def reset_download_ui(self):
+    def reset_download_ui(self, preserve_status: bool = False):
         """Reset download UI to initial state"""
         self.download_button.setEnabled(True)
         self.download_button.setText("Start Download")
@@ -1581,9 +1825,10 @@ class MainWindow(QMainWindow):
             progress_bar.setVisible(False)
             progress_bar.setValue(0)
 
-        for exchange, status_label in self.status_labels.items():
-            status_label.setText("Ready")
-            status_label.setStyleSheet("color: gray;")
+        if not preserve_status:
+            for exchange, status_label in self.status_labels.items():
+                status_label.setText("Ready")
+                status_label.setStyleSheet("color: gray;")
 
         # Clear update throttling and pending updates
         self.last_update_time.clear()

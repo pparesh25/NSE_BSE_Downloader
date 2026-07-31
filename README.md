@@ -20,7 +20,10 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Optional legacy seven-column output and deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
-- Automatic version checks and update notifications.
+- IST-aware trading dates and a 24-hour cached official NSE holiday calendar.
+- Cooperative Stop/close behavior with success, partial, pending, warning,
+  repair-required, cancelled and failed outcomes.
+- Automatic/manual version checks, remembered skipped versions and a reset action.
 
 Daily bhavcopy files remain official unadjusted market records. Corporate-action adjustments are applied only to symbol-wise histories.
 
@@ -44,6 +47,11 @@ Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
 3. Choose delivery, FO open-interest, symbol-history and compatibility options.
 4. Collapse panels you do not need, or use **View → Expand/Collapse All**.
 5. Click **Start Download**.
+
+**Stop Download** requests cooperative cancellation. The app waits for the
+current atomic operation instead of forcibly terminating its worker thread, so
+already-published files remain valid. Closing the window while download/update
+work is active follows the same safe shutdown path.
 
 Files are stored under `~/NSE_BSE_Data/` by default.
 
@@ -149,6 +157,16 @@ Application defaults are in `config.yaml`. Per-user choices are saved to:
 ~/.nse_bse_downloader/user_preferences.json
 ```
 
+Effective settings use one precedence rule: built-in schema defaults, then
+`config.yaml`, then validated saved user choices. Unknown keys and invalid
+types are discarded or bounded before use. Automatic update checks can be
+disabled from **Settings**; a skipped version can be reset there, while
+**Help → Check for Updates** always performs a manual check.
+
+Market-date decisions use Asia/Kolkata time. Trading holidays are read from
+NSE's official capital-market calendar by year, cached for 24 hours, and
+refreshed automatically. If refresh fails, the last valid cache is retained.
+
 New v1.1 options:
 
 ```yaml
@@ -180,7 +198,9 @@ range/collapse behavior. They also cover every NSE/BSE component arrival order,
 restart rebuilds, disabled/failed dependencies, legacy 7-column combination and
 deferred publication. The state-integrity matrix injects interrupted ledger
 commits, failed history publication, corrupt JSON/CSV state, unexpected history
-revisions and rebuilds from checksummed raw snapshots.
+revisions and rebuilds from checksummed raw snapshots. Lifecycle coverage also
+checks cooperative cancellation/window close, settings precedence, skipped
+updates, IST boundaries, official-calendar parsing, TTL refresh and stale fallback.
 
 ## Version history
 
@@ -195,6 +215,9 @@ revisions and rebuilds from checksummed raw snapshots.
 - Replaced arrival-order append logic with deterministic, restart-safe combined
   bhavcopy assembly and an explicit combined-file rebuild command.
 - Added remembered calendar date ranges and collapsible GUI panels.
+- Added IST-aware official holiday refresh, validated settings precedence,
+  cooperative cancellation and typed GUI completion outcomes.
+- Added remembered update-check and skipped-version controls.
 - Fixed the NSE SME filename-era change and HTML-as-data responses.
 
 ### v1.0.1 (2025-08-07)

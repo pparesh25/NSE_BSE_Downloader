@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from threading import Thread
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict
 
 import aiohttp
 
@@ -34,18 +34,34 @@ def _default_headers() -> dict:
     }
 
 
-async def _single_use_session(timeout: Optional[float] = None) -> aiohttp.ClientSession:
+async def _single_use_session(
+    timeout: Optional[float] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> aiohttp.ClientSession:
     client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else aiohttp.ClientTimeout()
     # Keep aiohttp's verified system-CA behaviour explicit.  Update metadata,
     # holiday calendars and update archives all pass through this helper.
     connector = aiohttp.TCPConnector(ssl=True)
-    return aiohttp.ClientSession(timeout=client_timeout, headers=_default_headers(), connector=connector)
+    effective_headers = _default_headers()
+    if headers:
+        effective_headers.update(headers)
+    return aiohttp.ClientSession(
+        timeout=client_timeout,
+        headers=effective_headers,
+        connector=connector,
+    )
 
 
-async def fetch_text(url: str, timeout: Optional[float] = None, *, session: Optional[aiohttp.ClientSession] = None) -> str:
+async def fetch_text(
+    url: str,
+    timeout: Optional[float] = None,
+    *,
+    session: Optional[aiohttp.ClientSession] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> str:
     owns_session = False
     if session is None:
-        session = await _single_use_session(timeout)
+        session = await _single_use_session(timeout, headers)
         owns_session = True
     try:
         async with session.get(url) as resp:
@@ -147,8 +163,13 @@ def _run_coro_blocking(coro):
     return result_holder.get("result")
 
 
-def fetch_text_sync(url: str, timeout: Optional[float] = None) -> str:
-    return _run_coro_blocking(fetch_text(url, timeout))
+def fetch_text_sync(
+    url: str,
+    timeout: Optional[float] = None,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+) -> str:
+    return _run_coro_blocking(fetch_text(url, timeout, headers=headers))
 
 
 def fetch_bytes_sync(url: str, timeout: Optional[float] = None) -> bytes:

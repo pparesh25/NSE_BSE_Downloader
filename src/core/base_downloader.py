@@ -142,6 +142,19 @@ class BaseDownloader(ABC):
         # Send to IDE console as warning (appropriate level for notices)
         self.logger.warning(notice)
 
+    def get_download_option(self, name: str, default: Any = None) -> Any:
+        """Return a user preference, falling back to application config."""
+
+        try:
+            from ..utils.user_preferences import UserPreferences
+
+            user_options = UserPreferences().get_download_options()
+            if name in user_options:
+                return user_options[name]
+        except Exception:
+            pass
+        return self.config.get_download_options().get(name, default)
+
     @abstractmethod
     def build_url(self, target_date: date) -> str:
         """
@@ -240,10 +253,33 @@ class BaseDownloader(ABC):
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
 
-            # Save without header and index (as per original code)
-            df.to_csv(output_path, index=False, header=False)
+            # Save without header and index (as per original code), but never
+            # expose a partially-written file if the app is interrupted.
+            temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+            df.to_csv(temporary, index=False, header=False)
+            temporary.replace(output_path)
 
             self.logger.info(f"Saved processed data: {filename}")
+
+            options = {
+                "generate_symbol_files": self.get_download_option(
+                    "generate_symbol_files", True
+                )
+            }
+            internal_equity = getattr(self, "_internal_equity_data", None)
+            if (
+                options.get("generate_symbol_files", True)
+                and internal_equity is not None
+                and self.segment in ("EQ", "SME")
+            ):
+                from ..services.symbol_history import SymbolHistoryStore
+
+                written = SymbolHistoryStore(self.config.base_data_path).upsert(
+                    self.exchange, self.segment, target_date, internal_equity
+                )
+                self.logger.info(
+                    f"Updated {written} {self.exchange} symbol history files"
+                )
 
             # Store data in memory for append operations
             self.memory_append_manager.store_data(
@@ -270,6 +306,154 @@ class BaseDownloader(ABC):
                 file_path=str(output_path),
                 operation="save_csv"
             ) from e
+
+    def _with_pending_delivery_days(self, working_days: List[date]) -> List[date]:
+        """Include older dates whose delivery report was published late."""
+
+        if not self.get_download_option("include_delivery_data", True):
+            return working_days
+        if self.segment not in ("EQ", "SME"):
+            return working_days
+
+        from ..services.delivery_state import PendingDeliveryStore
+
+        pending = PendingDeliveryStore(self.config.base_data_path).dates(
+            self.exchange, self.segment
+        )
+        return sorted(set(working_days).union(pending))
+
+    async def _download_equity_implementation(self, working_days: List[date]) -> bool:
+        """Shared price + optional delivery workflow for cash-market segments."""
+
+        from ..services.delivery_state import PendingDeliveryStore
+        from ..services.source_resolver import delivery_source
+        from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
+        from ..utils.date_utils import DateUtils
+
+        days = self._with_pending_delivery_days(working_days)
+        self.total_files = len(days)
+        pending_store = PendingDeliveryStore(self.config.base_data_path)
+        include_delivery = self.get_download_option("include_delivery_data", True)
+        success_count = 0
+
+        for target_date in days:
+            if (
+                target_date == date.today()
+                and DateUtils.is_trading_day(target_date)
+                and not DateUtils.is_data_available_time()
+            ):
+                self.logger.info(
+                    f"Skipping {target_date} (current trading day; data is not ready)"
+                )
+                continue
+
+            self._update_progress(f"Processing {target_date}")
+            tasks = [DownloadTask(
+                url=self.build_url(target_date),
+                date_str=target_date.isoformat(),
+                target_date=target_date,
+            )]
+            if include_delivery:
+                tasks.append(DownloadTask(
+                    url=delivery_source(self.exchange, target_date).url,
+                    date_str=f"{target_date.isoformat()} delivery",
+                    target_date=target_date,
+                ))
+
+            try:
+                async with AsyncDownloadManager(self.config) as manager:
+                    await self.update_async_session_timeout(
+                        manager, self.config.download_settings.timeout_seconds
+                    )
+                    results = await manager.download_multiple(tasks)
+
+                price_result = results[0] if results else None
+                if not price_result or not price_result.success:
+                    error = (
+                        price_result.error_message if price_result
+                        else "No download result returned"
+                    )
+                    self._report_error(
+                        f"{self.exchange_segment} price report failed for "
+                        f"{target_date}: {error}"
+                    )
+                    continue
+
+                delivery_data = None
+                delivery_ready = not include_delivery
+                if include_delivery:
+                    delivery_result = results[1] if len(results) > 1 else None
+                    if delivery_result and delivery_result.success:
+                        delivery_data = delivery_result.file_data
+                        delivery_ready = True
+                    else:
+                        pending_store.add(self.exchange, self.segment, target_date)
+                        detail = (
+                            delivery_result.error_message if delivery_result
+                            else "No delivery response returned"
+                        )
+                        self._report_notice(
+                            f"{self.exchange_segment} delivery pending for "
+                            f"{target_date}: {detail}"
+                        )
+
+                processed = self.process_downloaded_data(
+                    price_result.file_data, target_date, delivery_data
+                )
+                if processed is None:
+                    self._report_error(f"Failed to process data for {target_date}")
+                    continue
+
+                self.save_processed_data(processed, target_date)
+                if delivery_ready and include_delivery:
+                    pending_store.discard(self.exchange, self.segment, target_date)
+                success_count += 1
+                self.completed_files += 1
+                self._update_progress(f"Completed {target_date}")
+            except Exception as error:
+                self._report_error(f"Error processing {target_date}: {error}")
+
+        self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
+        if (
+            success_count
+            and days
+            and self.get_download_option("apply_corporate_actions", True)
+            and self.get_download_option("generate_symbol_files", True)
+        ):
+            try:
+                from ..services.corporate_actions import (
+                    CorporateActionClient,
+                    CorporateActionEngine,
+                )
+                from ..utils.user_preferences import UserPreferences
+
+                add_sme_suffix = UserPreferences().get_sme_add_suffix()
+                client = CorporateActionClient(
+                    timeout=max(
+                        30, self.config.download_settings.timeout_seconds
+                    )
+                )
+                actions = await client.fetch(
+                    self.exchange,
+                    self.segment,
+                    min(days),
+                    max(days),
+                    add_sme_suffix=add_sme_suffix,
+                )
+                summary = CorporateActionEngine(
+                    self.config.base_data_path
+                ).apply(actions)
+                self.logger.info(f"Corporate-action summary: {summary}")
+                if summary.get("manual_review"):
+                    self._report_notice(
+                        f"{summary['manual_review']} corporate action(s) require "
+                        "manual review; symbol files were left unchanged"
+                    )
+            except Exception as error:
+                self._report_notice(
+                    f"Corporate-action update could not be completed: {error}"
+                )
+        return success_count > 0
 
     def _try_direct_bse_append(self, target_date: date, bse_eq_file_path: Path) -> None:
         """Try direct BSE INDEX to BSE EQ file append (fallback method)"""
@@ -303,9 +487,20 @@ class BaseDownloader(ABC):
                 self.logger.warning("BSE INDEX file is empty - skipping direct append")
                 return
 
-            # Append INDEX data to EQ file
-            with open(bse_eq_file_path, 'a') as f:
-                f.writelines(index_lines)
+            if not self.get_download_option("legacy_seven_column_output", False):
+                index_lines = [
+                    f"{line.rstrip()},,\n" for line in index_lines if line.strip()
+                ]
+
+            # Rewrite through a sibling temporary file so the user never sees
+            # a partially appended daily bhavcopy.
+            temporary = bse_eq_file_path.with_suffix(
+                bse_eq_file_path.suffix + ".tmp"
+            )
+            temporary.write_text(
+                eq_content + "".join(index_lines), encoding="utf-8"
+            )
+            temporary.replace(bse_eq_file_path)
 
             self.logger.info(f"✅ Direct BSE append completed: Added {len(index_lines)} INDEX rows to {bse_eq_file_path.name}")
 
@@ -411,6 +606,7 @@ class BaseDownloader(ABC):
 
             # Get working days
             working_days = self.get_working_days(start_date, end_date)
+            working_days = self._with_pending_delivery_days(working_days)
 
             if not working_days:
                 self._update_status("No working days in date range")

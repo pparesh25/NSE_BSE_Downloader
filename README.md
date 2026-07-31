@@ -1,194 +1,160 @@
-# NSE/BSE Data Downloader v1.0.1 (PySide6)
+# NSE/BSE Data Downloader v1.1.0 (PySide6)
 
-A professional application for downloading NSE and BSE market data with advanced processing capabilities.
+A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
 ![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.1-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
 
-## 🚀 Features
+## Features
 
-### **Multi-Exchange Support**
-- **NSE**: Equity (EQ), Futures & Options (FO), SME, Index data
-- **BSE**: Equity (EQ), Index data
-- Parallel downloads for maximum efficiency
+- NSE Equity, Futures, SME and Index downloads.
+- BSE Equity and Index downloads.
+- Date-aware URL selection for old and current exchange report eras.
+- NSE/BSE delivery quantity and percentage merged into cash-market files.
+- NSE futures open interest and change in open interest.
+- Symbol-wise text histories such as `NSE/SYMBOLS/reliance.txt`.
+- Split, consolidation and equity-bonus adjustments on pre-ex-date symbol OHLC.
+- Pending delivery retry, atomic file replacement and corporate-action audit state.
+- Optional legacy seven-column output and existing SME/Index append options.
+- Automatic version checks and update notifications.
 
-### **Advanced Data Processing**
-- **Smart Append Operations**: Automatically combine related datasets
-- **Memory Optimization**: Efficient handling of large datasets
-- **Data Validation**: Ensures data integrity and consistency
+Daily bhavcopy files remain official unadjusted market records. Corporate-action adjustments are applied only to symbol-wise histories.
 
-### **User-Friendly Interface**
-- **Modern GUI**: Built with PySide6 for professional appearance
-- **Real-time Progress**: Live download progress and status updates
-- **Customizable Settings**: User preferences saved automatically
-- **Error Handling**: Comprehensive error reporting and recovery
+## Installation
 
-### **Professional Features**
-- **Automatic Updates**: Built-in update checking and notification
-- **Concurrent Downloads**: Async processing for faster downloads
-- **Weekend Support**: Optional weekend download attempts
-- **Timeout Configuration**: Adjustable network timeout settings
+Requirements: Python 3.8 or newer and an internet connection.
 
-## 📦 Installation
-
-### **Prerequisites**
-- Python 3.8 or higher
-- Internet connection for downloads
-
-### **Quick Install**
 ```bash
-# Clone the repository
 git clone https://github.com/pparesh25/NSE_BSE_Downloader_PySide6.git
 cd NSE_BSE_Downloader_PySide6
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the application
 python main.py
 ```
 
-### **Dependencies**
+Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
+
+## Using the app
+
+1. Select the exchange segments.
+2. Choose delivery, FO open-interest, symbol-history and compatibility options.
+3. Adjust the response timeout if necessary.
+4. Click **Start Download**.
+
+Files are stored under `~/NSE_BSE_Data/` by default.
+
+## Output contracts
+
+NSE/BSE Equity and SME:
+
+```text
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,DELIVERY_QTY,DELIVERY_PERCENT
 ```
-PySide6>=6.4.0
-aiohttp>=3.8.0
-pandas>=1.5.0
-numpy>=1.21.0
-pyyaml>=6.0
+
+NSE Futures:
+
+```text
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,OPEN_INTEREST,CHANGE_IN_OI
 ```
 
-## 🎯 Quick Start
+Index files keep seven columns:
 
-### **1. Launch Application**
-```bash
-python main.py
+```text
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME
 ```
 
-### **2. Select Exchanges**
-- ✅ Check desired exchanges (NSE EQ, NSE INDEX, BSE EQ, etc.)
-- ⚙️ Configure append options if needed
-- 📅 Set date range (optional)
+The **Legacy 7-column output** option omits delivery/OI fields for older consumers. NSE delivery is matched by `SYMBOL + SERIES`; BSE delivery is matched by security code.
 
-### **3. Download Data**
-- 🚀 Click "Start Download"
-- 📊 Monitor progress in real-time
-- ✅ Data saved to `~/NSE_BSE_Data/`
+## Data organization
 
-## 📁 Data Organization
-
-```
+```text
 ~/NSE_BSE_Data/
+├── .state/                 # Internal pending/action/raw rebuild state
 ├── NSE/
-│   ├── EQ/          # NSE Equity data
-│   ├── FO/          # NSE Futures & Options
-│   ├── SME/         # NSE SME data
-│   └── INDEX/       # NSE Index data
+│   ├── EQ/
+│   ├── FO/
+│   ├── SME/
+│   ├── INDEX/
+│   └── SYMBOLS/
+│       └── reliance.txt
 └── BSE/
-    ├── EQ/          # BSE Equity data
-    └── INDEX/       # BSE Index data
+    ├── EQ/
+    ├── INDEX/
+    └── SYMBOLS/
 ```
 
-## ⚙️ Configuration
+Each symbol file has one header and one row per date:
 
-### **User Preferences**
-- Stored in `~/.nse_bse_downloader/user_preferences.json`
-- Automatically saved on changes
-- Includes window size, download options, and append settings
+```text
+DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,DELIVERY_PERCENT
+```
 
-### **Application Settings**
-- Main configuration in `config.yaml`
-- Exchange URLs and file patterns
-- Default download options
+Symbol files are sorted, idempotently updated and renamed/merged using ISIN or exchange security code when available. Split, consolidation and equity-bonus actions adjust only pre-ex-date OHLC. Volume, delivery fields and FO OI are not adjusted.
 
-## 🔧 Advanced Features
+## Date-aware report support
 
-### **Data Append Operations**
-- **NSE SME → NSE EQ**: Combine SME data with equity data
-- **NSE INDEX → NSE EQ**: Add index data to equity files
-- **BSE INDEX → BSE EQ**: Merge BSE index with equity data
-- **Smart Suffix Handling**: Optional `_SME` suffix for SME symbols
+The application automatically selects the proper official source:
 
-### **Memory Optimization**
-- Efficient DataFrame processing
-- Automatic memory cleanup
-- Large dataset handling
+- NSE Equity/FO: legacy archives before 8 July 2024; UDiFF reports from that date.
+- BSE Equity: ISIN legacy reports before 17 August 2022, second-generation reports through 7 July 2024, and UDiFF reports from 8 July 2024.
+- NSE SME: two-digit-year filenames through 10 October 2025 and four-digit-year filenames from 13 October 2025.
 
-### **Error Recovery**
-- Automatic retry on network failures
-- Graceful handling of missing data
-- Comprehensive error logging
+Users do not need separate old/new downloader scripts.
 
-## 🧪 Testing
+## Configuration
 
-Run the test suite to verify functionality:
+Application defaults are in `config.yaml`. Per-user choices are saved to:
+
+```text
+~/.nse_bse_downloader/user_preferences.json
+```
+
+New v1.1 options:
+
+```yaml
+download_options:
+  include_delivery_data: true
+  include_fo_open_interest: true
+  generate_symbol_files: true
+  apply_corporate_actions: true
+  legacy_seven_column_output: false
+```
+
+If a delivery report is late or temporarily unavailable, the price bhavcopy is still saved. The date is recorded under `.state` and retried on the next run.
+
+## Testing
+
+The release suite is validated in the Miniforge `mark_screener` environment:
 
 ```bash
-# Install test dependencies
-pip install pytest pytest-asyncio
-
-# Run all tests
-pytest tests/
-
-# Run specific test
-pytest tests/unit/test_config.py -v
+/Users/paresh/miniforge3/envs/mark_screener/bin/python -m pytest -q
 ```
 
-## 🤝 Contributing
+The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI, pending state, symbol reruns/renames and corporate-action idempotency.
 
-We welcome contributions! Please see our contributing guidelines:
+## Version history
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+### v1.1.0 (2026-07-31)
 
-## 📝 License
+- Unified date-aware old/current download sources.
+- Added NSE/BSE delivery fields and NSE FO OI fields.
+- Added symbol-wise histories with audited corporate-action adjustment.
+- Added pending delivery retry, atomic writes and legacy output compatibility.
+- Fixed the NSE SME filename-era change and HTML-as-data responses.
 
-This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
+### v1.0.1 (2025-08-07)
 
-## 🆘 Support
+- Improved download logging and market-hours behavior.
+- Migrated the GUI runtime to PySide6.
+- Added cross-platform Nuitka build tooling.
 
-### **Common Issues**
-- **PySide6 Installation**: Use `pip install PySide6` or conda equivalent
-- **Network Timeouts**: Increase timeout in settings
-- **Permission Errors**: Ensure write access to data directory
+### v1.0.0 (2025-07-31)
 
-### **Getting Help**
-- 📧 Create an issue on GitHub
-- 📖 Check the documentation
-- 🔍 Search existing issues
+- Initial multi-exchange production release.
 
-## 🏆 Acknowledgments
+## License and support
 
-- NSE and BSE for providing public data access
-- Qt for Python/PySide6 team for the GUI framework
-- Python community for amazing libraries
+Licensed under GPL-3.0; see [LICENSE](LICENSE). Please use GitHub Issues for bugs and support.
 
-## 📊 Version History
-
-### **v1.0.1** (2025-08-07)
-- Enhanced download logging system
-- Fixed unnecessary "file not available" logs for the current date
-- Improved console output during market hours
-- Prevented current-date download attempts before 6:00 PM
-- Migrated the GUI runtime from PyQt6 to PySide6
-- Added cross-platform Nuitka build tooling
-
-### **v1.0.0** (2025-07-30)
-- Initial production release
-- Multi-exchange support (NSE & BSE)
-- Advanced data append operations
-- Professional GUI interface
-- Comprehensive error handling
-- Automatic update checking
-- Memory optimization
-- Async download processing
-
----
-
-**Built with ❤️ for the trading and financial analysis community**
-
-© 2025 Paresh Patel. All rights reserved.
+© 2026 Paresh Patel. All rights reserved.

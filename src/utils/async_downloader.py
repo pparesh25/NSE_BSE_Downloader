@@ -516,6 +516,17 @@ class AsyncDownloadManager:
                     file_data.extend(chunk)
                     file_size += len(chunk)
 
+                # BSE frequently returns a branded HTML error page with HTTP
+                # 200 for a missing report.  Treat it as a failed download so
+                # parsers never mistake that page for a valid CSV.
+                preview = bytes(file_data).lstrip()[:100].lower()
+                if preview.startswith((b"<!doctype html", b"<html")):
+                    raise NetworkError(
+                        "Server returned HTML instead of the requested report",
+                        url=task.url,
+                        status_code=200,
+                    )
+
                 download_time = time.time() - start_time
 
                 if is_bse_request:

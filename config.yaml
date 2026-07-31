@@ -1,5 +1,13 @@
 # NSE/BSE Data Downloader Configuration
 
+app_settings:
+  release_date: "2026-07-31"
+  features:
+    - "Date-aware legacy/current NSE and BSE downloads"
+    - "Delivery volume and percentage for NSE/BSE cash data"
+    - "Open interest and change in OI for NSE futures"
+    - "Corporate-action-adjusted symbol-wise text histories"
+    - "Automatic update notifications"
 
 # Data storage paths
 data_paths:
@@ -24,6 +32,13 @@ download_settings:
 
 # Download options for data processing
 download_options:
+  # Extended canonical market data
+  include_delivery_data: true
+  include_fo_open_interest: true
+  generate_symbol_files: true
+  apply_corporate_actions: true
+  legacy_seven_column_output: false
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 

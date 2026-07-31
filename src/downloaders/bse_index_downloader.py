@@ -4,18 +4,18 @@ BSE Index Downloader
 Downloads and processes BSE Index data.
 """
 
-import asyncio
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
 import pandas as pd
-import logging
 
 from ..core.base_downloader import BaseDownloader
 from ..core.config import Config
 from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
 from ..utils.memory_optimizer import MemoryOptimizer
 from ..core.exceptions import DataProcessingError
+from ..services.source_resolver import price_source
+from ..services.canonical_data import INDEX_DAILY_COLUMNS
 
 
 class BSEIndexDownloader(BaseDownloader):
@@ -65,17 +65,11 @@ class BSEIndexDownloader(BaseDownloader):
         URL pattern: https://www.bseindia.com/bsedata/Index_Bhavcopy/INDEXSummary_DDMMYYYY.csv
         Example: https://www.bseindia.com/bsedata/Index_Bhavcopy/INDEXSummary_23072025.csv
         """
-        date_str = self.exchange_config.date_format
-        formatted_date = target_date.strftime(date_str)
-        filename = self.exchange_config.filename_pattern.format(date=formatted_date)
-        url = f"{self.exchange_config.base_url}/{filename}"
+        url = price_source("BSE", "INDEX", target_date).url
 
         # Debug logging
         self.logger.info(f"🔍 BSE INDEX URL Debug:")
         self.logger.info(f"  Target Date: {target_date}")
-        self.logger.info(f"  Date Format: {date_str}")
-        self.logger.info(f"  Formatted Date: {formatted_date}")
-        self.logger.info(f"  Filename: {filename}")
         self.logger.info(f"  Final URL: {url}")
 
         return url
@@ -195,6 +189,22 @@ class BSEIndexDownloader(BaseDownloader):
                 df = df[column_order]
                 self.logger.info(f"  Final column order: {column_order}")
 
+                df = df.rename(columns={
+                    "IndexName": "SYMBOL",
+                    "Date": "DATE",
+                    "OpenPrice": "OPEN",
+                    "HighPrice": "HIGH",
+                    "LowPrice": "LOW",
+                    "ClosePrice": "CLOSE",
+                    "Volume": "VOLUME",
+                })
+                missing = [column for column in INDEX_DAILY_COLUMNS if column not in df]
+                if missing:
+                    raise DataProcessingError(
+                        f"BSE index report missing canonical columns: {missing}"
+                    )
+                df = df.loc[:, INDEX_DAILY_COLUMNS]
+
                 # Show sample data
                 if len(df) > 0:
                     self.logger.info(f"  Sample row: {df.iloc[0].to_dict()}")
@@ -220,24 +230,7 @@ class BSEIndexDownloader(BaseDownloader):
         Returns:
             Path to saved file
         """
-        try:
-            filename = self.build_filename(target_date)
-            output_path = self.data_path / filename
-
-            # Save without header and index for BSE Index data
-            # Format: IndexName, Date, OpenPrice, HighPrice, LowPrice, ClosePrice
-            df.to_csv(output_path, index=False, header=False)
-
-            self.logger.info(f"Saved BSE Index data: {filename} ({len(df)} rows)")
-            return output_path
-
-        except Exception as e:
-            from ..core.exceptions import FileOperationError
-            raise FileOperationError(
-                f"Failed to save BSE Index data for {target_date}",
-                file_path=str(output_path),
-                operation="save_csv"
-            ) from e
+        return super().save_processed_data(df, target_date)
 
     async def _download_implementation(self, working_days: List[date]) -> bool:
         """

@@ -28,7 +28,7 @@ def _default_headers() -> dict:
     # Conservative default headers suitable for GitHub/raw and general HTTP
     return {
         "User-Agent": (
-            "NSE_BSE_Downloader/1.0 (+https://github.com/pparesh25/NSE_BSE_Downloader_PySide6)"
+            "NSE_BSE_Downloader/1.1 (+https://github.com/pparesh25/NSE_BSE_Downloader_PySide6)"
         ),
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",

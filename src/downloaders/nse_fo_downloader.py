@@ -5,20 +5,17 @@ Downloads and processes NSE Futures & Options data with Roman numeral suffixes.
 Based on the original New_Nse_fo_roman_suffixes.py implementation.
 """
 
-import asyncio
-import zipfile
 from datetime import date
-from pathlib import Path
 from typing import List, Optional
 import pandas as pd
-import logging
 
 from ..core.base_downloader import BaseDownloader
 from ..core.config import Config
 from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
-from ..utils.file_utils import FileUtils
 from ..utils.memory_optimizer import MemoryOptimizer
 from ..core.exceptions import DataProcessingError
+from ..services.canonical_data import normalize_nse_fo, public_fo, read_report
+from ..services.source_resolver import price_source
 
 
 class NSEFODownloader(BaseDownloader):
@@ -36,10 +33,7 @@ class NSEFODownloader(BaseDownloader):
 
     def build_url(self, target_date: date) -> str:
         """Build NSE F&O download URL"""
-        date_str = self.exchange_config.date_format
-        formatted_date = target_date.strftime(date_str)
-        filename = self.exchange_config.filename_pattern.format(date=formatted_date)
-        return f"{self.exchange_config.base_url}/{filename}"
+        return price_source("NSE", "FO", target_date).url
 
     def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[pd.DataFrame]:
         """
@@ -53,29 +47,10 @@ class NSEFODownloader(BaseDownloader):
             Processed DataFrame
         """
         try:
-            import zipfile
-            import io
-
-            # Extract ZIP file from memory
-            with zipfile.ZipFile(io.BytesIO(file_data), 'r') as zip_ref:
-                # Find CSV file in ZIP
-                csv_files = [name for name in zip_ref.namelist() if name.endswith('.csv')]
-
-                if not csv_files:
-                    self.logger.warning(f"No CSV file found in ZIP for {file_date}")
-                    return None
-
-                # Read CSV data from ZIP
-                csv_data = zip_ref.read(csv_files[0])
-
-                # Read CSV into DataFrame
-                df = pd.read_csv(io.BytesIO(csv_data))
-
-                # Transform data
-                transformed_df = self.transform_data(df, file_date)
-
-                self.logger.info(f"Processed NSE FO data for {file_date}: {len(transformed_df)} rows")
-                return transformed_df
+            df = read_report(file_data)
+            transformed_df = self.transform_data(df, file_date)
+            self.logger.info(f"Processed NSE FO data for {file_date}: {len(transformed_df)} rows")
+            return transformed_df
 
         except Exception as e:
             raise DataProcessingError(f"Error processing NSE FO data for {file_date}: {e}")
@@ -128,71 +103,18 @@ class NSEFODownloader(BaseDownloader):
         """
         try:
             with self.memory_optimizer.memory_monitor("nse_fo_transform"):
-                # Filter rows based on FinInstrmTp column (STF, IDF)
-                if 'FinInstrmTp' in df.columns:
-                    df = df[df['FinInstrmTp'].isin(['STF', 'IDF'])]
-
-                # Remove specified columns (from original code)
-                columns_to_remove = [
-                    'BizDt', 'Sgmt', 'Src', 'FinInstrmTp', 'FinInstrmId', 'ISIN', 'SctySrs',
-                    'FininstrmActlXpryDt', 'StrkPric', 'OptnTp', 'FinInstrmNm', 'LastPric',
-                    'PrvsClsgPric', 'UndrlygPric', 'SttlmPric', 'OpnIntrst', 'ChngInOpnIntrst',
-                    'TtlTrfVal', 'TtlNbOfTxsExctd', 'SsnId', 'NewBrdLotQty', 'Rmks',
-                    'Rsvd1', 'Rsvd2', 'Rsvd3', 'Rsvd4'
-                ]
-
-                # Remove columns that exist in the DataFrame
-                existing_columns = [col for col in columns_to_remove if col in df.columns]
-                df = df.drop(columns=existing_columns)
-
-                # Sort by TckrSymb
-                if 'TckrSymb' in df.columns:
-                    df = df.sort_values(by='TckrSymb')
-
-                # Convert XpryDt to datetime and sort
-                if 'XpryDt' in df.columns:
-                    df['XpryDt'] = pd.to_datetime(df['XpryDt'])
-                    df = df.sort_values(by=['TckrSymb', 'XpryDt']).reset_index(drop=True)
-
-                    # Create incremental numbering in Roman numerals
-                    df['SYMBOL_NEW'] = df.groupby('TckrSymb').cumcount() + 1
-                    df['SYMBOL_NEW'] = df.apply(
-                        lambda row: f"{row['TckrSymb']}-{self.int_to_roman(row['SYMBOL_NEW'])}",
-                        axis=1
-                    )
-
-                # Convert and format TradDt column
-                if 'TradDt' in df.columns:
-                    df['TradDt'] = pd.to_datetime(df['TradDt'], errors='coerce')
-
-                    # Check for conversion issues
-                    if df['TradDt'].isna().any():
-                        self.logger.warning("Some dates couldn't be converted in TradDt column")
-
-                    # Convert to desired format
-                    df['TradDt'] = df['TradDt'].dt.strftime('%Y%m%d')
-
-                    # Reorder columns
-                    if 'OpnPric' in df.columns and 'SYMBOL_NEW' in df.columns:
-                        cols = df.columns.tolist()
-                        cols.remove('TradDt')
-                        cols.remove('SYMBOL_NEW')
-
-                        opn_idx = cols.index('OpnPric')
-                        cols.insert(opn_idx, 'TradDt')
-                        cols.insert(opn_idx, 'SYMBOL_NEW')
-                        df = df[cols]
-
-                # Remove original columns that are no longer needed
-                final_columns_to_remove = ['TckrSymb', 'XpryDt']
-                existing_final_columns = [col for col in final_columns_to_remove if col in df.columns]
-                df = df.drop(columns=existing_final_columns)
-
-                # Optimize memory usage
-                df = self.memory_optimizer.optimize_dataframe(df)
-
-                self.logger.info(f"Transformed NSE FO data: {len(df)} rows, {len(df.columns)} columns")
-                return df
+                normalized = normalize_nse_fo(df, file_date)
+                legacy = (
+                    self.get_download_option("legacy_seven_column_output", False)
+                    or not self.get_download_option("include_fo_open_interest", True)
+                )
+                output = public_fo(normalized, legacy_seven_columns=legacy)
+                output = self.memory_optimizer.optimize_dataframe(output)
+                self.logger.info(
+                    f"Transformed NSE FO data: {len(output)} rows, "
+                    f"{len(output.columns)} columns"
+                )
+                return output
 
         except Exception as e:
             raise DataProcessingError(f"Error transforming NSE FO data: {e}")

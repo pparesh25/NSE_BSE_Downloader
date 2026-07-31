@@ -427,12 +427,9 @@ class MemoryAppendManager:
                 if list(append_data.columns) == list(base_data.columns):
                     self.logger.info(f"Columns match exactly - using data as-is for {len(append_data)} rows")
                     return append_data.copy()
-                else:
-                    # Create a copy with base column names (assume same order)
-                    aligned_data = append_data.copy()
-                    aligned_data.columns = base_data.columns
-                    self.logger.info(f"Aligned {len(append_data)} rows by matching column count (renamed columns)")
-                    return aligned_data
+                self.logger.warning(
+                    "Column counts match but names differ; using explicit names only"
+                )
 
             # Get base columns
             base_columns = list(base_data.columns)
@@ -453,14 +450,6 @@ class MemoryAppendManager:
 
             # Fill NaN values with empty strings to maintain consistency
             aligned_data = aligned_data.fillna('')
-
-            # If no columns matched, try a different approach - assume same order
-            if matched_columns == 0 and len(append_data.columns) == len(base_columns):
-                self.logger.warning("No column names matched, but same count - assuming same order")
-                aligned_data = append_data.copy()
-                aligned_data.columns = base_columns
-                self.logger.info(f"Applied column mapping by position for {len(aligned_data)} rows")
-                return aligned_data
 
             # Debug: Check for empty rows before removal
             empty_rows_count = (aligned_data == '').all(axis=1).sum()
@@ -547,13 +536,18 @@ class MemoryAppendManager:
                 self.logger.info("No data to append")
                 return True
 
-            # Append to real file without headers
-            with open(real_file, 'a', encoding='utf-8') as f:
-                # Convert DataFrame to CSV format without headers, with proper float formatting
-                csv_content = append_data.to_csv(index=False, header=False, float_format='%.2f')
-                f.write(csv_content)
+            # Rewrite the complete combined file atomically.  Appending in
+            # place could leave a truncated row/file if the app is stopped.
+            temporary = real_file.with_suffix(real_file.suffix + ".tmp")
+            combined_data.to_csv(
+                temporary, index=False, header=False, float_format='%.2f'
+            )
+            temporary.replace(real_file)
 
-            self.logger.info(f"Successfully appended {len(append_data)} rows to {real_file}")
+            self.logger.info(
+                f"Successfully atomically appended {len(append_data)} rows "
+                f"to {real_file}"
+            )
             return True
 
         except Exception as e:

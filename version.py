@@ -4,12 +4,30 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.0.1"
-__build_date__ = "2025-08-07"
-__build_number__ = 21
+__version__ = "1.1.0"
+__build_date__ = "2026-07-31"
+__build_number__ = 22
 
 # Version history
 VERSION_HISTORY = {
+
+    "1.1.0": {
+        "release_date": "2026-07-31",
+        "features": [
+            "One date-aware downloader path for every legacy and current NSE/BSE report URL",
+            "Stable 9-column NSE/BSE equity output with delivery quantity and percentage",
+            "Stable 9-column NSE futures output with open interest and change in OI",
+            "Per-symbol text histories with NSE/BSE split, consolidation and bonus adjustments",
+            "Pending-delivery retry, corporate-action audit ledger and rebuildable raw snapshots",
+            "Legacy 7-column compatibility option"
+        ],
+        "bug_fixes": [
+            "Fixed NSE SME filename switch from two-digit to four-digit year",
+            "Matched NSE delivery by symbol and series and BSE delivery by security code",
+            "Rejected HTML error pages returned with successful HTTP status",
+            "Kept daily and symbol files valid through atomic replacement"
+        ]
+    },
 
     "1.0.1": {
         "release_date": "2025-08-07",

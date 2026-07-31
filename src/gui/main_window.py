@@ -222,17 +222,21 @@ class DownloadWorker(QThread):
             # Get date range
             start_date, end_date = downloader.get_date_range()
 
-            if start_date > end_date:
-                self.status_updated.emit(exchange, "No new data to download")
-                return True
-
             # Check stop again before processing
             if self.stop_requested:
                 self.status_updated.emit(exchange, "Download stopped")
                 return False
 
             # Get working days with weekend option
-            working_days = downloader.get_working_days(start_date, end_date, self.include_weekends)
+            working_days = []
+            if start_date <= end_date:
+                working_days = downloader.get_working_days(
+                    start_date, end_date, self.include_weekends
+                )
+            # Delivery reports can be published after their price report.  A
+            # later app run must retry those dates even when there is no new
+            # price date in the normal range.
+            working_days = downloader._with_pending_delivery_days(working_days)
 
             if not working_days:
                 self.status_updated.emit(exchange, "No working days in date range")
@@ -289,6 +293,11 @@ class MainWindow(QMainWindow):
         self.sme_append_checkbox: Optional[QCheckBox] = None
         self.index_append_checkbox: Optional[QCheckBox] = None
         self.bse_index_append_checkbox: Optional[QCheckBox] = None
+        self.delivery_checkbox: Optional[QCheckBox] = None
+        self.fo_oi_checkbox: Optional[QCheckBox] = None
+        self.symbol_files_checkbox: Optional[QCheckBox] = None
+        self.corporate_actions_checkbox: Optional[QCheckBox] = None
+        self.legacy_output_checkbox: Optional[QCheckBox] = None
 
         # Timeout option
         self.timeout_spinbox = None
@@ -483,6 +492,60 @@ class MainWindow(QMainWindow):
         basic_row.addStretch()
 
         layout.addLayout(basic_row)
+
+        data_options = self.user_prefs.get_data_options()
+        extended_grid = QGridLayout()
+
+        self.delivery_checkbox = QCheckBox("Include NSE/BSE delivery data")
+        self.delivery_checkbox.setToolTip(
+            "Merge delivery quantity and percentage into equity/SME output"
+        )
+        self.delivery_checkbox.setChecked(data_options["include_delivery_data"])
+        self.delivery_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.delivery_checkbox, 0, 0)
+
+        self.fo_oi_checkbox = QCheckBox("Include NSE FO open interest")
+        self.fo_oi_checkbox.setToolTip(
+            "Keep OPEN_INTEREST and CHANGE_IN_OI in futures output"
+        )
+        self.fo_oi_checkbox.setChecked(data_options["include_fo_open_interest"])
+        self.fo_oi_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.fo_oi_checkbox, 0, 1)
+
+        self.symbol_files_checkbox = QCheckBox("Create symbol-wise .txt histories")
+        self.symbol_files_checkbox.setToolTip(
+            "Create files such as NSE/SYMBOLS/reliance.txt"
+        )
+        self.symbol_files_checkbox.setChecked(data_options["generate_symbol_files"])
+        self.symbol_files_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.symbol_files_checkbox, 1, 0)
+
+        self.corporate_actions_checkbox = QCheckBox("Apply corporate actions")
+        self.corporate_actions_checkbox.setToolTip(
+            "Adjust pre-ex-date OHLC in symbol-wise history files"
+        )
+        self.corporate_actions_checkbox.setChecked(
+            data_options["apply_corporate_actions"]
+        )
+        self.corporate_actions_checkbox.setEnabled(
+            data_options["generate_symbol_files"]
+        )
+        self.corporate_actions_checkbox.stateChanged.connect(
+            self.on_data_option_changed
+        )
+        extended_grid.addWidget(self.corporate_actions_checkbox, 1, 1)
+
+        self.legacy_output_checkbox = QCheckBox("Legacy 7-column output")
+        self.legacy_output_checkbox.setToolTip(
+            "Compatibility mode: omit delivery and open-interest columns"
+        )
+        self.legacy_output_checkbox.setChecked(
+            data_options["legacy_seven_column_output"]
+        )
+        self.legacy_output_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.legacy_output_checkbox, 2, 0)
+
+        layout.addLayout(extended_grid)
 
         # Dynamic options for NSE SME (initially hidden)
         self.sme_options_row = QHBoxLayout()
@@ -945,6 +1008,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error saving append options: {e}")
 
+    def on_data_option_changed(self):
+        """Persist canonical output, delivery and symbol-history settings."""
+        try:
+            options = {
+                "include_delivery_data": self.delivery_checkbox.isChecked(),
+                "include_fo_open_interest": self.fo_oi_checkbox.isChecked(),
+                "generate_symbol_files": self.symbol_files_checkbox.isChecked(),
+                "apply_corporate_actions": self.corporate_actions_checkbox.isChecked(),
+                "legacy_seven_column_output": self.legacy_output_checkbox.isChecked(),
+            }
+            self.user_prefs.set_data_options(options)
+            self.corporate_actions_checkbox.setEnabled(
+                self.symbol_files_checkbox.isChecked()
+            )
+            self.logger.info(f"Saved extended data options: {options}")
+        except Exception as e:
+            self.logger.error(f"Error saving extended data options: {e}")
+
     def on_exchange_selection_changed(self):
         """Handle exchange selection changes"""
         try:
@@ -1184,7 +1265,7 @@ class MainWindow(QMainWindow):
                 'Smart append operations',
                 'Automatic update notifications'
             ])
-            release_date = app_info.get('release_date', '2025-08-07')
+            release_date = app_info.get('release_date', '2026-07-31')
 
             features_text = '\n'.join([f"• {feature}" for feature in features])
 
@@ -1200,7 +1281,7 @@ Key Features:
 Developed with PySide6 and modern Python architecture.
 Built for traders, analysts, and financial professionals.
 
-© 2025 Paresh Patel. All rights reserved.
+© 2026 Paresh Patel. All rights reserved.
             """
 
             QMessageBox.about(self, f"About NSE/BSE Data Downloader v{version}", about_text.strip())
@@ -1209,11 +1290,11 @@ Built for traders, analysts, and financial professionals.
             self.logger.error(f"Error showing about dialog: {e}")
             # Fallback about text
             fallback_text = """
-NSE/BSE Data Downloader v1.0.1
+NSE/BSE Data Downloader v1.1.0
 
 A comprehensive data downloader for NSE and BSE market data.
             """
-            QMessageBox.about(self, "About NSE/BSE Data Downloader v1.0.1", fallback_text.strip())
+            QMessageBox.about(self, "About NSE/BSE Data Downloader v1.1.0", fallback_text.strip())
 
     def show_donate_dialog(self):
         """Show donate dialog"""

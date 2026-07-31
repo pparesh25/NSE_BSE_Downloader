@@ -42,6 +42,11 @@ class UserPreferences:
             "download_options": {
                 "include_weekends": False,
                 "timeout_seconds": 5,
+                "include_delivery_data": True,
+                "include_fo_open_interest": True,
+                "generate_symbol_files": True,
+                "apply_corporate_actions": True,
+                "legacy_seven_column_output": False,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,
@@ -181,6 +186,27 @@ class UserPreferences:
     def set_timeout_seconds(self, timeout: int) -> None:
         """Set timeout seconds setting"""
         self.preferences["download_options"]["timeout_seconds"] = timeout
+        self.save_preferences()
+
+    def get_data_options(self) -> Dict[str, bool]:
+        """Get canonical-output and symbol-history feature switches."""
+        options = self.preferences.get("download_options", {})
+        return {
+            "include_delivery_data": options.get("include_delivery_data", True),
+            "include_fo_open_interest": options.get("include_fo_open_interest", True),
+            "generate_symbol_files": options.get("generate_symbol_files", True),
+            "apply_corporate_actions": options.get("apply_corporate_actions", True),
+            "legacy_seven_column_output": options.get(
+                "legacy_seven_column_output", False
+            ),
+        }
+
+    def set_data_options(self, options: Dict[str, bool]) -> None:
+        """Persist canonical-output and symbol-history feature switches."""
+        allowed = set(self.get_data_options())
+        for key, value in options.items():
+            if key in allowed:
+                self.preferences["download_options"][key] = bool(value)
         self.save_preferences()
 
     # Append Options Methods

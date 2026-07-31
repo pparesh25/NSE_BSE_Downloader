@@ -4,18 +4,17 @@ NSE Index Downloader
 Downloads and processes NSE Index data separately from equity data.
 """
 
-import asyncio
 from datetime import date
-from pathlib import Path
 from typing import List, Optional
 import pandas as pd
-import logging
 
 from ..core.base_downloader import BaseDownloader
 from ..core.config import Config
 from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
 from ..utils.memory_optimizer import MemoryOptimizer
 from ..core.exceptions import DataProcessingError
+from ..services.source_resolver import price_source
+from ..services.canonical_data import INDEX_DAILY_COLUMNS
 
 
 class NSEIndexDownloader(BaseDownloader):
@@ -32,10 +31,7 @@ class NSEIndexDownloader(BaseDownloader):
 
     def build_url(self, target_date: date) -> str:
         """Build NSE index download URL"""
-        date_str = self.exchange_config.date_format
-        formatted_date = target_date.strftime(date_str)
-        filename = self.exchange_config.filename_pattern.format(date=formatted_date)
-        return f"{self.exchange_config.base_url}/{filename}"
+        return price_source("NSE", "INDEX", target_date).url
 
     def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[pd.DataFrame]:
         """
@@ -92,6 +88,24 @@ class NSEIndexDownloader(BaseDownloader):
                 expected_date = file_date.strftime('%Y%m%d')
                 if 'Index Date' in df.columns:
                     df['Index Date'] = expected_date
+
+                df = df.rename(columns={
+                    "Index Name": "SYMBOL",
+                    "Index Date": "DATE",
+                    "Open Index Value": "OPEN",
+                    "High Index Value": "HIGH",
+                    "Low Index Value": "LOW",
+                    "Closing Index Value": "CLOSE",
+                    "Volume": "VOLUME",
+                })
+                if "VOLUME" not in df.columns:
+                    df["VOLUME"] = 0
+                missing = [column for column in INDEX_DAILY_COLUMNS if column not in df]
+                if missing:
+                    raise DataProcessingError(
+                        f"NSE index report missing canonical columns: {missing}"
+                    )
+                df = df.loc[:, INDEX_DAILY_COLUMNS]
 
                 # Optimize memory usage
                 df = self.memory_optimizer.optimize_dataframe(df)

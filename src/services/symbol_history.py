@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 import re
 import shutil
 from threading import Lock
-from typing import Any, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 import pandas as pd
 
 from .canonical_data import INTERNAL_EQUITY_COLUMNS, SYMBOL_HISTORY_COLUMNS
 from .state_store import (
+    StateCorruptionError,
     StateStoreError,
     VersionedJSONStore,
     default_corporate_ledger,
@@ -38,6 +40,27 @@ class HistoryCorruptionError(StateStoreError):
             message += f" (backup: {quarantine_path})"
         message += f": {reason}"
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class HistoryBatchItem:
+    """One validated daily frame queued for a history batch."""
+
+    exchange: str
+    segment: str
+    target_date: date
+    rows: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class HistoryBatchResult:
+    """Observable I/O outcome for one symbol-history batch."""
+
+    entries: int
+    rows: int
+    symbols: int
+    history_reads: int
+    history_writes: int
 
 
 class SymbolHistoryStore:
@@ -473,6 +496,45 @@ class SymbolHistoryStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def read_internal_snapshot(self, path: Path) -> pd.DataFrame:
+        """Read one checksummed canonical snapshot or fail closed."""
+
+        path = Path(path)
+        try:
+            frame = pd.read_csv(path, dtype=str)
+            if list(frame.columns) != INTERNAL_EQUITY_COLUMNS:
+                raise ValueError("raw snapshot schema mismatch")
+            actual_digest = file_sha256(path)
+            metadata_path = path.with_suffix(".csv.meta.json")
+
+            def validate_metadata(data: dict[str, Any]) -> None:
+                if data.get("version") != 1:
+                    raise ValueError(
+                        "unsupported raw-snapshot metadata version"
+                    )
+                if data.get("sha256") != actual_digest:
+                    raise ValueError("raw snapshot checksum mismatch")
+                if data.get("row_count") != len(frame):
+                    raise ValueError("raw snapshot row-count mismatch")
+
+            VersionedJSONStore(
+                metadata_path,
+                default={},
+                validator=validate_metadata,
+                quarantine_root=self.state_path / "quarantine",
+                category="raw_snapshot_metadata",
+            ).read()
+            return frame
+        except StateCorruptionError:
+            raise
+        except Exception as error:
+            quarantine_path = quarantine_copy(
+                path, self.state_path / "quarantine", "raw_snapshot"
+            )
+            raise StateCorruptionError(
+                path, quarantine_path, error
+            ) from error
+
     def upsert(
         self,
         exchange: str,
@@ -490,8 +552,6 @@ class SymbolHistoryStore:
         if ledger_path.exists():
             from .corporate_actions import CorporateActionEngine
 
-            # Resolve a prior prepared transaction before a new daily row can
-            # rename or revise the history file involved in that transaction.
             CorporateActionEngine(
                 self.base_path
             ).recover_incomplete_transactions()
@@ -532,14 +592,155 @@ class SymbolHistoryStore:
 
             self._write_registry(registry)
 
-        # An action may have been recorded before its older price history was
-        # downloaded.  Reconcile those audit records after the history/registry
-        # lock is released so exactly-once transaction recovery cannot deadlock.
         if ledger_path.exists():
             from .corporate_actions import CorporateActionEngine
 
             CorporateActionEngine(self.base_path).reconcile_pending(exchange)
         return written
+
+    def upsert_batch(
+        self,
+        items: Iterable[HistoryBatchItem],
+        *,
+        snapshots_saved: bool = False,
+        completed_paths: Iterable[str] = (),
+        on_symbol_written: Optional[Callable[[str], None]] = None,
+    ) -> HistoryBatchResult:
+        """Merge many dates with at most one read/write per final symbol.
+
+        ``completed_paths`` and ``on_symbol_written`` form the recovery hook
+        used by the run journal. Replaying an uncheckpointed write is safe
+        because date deduplication is deterministic.
+        """
+
+        batch = [item for item in items if item.rows is not None and not item.rows.empty]
+        if not batch:
+            return HistoryBatchResult(0, 0, 0, 0, 0)
+
+        batch = sorted(
+            batch,
+            key=lambda item: (
+                item.target_date,
+                item.exchange.upper(),
+                item.segment.upper(),
+            ),
+        )
+        ledger_path = self.state_path / "corporate_actions.json"
+        if ledger_path.exists():
+            from .corporate_actions import CorporateActionEngine
+
+            CorporateActionEngine(
+                self.base_path
+            ).recover_incomplete_transactions()
+
+        completed = set(completed_paths)
+        rows_seen = 0
+        history_reads = 0
+        history_writes = 0
+        with self._lock:
+            if not snapshots_saved:
+                for item in batch:
+                    self.save_internal_snapshot(
+                        item.exchange,
+                        item.segment,
+                        item.target_date,
+                        item.rows,
+                    )
+
+            registry = self._read_registry()
+            action_records = self._read_applied_actions()
+            history_cache: dict[Path, pd.DataFrame] = {}
+            old_paths: set[Path] = set()
+
+            def load(path: Path) -> pd.DataFrame:
+                nonlocal history_reads
+                if path not in history_cache:
+                    history_cache[path] = self._read_history(path)
+                    history_reads += int(path.exists())
+                return history_cache[path]
+
+            for item in batch:
+                exchange = item.exchange.upper()
+                exchange_registry = registry["exchanges"].setdefault(
+                    exchange, {}
+                )
+                ordered_rows = item.rows.copy()
+                ordered_rows["_batch_order"] = range(len(ordered_rows))
+                ordered_rows["_batch_date"] = pd.to_datetime(
+                    ordered_rows["DATE"].astype(str),
+                    format="%Y%m%d",
+                    errors="coerce",
+                )
+                ordered_rows = ordered_rows.sort_values(
+                    ["_batch_date", "_batch_order"], kind="stable"
+                ).drop(columns=["_batch_date", "_batch_order"])
+
+                for _, row in ordered_rows.iterrows():
+                    symbol = str(row.get("SYMBOL", "")).strip().upper()
+                    if not symbol:
+                        continue
+                    rows_seen += 1
+                    stable_keys = self._stable_keys(row)
+                    self._ensure_symbol_filename(
+                        registry, exchange, symbol, stable_keys
+                    )
+                    new_path = self._path_from_registry(
+                        registry, exchange, symbol
+                    )
+                    for stable_key in stable_keys:
+                        old_symbol = exchange_registry.get(stable_key)
+                        if old_symbol and old_symbol != symbol:
+                            old_path = self._path_from_registry(
+                                registry, exchange, old_symbol
+                            )
+                            if old_path != new_path:
+                                combined = pd.concat(
+                                    [load(old_path), load(new_path)],
+                                    ignore_index=True,
+                                )
+                                history_cache[new_path] = combined
+                                old_paths.add(old_path)
+                                old_paths.discard(new_path)
+                                registry["files"].setdefault(
+                                    exchange, {}
+                                ).pop(old_symbol.upper(), None)
+                        exchange_registry[stable_key] = symbol
+
+                    adjusted_row = self._apply_recorded_actions(
+                        exchange, symbol, row, action_records
+                    )
+                    incoming = self._history_rows(
+                        pd.DataFrame([adjusted_row])
+                    )
+                    existing = load(new_path)
+                    history_cache[new_path] = pd.concat(
+                        [existing, incoming], ignore_index=True
+                    )
+
+            final_paths = set(history_cache).difference(old_paths)
+            for path in sorted(final_paths, key=str):
+                relative = str(path.relative_to(self.base_path))
+                if relative not in completed:
+                    self._write_history(path, history_cache[path])
+                    history_writes += 1
+                    if on_symbol_written is not None:
+                        on_symbol_written(relative)
+
+            for old_path in sorted(old_paths.difference(final_paths), key=str):
+                old_path.unlink(missing_ok=True)
+            self._write_registry(registry)
+
+        if ledger_path.exists():
+            from .corporate_actions import CorporateActionEngine
+
+            CorporateActionEngine(self.base_path).reconcile_pending()
+        return HistoryBatchResult(
+            entries=len(batch),
+            rows=rows_seen,
+            symbols=len(final_paths),
+            history_reads=history_reads,
+            history_writes=history_writes,
+        )
 
     def rewrite_symbol(
         self, exchange: str, symbol: str, history: pd.DataFrame

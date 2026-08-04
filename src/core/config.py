@@ -88,6 +88,7 @@ class Config:
         self.pipeline_telemetry: Any = None
         self.stage_executors: Dict[str, Any] = {}
         self.date_join_coordinator: Any = None
+        self.history_batch_coordinator: Any = None
 
         self.load_config()
         self._validate_config()

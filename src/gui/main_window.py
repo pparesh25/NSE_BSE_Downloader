@@ -36,6 +36,7 @@ from ..core.base_downloader import BaseDownloader, ProgressCallback
 from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.date_join_coordinator import DateJoinCoordinator
+from ..services.history_batch import HistoryBatchCoordinator
 from ..services.pipeline_telemetry import PipelineTelemetry
 from ..services.settings import SettingsService
 from ..utils.transport_pool import TransportPool
@@ -337,8 +338,13 @@ class DownloadWorker(QThread):
                 max_cache_dates=getattr(settings, "prepared_cache_dates", 4),
                 telemetry=self.config.pipeline_telemetry,
             )
+            self.config.history_batch_coordinator = HistoryBatchCoordinator(
+                self.config,
+                telemetry=self.config.pipeline_telemetry,
+            )
         else:
             self.config.date_join_coordinator = None
+            self.config.history_batch_coordinator = None
         self.config.stage_executors = {
             "prepare": BoundedStageExecutor(
                 name="prepare",
@@ -359,6 +365,17 @@ class DownloadWorker(QThread):
             results = await asyncio.gather(
                 *self._tasks.values(), return_exceptions=True
             )
+            if staged_engine and not self.is_cancel_requested():
+                try:
+                    await self._finalize_staged_histories()
+                except Exception as error:
+                    self.logger.exception(
+                        "Staged history finalization failed: %s", error
+                    )
+                    self.error_occurred.emit(
+                        "Symbol histories",
+                        f"History batch failed; daily files remain available: {error}",
+                    )
         finally:
             for executor in getattr(self.config, "stage_executors", {}).values():
                 await executor.close()
@@ -382,9 +399,11 @@ class DownloadWorker(QThread):
         if not self.is_cancel_requested():
             if staged_engine:
                 self._finalize_staged_outputs()
+                self._refresh_staged_task_results(settled)
             else:
                 self._reconcile_combined_outputs(settled)
         self.config.date_join_coordinator = None
+        self.config.history_batch_coordinator = None
 
         outcomes = []
         for exchange, result in settled.items():
@@ -400,6 +419,141 @@ class DownloadWorker(QThread):
 
         self.final_outcome = self._classify_overall_outcome(outcomes)
         return self.final_outcome == GUIOutcome.SUCCESS
+
+    async def _finalize_staged_histories(self) -> None:
+        """Publish queued histories, then apply actions once per exchange."""
+
+        coordinator = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if coordinator is None:
+            return
+        executor = getattr(self.config, "stage_executors", {}).get("persist")
+        if executor is None:
+            outcomes = coordinator.finalize()
+        else:
+            outcomes = await executor.run(
+                coordinator.finalize, stage="history_batch"
+            )
+        for outcome in outcomes:
+            result = outcome.result
+            self.status_updated.emit(
+                "Symbol histories",
+                f"History batch published {result.symbols} symbols from "
+                f"{result.entries} date/segment entries "
+                f"({result.history_reads} reads, {result.history_writes} writes)",
+            )
+
+        windows = coordinator.action_windows()
+        if not windows:
+            return
+        from ..services.corporate_actions import (
+            CorporateActionClient,
+            CorporateActionEngine,
+        )
+
+        actions_by_exchange: dict[str, list[Any]] = {}
+        windows_by_exchange: dict[str, list[Any]] = {}
+        for window in windows:
+            client = CorporateActionClient(timeout=window.timeout)
+            try:
+                actions = await client.fetch(
+                    window.exchange,
+                    window.segment,
+                    min(window.dates),
+                    max(window.dates),
+                    add_sme_suffix=window.add_sme_suffix,
+                )
+            except Exception as error:
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "failed",
+                        {"error": str(error)},
+                    )
+                    for target_date in window.dates
+                ])
+                self.error_occurred.emit(
+                    f"{window.exchange}_{window.segment}",
+                    f"Corporate-action fetch failed: {error}",
+                )
+                continue
+            actions_by_exchange.setdefault(window.exchange, []).extend(actions)
+            windows_by_exchange.setdefault(window.exchange, []).append(window)
+
+        for exchange, actions in actions_by_exchange.items():
+            engine = CorporateActionEngine(self.config.base_data_path)
+            related = windows_by_exchange[exchange]
+            try:
+                if executor is None:
+                    summary = engine.apply(actions)
+                else:
+                    summary = await executor.run(
+                        engine.apply, actions, stage="corporate_actions"
+                    )
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "complete",
+                        {
+                            "applied": summary.get("applied", 0),
+                            "manual_review": summary.get("manual_review", 0),
+                        },
+                    )
+                    for window in related
+                    for target_date in window.dates
+                ])
+                if summary.get("manual_review"):
+                    self.status_updated.emit(
+                        exchange,
+                        f"{summary['manual_review']} corporate action(s) "
+                        "require manual review",
+                    )
+            except Exception as error:
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "failed",
+                        {"error": str(error)},
+                    )
+                    for window in related
+                    for target_date in window.dates
+                ])
+                self.error_occurred.emit(
+                    exchange, f"Corporate-action apply failed: {error}"
+                )
+
+    def _refresh_staged_task_results(
+        self, settled: Dict[str, object]
+    ) -> None:
+        """Reclassify tasks after optional staged work reaches a terminal state."""
+
+        coordinator = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if coordinator is None:
+            return
+        for name, downloader in self.downloaders.items():
+            if isinstance(settled.get(name), BaseException):
+                continue
+            current = getattr(downloader, "last_segment_result", None)
+            if current is None:
+                continue
+            dates = [item.target_date for item in current.dates]
+            refreshed = coordinator.pipeline.segment_result(
+                downloader.exchange, downloader.segment, dates
+            )
+            downloader.last_segment_result = refreshed
+            settled[name] = downloader._core_pipeline_ok(refreshed)
 
     def _finalize_staged_outputs(self) -> None:
         """Finalize unresolved staged dates and refresh EQ structured results."""

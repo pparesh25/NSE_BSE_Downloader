@@ -472,17 +472,45 @@ class BaseDownloader(ABC):
                 and self.segment in ("EQ", "SME")
             ):
                 current_stage = "symbols"
-                from ..services.symbol_history import SymbolHistoryStore
+                history_batch = getattr(
+                    self.config, "history_batch_coordinator", None
+                )
+                if history_batch is not None:
+                    snapshot = history_batch.offer(
+                        self.exchange,
+                        self.segment,
+                        target_date,
+                        internal_equity,
+                    )
+                    self._mark_pipeline(
+                        target_date,
+                        "symbols",
+                        "pending",
+                        queued=True,
+                        snapshot_path=str(snapshot),
+                    )
+                    self.logger.info(
+                        "Queued %s %s rows for run-scoped history batch",
+                        len(internal_equity),
+                        self.exchange,
+                    )
+                else:
+                    from ..services.symbol_history import SymbolHistoryStore
 
-                written = SymbolHistoryStore(self.config.base_data_path).upsert(
-                    self.exchange, self.segment, target_date, internal_equity
-                )
-                self.logger.info(
-                    f"Updated {written} {self.exchange} symbol history files"
-                )
-                self._mark_pipeline(
-                    target_date, "symbols", "complete", files=written
-                )
+                    written = SymbolHistoryStore(
+                        self.config.base_data_path
+                    ).upsert(
+                        self.exchange,
+                        self.segment,
+                        target_date,
+                        internal_equity,
+                    )
+                    self.logger.info(
+                        f"Updated {written} {self.exchange} symbol history files"
+                    )
+                    self._mark_pipeline(
+                        target_date, "symbols", "complete", files=written
+                    )
 
             return output_path
 
@@ -713,12 +741,29 @@ class BaseDownloader(ABC):
                 self._report_error(f"Error processing {target_date}: {error}")
 
         self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
-        if (
+        should_apply_actions = (
             processed_days
             and not self._is_cancel_requested()
             and self.get_download_option("apply_corporate_actions", True)
             and self.get_download_option("generate_symbol_files", True)
-        ):
+        )
+        history_batch = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if should_apply_actions and history_batch is not None:
+            add_sme_suffix = SettingsService(
+                self.config
+            ).preferences.get_sme_add_suffix()
+            history_batch.register_action_window(
+                self.exchange,
+                self.segment,
+                processed_days,
+                add_sme_suffix=add_sme_suffix,
+                timeout=max(
+                    30, self.config.download_settings.timeout_seconds
+                ),
+            )
+        elif should_apply_actions:
             try:
                 from ..services.corporate_actions import (
                     CorporateActionClient,

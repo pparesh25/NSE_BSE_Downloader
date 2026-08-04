@@ -50,6 +50,7 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
     resource = package / "Contents" / "MacOS" / "config.yaml"
     resource.write_text("data_paths: {}\n", encoding="utf-8")
     monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("SOURCE_COMMIT", "b" * 40)
 
     archive_path, checksum_path = release.create_release_archive(
         package,
@@ -67,7 +68,7 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
             archive.read(f"{expected_root}/BUILD-METADATA.json")
         )
         assert metadata["application"] == PRODUCT_NAME
-        assert metadata["git_commit"] == "a" * 40
+        assert metadata["git_commit"] == "b" * 40
         executable_name = (
             f"{expected_root}/{PRODUCT_NAME}.app/Contents/MacOS/{APP_NAME}"
         )
@@ -78,6 +79,12 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
     assert checksum_path.read_text(encoding="ascii") == (
         f"{digest}  {archive_path.name}\n"
     )
+
+
+def test_git_commit_falls_back_to_github_sha(tmp_path, monkeypatch):
+    monkeypatch.delenv("SOURCE_COMMIT", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    assert release._git_commit(tmp_path) == "c" * 40
 
 
 def test_release_zip_rejects_symlinks(tmp_path):

@@ -76,13 +76,20 @@ Each runner installs only `requirements.txt` and `requirements-build.txt`, asser
 that pytest and mypy are absent, performs a real Nuitka build, runs the packaged
 `--help` smoke test, creates an updater-compatible ZIP plus SHA-256 sidecar, and
 uploads the compilation report with a 14-day retention period. Action versions are
-pinned to full commit SHAs. The workflow does not publish a GitHub Release, sign a
-binary, notarize an app, change version metadata, or merge the migration branch.
+pinned to full commit SHAs. Pull-request builds check out and record the exact PR-head
+commit rather than GitHub's temporary merge commit. The workflow does not publish a
+GitHub Release, sign a binary, notarize an app, change version metadata, or merge the
+migration branch.
+
+The first matrix run passed all three functional builds but was rejected during
+independent provenance review because `GITHUB_SHA` identified GitHub's temporary PR
+merge commit. The workflow and packager were corrected to use `SOURCE_COMMIT`, and
+the corrected matrix must pass before its artifacts are accepted as evidence.
 
 ## Validation completed after packaging changes
 
-- Full suite in `opentrader313`: 181 tests passed.
-- Full suite in `mark_screener`: 181 tests passed.
+- Full suite in `opentrader313`: 182 tests passed.
+- Full suite in `mark_screener`: 182 tests passed.
 - Coverage: 73.89%, above the required 70% gate.
 - Ruff: passed.
 - mypy: passed for all configured production and packaging modules.

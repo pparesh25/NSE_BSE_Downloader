@@ -139,9 +139,10 @@ def _sha256(path: Path) -> str:
 
 
 def _git_commit(project_root: Path = PROJECT_ROOT) -> str:
-    environment_commit = os.environ.get("GITHUB_SHA", "").strip()
-    if environment_commit:
-        return environment_commit
+    for variable in ("SOURCE_COMMIT", "GITHUB_SHA"):
+        environment_commit = os.environ.get(variable, "").strip()
+        if environment_commit:
+            return environment_commit
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=project_root,

@@ -10,15 +10,21 @@ Provides concurrent download capabilities with:
 
 import asyncio
 import aiohttp
-import ssl
+from io import BytesIO
 import logging
-from pathlib import Path
-from typing import List, Optional, Callable, Dict, Any, Tuple
+import random
+import zipfile
+import zlib
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import List, Optional, Callable, Dict, Any
 from dataclasses import dataclass
 import time
 
 from ..core.config import Config
-from ..core.exceptions import NetworkError, FileOperationError
+from ..core.exceptions import NetworkError
+from ..services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
+from .transport_pool import TransportPool
 
 
 @dataclass
@@ -28,6 +34,7 @@ class DownloadTask:
     date_str: str
     target_date: Any  # date object
     retry_count: int = 0
+    exchange_segment: str = ""
 
     def __str__(self) -> str:
         return f"DownloadTask(url={self.url}, date={self.date_str})"
@@ -42,6 +49,9 @@ class DownloadResult:
     file_size: int = 0
     error_message: Optional[str] = None
     download_time: float = 0.0
+    status_code: Optional[int] = None
+    retry_after: Optional[float] = None
+    outcome: str = "success"
 
     def __str__(self) -> str:
         status = "SUCCESS" if self.success else "FAILED"
@@ -91,54 +101,30 @@ class AsyncDownloadManager:
             'total_time': 0.0,
             'retry_count': 0
         }
+        self.telemetry = getattr(config, "pipeline_telemetry", None) or PipelineTelemetry()
+        self._lag_monitor = EventLoopLagMonitor(self.telemetry)
+        shared_pool = getattr(config, "transport_pool", None)
+        self._owns_transport_pool = shared_pool is None
+        self.transport_pool: TransportPool = shared_pool or TransportPool(config)
 
     async def __aenter__(self):
         """Async context manager entry"""
-        await self._create_session()
+        if self._owns_transport_pool:
+            await self.transport_pool.start()
+        self.session = self.transport_pool.session
+        await self._lag_monitor.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
-        await self._close_session()
+        await self._lag_monitor.stop()
+        if self._owns_transport_pool:
+            await self.transport_pool.close()
 
     async def _create_session(self) -> None:
         """Create aiohttp session with appropriate settings"""
-        timeout = aiohttp.ClientTimeout(total=self.download_settings.timeout_seconds)
-
-        # Enhanced headers optimized for NSE/BSE servers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1'
-        }
-
-        # Enhanced connector with NSE-specific optimizations
-        connector = aiohttp.TCPConnector(
-            limit=self.download_settings.max_concurrent_downloads * 2,
-            limit_per_host=self.download_settings.max_concurrent_downloads,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=60,  # Keep connections alive longer for NSE
-            enable_cleanup_closed=True,  # Clean up closed connections
-            force_close=False,  # Reuse connections when possible
-            ssl=False  # Allow both HTTP and HTTPS
-        )
-
-        self.session = aiohttp.ClientSession(
-            timeout=timeout,
-            headers=headers,
-            connector=connector
-        )
-
-        self.logger.info(f"Async session created with timeout: {self.download_settings.timeout_seconds}s")
+        await self.transport_pool.start()
+        self.session = self.transport_pool.session
 
     async def update_session_timeout(self, new_timeout_seconds: int) -> None:
         """
@@ -164,10 +150,12 @@ class AsyncDownloadManager:
 
     async def _close_session(self) -> None:
         """Close aiohttp session"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-            self.logger.info("Async session closed")
+        if not self._owns_transport_pool:
+            self.session = self.transport_pool.session
+            return
+        await self.transport_pool.close()
+        self.session = None
+        self.logger.info("Async session closed")
 
     def set_progress_callback(self, callback: Callable[[int, int, str], None]) -> None:
         """
@@ -253,6 +241,22 @@ class AsyncDownloadManager:
         # Use user-configured timeout for all servers consistently
         return self.download_settings.timeout_seconds
 
+    def _get_timeout_budget(self) -> aiohttp.ClientTimeout:
+        """Return split Phase 7.1 budgets with legacy-compatible defaults."""
+        total = float(
+            getattr(self.download_settings, "attempt_timeout_seconds", None)
+            or self.download_settings.timeout_seconds
+        )
+        connect = float(
+            getattr(self.download_settings, "connect_timeout_seconds", None)
+            or total
+        )
+        read = float(
+            getattr(self.download_settings, "read_timeout_seconds", None)
+            or total
+        )
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
+
     def _get_retry_attempts(self, task: DownloadTask) -> int:
         """
         Get consistent retry attempts for all servers
@@ -266,7 +270,12 @@ class AsyncDownloadManager:
         # Use consistent retry attempts for all servers
         return self.download_settings.retry_attempts
 
-    def _get_retry_delay(self, task: DownloadTask, attempt: int) -> float:
+    def _get_retry_delay(
+        self,
+        task: DownloadTask,
+        attempt: int,
+        retry_after: Optional[float] = None,
+    ) -> float:
         """
         Get consistent retry delay for all servers
 
@@ -277,10 +286,18 @@ class AsyncDownloadManager:
         Returns:
             Delay in seconds
         """
-        # Simple progressive delay: 1s, 2s, 3s, 4s
-        return min(5.0, 1.0 * (attempt + 1))
+        if retry_after is not None and retry_after >= 0:
+            return min(60.0, retry_after)
+        # Bounded exponential backoff with a small jitter prevents every
+        # selected segment from retrying the exchange at the same instant.
+        return min(8.0, float(2 ** attempt)) + random.uniform(0.0, 0.25)
 
-    def _classify_error(self, error_message: str, task: DownloadTask) -> dict:
+    def _classify_error(
+        self,
+        error_message: str,
+        task: DownloadTask,
+        status_code: Optional[int] = None,
+    ) -> dict:
         """
         Classify error for better user feedback
 
@@ -300,13 +317,37 @@ class AsyncDownloadManager:
         if "timeout" in error_lower:
             return {
                 "type": "timeout",
-                "user_message": f"Server response timeout for {task.date_str} - file may not be available yet",
+                "user_message": (
+                    f"Server response timeout for {task.date_str}: {error_message}"
+                ),
                 "should_retry": True,
                 "technical_details": error_message
             }
 
+        if any(term in error_lower for term in (
+            "html", "empty zip", "empty report", "crc", "truncated", "mime"
+        )):
+            return {
+                "type": "retryable_payload",
+                "user_message": f"Transient report payload for {task.date_str}: {error_message}",
+                "should_retry": True,
+                "technical_details": error_message,
+            }
+
+        # Certificate failures are security failures, not transient downloads.
+        if any(term in error_lower for term in ["ssl", "certificate", "cert"]):
+            return {
+                "type": "ssl_error",
+                "user_message": f"SSL certificate issue for {task.date_str} - server configuration problem",
+                "should_retry": False,
+                "technical_details": error_message
+            }
+
         # Network connectivity issues
-        if any(term in error_lower for term in ["connection", "network", "reset", "refused"]):
+        if any(term in error_lower for term in [
+            "connect", "connection", "network", "reset", "refused",
+            "disconnected", "dns", "name resolution",
+        ]):
             return {
                 "type": "network",
                 "user_message": f"Network connectivity issue for {task.date_str} - will retry",
@@ -315,7 +356,21 @@ class AsyncDownloadManager:
             }
 
         # Server errors (5xx)
-        if any(code in error_lower for code in ["500", "502", "503", "504"]):
+        if status_code in {408, 425, 429} or any(
+            code in error_lower for code in ["408", "425", "429"]
+        ):
+            return {
+                "type": "server_busy",
+                "user_message": (
+                    f"Server asked to retry {task.date_str}: {error_message}"
+                ),
+                "should_retry": True,
+                "technical_details": error_message,
+            }
+
+        if (
+            status_code is not None and 500 <= status_code <= 599
+        ) or any(code in error_lower for code in ["500", "502", "503", "504"]):
             return {
                 "type": "server_error",
                 "user_message": f"Server error for {task.date_str} - server may be temporarily unavailable",
@@ -324,7 +379,7 @@ class AsyncDownloadManager:
             }
 
         # File not found (404)
-        if "404" in error_lower or "not found" in error_lower:
+        if status_code == 404 or "404" in error_lower or "not found" in error_lower:
             return {
                 "type": "file_not_found",
                 "user_message": f"File not available for {task.date_str} - may not be published yet",
@@ -332,20 +387,19 @@ class AsyncDownloadManager:
                 "technical_details": error_message
             }
 
-        # Access denied (403, 401)
-        if any(code in error_lower for code in ["403", "401", "forbidden", "unauthorized"]):
+        if status_code == 401 or "401" in error_lower or "unauthorized" in error_lower:
+            return {
+                "type": "unauthorized",
+                "user_message": f"Unauthorized request for {task.date_str}",
+                "should_retry": False,
+                "technical_details": error_message,
+            }
+
+        # One controlled retry is allowed for a transient access block.
+        if status_code == 403 or "403" in error_lower or "forbidden" in error_lower:
             return {
                 "type": "access_denied",
                 "user_message": f"Access denied for {task.date_str} - server may be blocking requests",
-                "should_retry": False,
-                "technical_details": error_message
-            }
-
-        # SSL/Certificate issues
-        if any(term in error_lower for term in ["ssl", "certificate", "cert"]):
-            return {
-                "type": "ssl_error",
-                "user_message": f"SSL certificate issue for {task.date_str} - server configuration problem",
                 "should_retry": True,
                 "technical_details": error_message
             }
@@ -372,18 +426,47 @@ class AsyncDownloadManager:
 
         async with self.semaphore:  # Limit concurrent downloads
             try:
-                # Simple rate limiting
-                delay = self._calculate_delay(task)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-
                 # Simple retry logic for all servers
-                max_attempts = self._get_retry_attempts(task)
+                max_attempts = max(1, self._get_retry_attempts(task))
                 last_error = None
+                identity = (
+                    {"exchange_segment": task.exchange_segment}
+                    if task.exchange_segment else {}
+                )
 
-                for attempt in range(max(1, max_attempts)):
+                for attempt in range(max_attempts):
+                    attempt_started = time.monotonic_ns()
+                    self.telemetry.record(
+                        "download_attempt_started",
+                        date=task.date_str,
+                        url=task.url,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        **identity,
+                    )
                     try:
-                        result = await self._attempt_download(task)
+                        try:
+                            async with self.transport_pool.slot(task.url):
+                                result = await self._attempt_download(task)
+                        except Exception:
+                            self.transport_pool.record(task.url, success=False)
+                            raise
+                        self.transport_pool.record(
+                            task.url,
+                            success=result.success,
+                            status_code=result.status_code,
+                        )
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            status_code=result.status_code,
+                            success=result.success,
+                            bytes=result.file_size,
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
+                        )
                         if result.success:
                             self.download_stats['successful_downloads'] += 1
                             self.download_stats['total_bytes'] += result.file_size
@@ -393,10 +476,28 @@ class AsyncDownloadManager:
                         else:
                             # If download failed but no exception, classify error and decide retry
                             last_error = result.error_message
-                            error_info = self._classify_error(result.error_message, task)
+                            error_info = self._classify_error(
+                                result.error_message or "Unknown error",
+                                task,
+                                result.status_code,
+                            )
 
-                            if error_info["should_retry"] and attempt < max_attempts - 1:
-                                wait_time = self._get_retry_delay(task, attempt)
+                            retry_limit = 2 if error_info["type"] == "access_denied" else max_attempts
+                            if error_info["should_retry"] and attempt < min(max_attempts, retry_limit) - 1:
+                                wait_time = self._get_retry_delay(
+                                    task, attempt, result.retry_after
+                                )
+                                self.telemetry.record(
+                                    "retry_scheduled",
+                                    date=task.date_str,
+                                    url=task.url,
+                                    attempt=attempt + 1,
+                                    next_attempt=attempt + 2,
+                                    reason=error_info["type"],
+                                    delay_seconds=wait_time,
+                                    max_attempts=max_attempts,
+                                    **identity,
+                                )
                                 self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                                 await asyncio.sleep(wait_time)
                                 self.download_stats['retry_count'] += 1
@@ -407,11 +508,35 @@ class AsyncDownloadManager:
                                     self.logger.info(f"❌ {error_info['type'].title()}: {error_info['user_message']}")
                                 break
 
+                    except asyncio.CancelledError:
+                        raise
+
                     except asyncio.TimeoutError:
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            success=False,
+                            error_type="timeout",
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
+                        )
                         timeout_value = self._get_timeout(task)
                         last_error = f"Server timeout after {timeout_value}s"
                         if attempt < max_attempts - 1:
                             wait_time = self._get_retry_delay(task, attempt)
+                            self.telemetry.record(
+                                "retry_scheduled",
+                                date=task.date_str,
+                                url=task.url,
+                                attempt=attempt + 1,
+                                next_attempt=attempt + 2,
+                                reason="timeout",
+                                delay_seconds=wait_time,
+                                max_attempts=max_attempts,
+                                **identity,
+                            )
                             self.logger.info(f"⏱️ Timeout retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                             await asyncio.sleep(wait_time)
                             self.download_stats['retry_count'] += 1
@@ -421,11 +546,33 @@ class AsyncDownloadManager:
                             break
 
                     except Exception as e:
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            success=False,
+                            error_type=type(e).__name__,
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
+                        )
                         last_error = f"Download error: {e}"
                         error_info = self._classify_error(str(e), task)
 
-                        if error_info["should_retry"] and attempt < max_attempts - 1:
+                        retry_limit = 2 if error_info["type"] == "access_denied" else max_attempts
+                        if error_info["should_retry"] and attempt < min(max_attempts, retry_limit) - 1:
                             wait_time = self._get_retry_delay(task, attempt)
+                            self.telemetry.record(
+                                "retry_scheduled",
+                                date=task.date_str,
+                                url=task.url,
+                                attempt=attempt + 1,
+                                next_attempt=attempt + 2,
+                                reason=error_info["type"],
+                                delay_seconds=wait_time,
+                                max_attempts=max_attempts,
+                                **identity,
+                            )
                             self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts}): {error_info['user_message']}")
                             await asyncio.sleep(wait_time)
                             self.download_stats['retry_count'] += 1
@@ -442,7 +589,8 @@ class AsyncDownloadManager:
                     task=task,
                     success=False,
                     error_message=final_error_info["user_message"],
-                    download_time=time.time() - start_time
+                    download_time=time.time() - start_time,
+                    outcome=final_error_info["type"],
                 )
 
 
@@ -480,17 +628,12 @@ class AsyncDownloadManager:
                 self.logger.info(f"🔍 {request_type} HTTP Request Debug:")
                 self.logger.info(f"  URL: {task.url}")
                 self.logger.info(f"  Timeout: {timeout_value}s")
-                self.logger.info(f"  SSL Verification: Disabled (BSE compatibility)")
+                self.logger.info("  SSL Verification: Enabled")
 
-            # Make HTTP request with SSL handling for BSE
-            ssl_context = None
-            if is_bse_request:
-                # Disable SSL verification for BSE servers
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-            async with self.session.get(task.url, ssl=ssl_context) as response:
+            request_timeout = self._get_timeout_budget()
+            async with self.session.get(
+                task.url, timeout=request_timeout
+            ) as response:
                 if is_bse_request:
                     request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                     self.logger.info(f"  {request_type} Response Status: {response.status}")
@@ -503,10 +646,17 @@ class AsyncDownloadManager:
                     if is_bse_request:
                         request_type = "BSE INDEX" if is_bse_index else "BSE EQ" if is_bse_eq else "BSE"
                         self.logger.error(f"❌ {request_type} HTTP Error: {response.status} - {response.reason}")
-                    raise NetworkError(
-                        f"HTTP {response.status}: {response.reason}",
-                        url=task.url,
-                        status_code=response.status
+                    retry_after = self._parse_retry_after(
+                        response.headers.get("Retry-After")
+                    )
+                    return DownloadResult(
+                        task=task,
+                        success=False,
+                        error_message=f"HTTP {response.status}: {response.reason}",
+                        status_code=response.status,
+                        retry_after=retry_after,
+                        download_time=time.time() - start_time,
+                        outcome=("retryable_transport" if response.status in {408, 425, 429} or response.status >= 500 else "access_blocked" if response.status in {401, 403} else "terminal_not_available" if response.status == 404 else "validation_failed"),
                     )
 
                 # Download to memory
@@ -516,6 +666,20 @@ class AsyncDownloadManager:
                     file_data.extend(chunk)
                     file_size += len(chunk)
 
+                # BSE frequently returns a branded HTML error page with HTTP
+                # 200 for a missing report.  Treat it as a failed download so
+                # parsers never mistake that page for a valid CSV.
+                preview = bytes(file_data).lstrip()[:100].lower()
+                if preview.startswith((b"<!doctype html", b"<html")):
+                    raise NetworkError(
+                        "Server returned HTML instead of the requested report",
+                        url=task.url,
+                        status_code=200,
+                    )
+                await asyncio.to_thread(
+                    self._validate_payload_envelope, bytes(file_data), task.url
+                )
+
                 download_time = time.time() - start_time
 
                 if is_bse_request:
@@ -523,12 +687,13 @@ class AsyncDownloadManager:
                     self.logger.info(f"  ✅ {request_type} Download Success:")
                     self.logger.info(f"    File Size: {file_size} bytes")
                     self.logger.info(f"    Download Time: {download_time:.2f}s")
-                    # Preview first 100 characters
-                    try:
-                        preview = file_data[:100].decode('utf-8', errors='ignore')
-                        self.logger.info(f"    Content Preview: {preview}")
-                    except Exception as e:
-                        self.logger.warning(f"    Could not preview content: {e}")
+                    # Do not decode/log ZIP bytes.  A text preview is useful only
+                    # at DEBUG level and only for a non-archive response.
+                    if bytes(file_data[:2]) != b"PK":
+                        preview_text = bytes(file_data[:100]).decode(
+                            'utf-8', errors='replace'
+                        )
+                        self.logger.debug(f"    Content Preview: {preview_text!r}")
 
                 self.logger.info(f"Downloaded {task.date_str} ({file_size} bytes, {download_time:.2f}s)")
 
@@ -540,16 +705,56 @@ class AsyncDownloadManager:
                     download_time=download_time
                 )
 
-        except Exception as e:
-            download_time = time.time() - start_time
-            error_msg = f"Download attempt failed: {e}"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Preserve the concrete failure for the outer retry state machine.
+            raise
 
-            return DownloadResult(
-                task=task,
-                success=False,
-                error_message=error_msg,
-                download_time=download_time
-            )
+    @staticmethod
+    def _validate_payload_envelope(payload: bytes, url: str) -> None:
+        """Reject retryable empty, truncated, or CRC-invalid ZIP payloads."""
+        if not payload:
+            raise NetworkError("Server returned an empty report payload", url=url)
+        if not payload.startswith(b"PK"):
+            return
+        try:
+            with zipfile.ZipFile(BytesIO(payload)) as archive:
+                members = [item for item in archive.infolist() if not item.is_dir()]
+                if not members or all(item.file_size == 0 for item in members):
+                    raise NetworkError("Server returned an empty ZIP report", url=url)
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise NetworkError(
+                        f"ZIP CRC failure in {bad_member}", url=url
+                    )
+        except NetworkError:
+            raise
+        except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as error:
+            raise NetworkError(
+                f"Server returned a truncated or CRC-invalid ZIP report: {error}",
+                url=url,
+            ) from error
+
+    @staticmethod
+    def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+        """Parse Retry-After delta seconds or an RFC-compliant HTTP date."""
+
+        if value is None:
+            return None
+        try:
+            return max(0.0, float(value.strip()))
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(
+                    0.0,
+                    (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     async def download_multiple(self, tasks: List[DownloadTask]) -> List[DownloadResult]:
         """
@@ -572,6 +777,7 @@ class AsyncDownloadManager:
 
         self.logger.info(f"Starting concurrent download of {len(tasks)} files")
         self._update_progress("Starting downloads...")
+        await self._lag_monitor.start()
 
         try:
             # Create download coroutines
@@ -581,9 +787,11 @@ class AsyncDownloadManager:
             results = await asyncio.gather(*download_coroutines, return_exceptions=True)
 
             # Process results and handle exceptions
-            processed_results = []
+            processed_results: List[DownloadResult] = []
             for i, result in enumerate(results):
-                if isinstance(result, Exception):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                if isinstance(result, BaseException):
                     # Handle exceptions that weren't caught in download_file
                     error_result = DownloadResult(
                         task=tasks[i],
@@ -602,6 +810,14 @@ class AsyncDownloadManager:
             successful = sum(1 for r in processed_results if r.success)
             failed = len(processed_results) - successful
             total_bytes = sum(r.file_size for r in processed_results if r.success)
+            self.telemetry.record(
+                "download_batch_finished",
+                count=len(tasks),
+                successful=successful,
+                failed=failed,
+                duration_ms=total_time * 1000,
+                bytes=total_bytes,
+            )
 
             self.logger.info(
                 f"Download completed: {successful} successful, {failed} failed, "
@@ -615,6 +831,8 @@ class AsyncDownloadManager:
         except Exception as e:
             self.logger.error(f"Error in concurrent download: {e}")
             raise NetworkError(f"Concurrent download failed: {e}")
+        finally:
+            await self._lag_monitor.stop()
 
     def get_download_stats(self) -> Dict[str, Any]:
         """

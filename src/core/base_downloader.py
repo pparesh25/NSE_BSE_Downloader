@@ -6,31 +6,22 @@ Includes date management, folder operations, and data processing interfaces.
 """
 
 import asyncio
+import hashlib
 import logging
+import time
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
-try:
-    import pandas as pd
-    HAS_PANDAS = True
-    DataFrame = pd.DataFrame
-except ImportError:
-    HAS_PANDAS = False
-    pd = None
-    # Create a dummy DataFrame type for type annotations
-    class DataFrame:
-        pass
 
-from .config import Config, ExchangeConfig
+import pandas as pd
+
+from .config import Config
 from .data_manager import DataManager
-from .exceptions import (
-    DownloaderError,
-    DataProcessingError,
-    NetworkError,
-    FileOperationError
-)
-from ..services.memory_append_manager import MemoryAppendManager
+from .exceptions import DataProcessingError, FileOperationError
+from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.pipeline_state import PipelineManifest, SegmentResult
+from ..services.settings import SettingsService
 
 
 class ProgressCallback:
@@ -92,10 +83,10 @@ class BaseDownloader(ABC):
         self.data_manager = DataManager(config)
         self.logger = logging.getLogger(f"{__name__}.{self.exchange_segment}")
 
-        # Initialize memory append manager (shared instance)
-        if not hasattr(BaseDownloader, '_memory_append_manager'):
-            BaseDownloader._memory_append_manager = MemoryAppendManager(config)
-        self.memory_append_manager = BaseDownloader._memory_append_manager
+        self.combined_builder = CombinedFileBuilder(config)
+        self.settings = SettingsService(config)
+        self.pipeline_manifest = PipelineManifest(config.base_data_path)
+        self.last_segment_result: Optional[SegmentResult] = None
 
         # Get exchange-specific configuration
         self.exchange_config = config.get_exchange_config(exchange, segment)
@@ -107,6 +98,10 @@ class BaseDownloader(ABC):
         self.progress_callback: Optional[ProgressCallback] = None
         self.total_files = 0
         self.completed_files = 0
+        self._progress_started_at: Optional[float] = None
+        self.cancel_requested: Optional[Callable[[], bool]] = None
+        self.combined_dependencies: tuple[str, ...] = ()
+        self.combined_required = False
 
     def set_progress_callback(self, callback: ProgressCallback) -> None:
         """Set progress callback for tracking download progress"""
@@ -115,7 +110,22 @@ class BaseDownloader(ABC):
     def _update_progress(self, message: str = "") -> None:
         """Update progress percentage"""
         if self.progress_callback and self.total_files > 0:
+            now = time.monotonic()
+            started = getattr(self, "_progress_started_at", None)
+            if started is None:
+                started = now
+                self._progress_started_at = started
             percentage = int((self.completed_files / self.total_files) * 100)
+            remaining = max(0, self.total_files - self.completed_files)
+            if self.completed_files > 0 and remaining:
+                elapsed = max(0.0, now - started)
+                eta_seconds = elapsed / self.completed_files * remaining
+                eta = (
+                    f"{eta_seconds / 60:.1f}m"
+                    if eta_seconds >= 60
+                    else f"{eta_seconds:.0f}s"
+                )
+                message = f"{message} · {remaining} remaining · ETA {eta}"
             self.progress_callback.on_progress(self.exchange_segment, percentage, message)
 
     def _update_status(self, message: str) -> None:
@@ -142,6 +152,31 @@ class BaseDownloader(ABC):
         # Send to IDE console as warning (appropriate level for notices)
         self.logger.warning(notice)
 
+    def get_download_option(self, name: str, default: Any = None) -> Any:
+        """Return a user preference, falling back to application config."""
+
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            settings = SettingsService(self.config)
+            self.settings = settings
+        return settings.get_download_option(name, default)
+
+    async def _run_pipeline_stage(
+        self, stage: str, function: Callable[..., Any], *args: Any
+    ) -> Any:
+        """Run blocking prepare/persistence work off the asyncio loop."""
+        executors = getattr(self.config, "stage_executors", None)
+        executor = executors.get(stage) if executors else None
+        if executor is not None:
+            return await executor.run(
+                function,
+                *args,
+                stage=f"{self.exchange_segment}:{stage}",
+            )
+        # Direct service use and older integrations still receive loop
+        # isolation, with no global lifecycle assumption.
+        return await asyncio.to_thread(function, *args)
+
     @abstractmethod
     def build_url(self, target_date: date) -> str:
         """
@@ -156,7 +191,12 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def process_downloaded_data(self, file_data: bytes, file_date: date) -> Optional[DataFrame]:
+    def process_downloaded_data(
+        self,
+        file_data: bytes,
+        file_date: date,
+        delivery_data: Optional[bytes] = None,
+    ) -> Optional[pd.DataFrame]:
         """
         Process downloaded file data in memory
 
@@ -170,7 +210,9 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def transform_data(self, df: DataFrame, file_date: date) -> DataFrame:
+    def transform_data(
+        self, df: pd.DataFrame, file_date: date
+    ) -> pd.DataFrame:
         """
         Transform DataFrame according to exchange-specific requirements
 
@@ -222,7 +264,150 @@ class BaseDownloader(ABC):
         suffix = self.exchange_config.file_suffix
         return f"{date_str}{suffix}.{extension}"
 
-    def save_processed_data(self, df: DataFrame, target_date: date) -> Path:
+    def _pipeline_requirements(self) -> tuple[list[str], list[str]]:
+        """Return required and disabled stages for the current user options."""
+
+        required = ["downloaded", "validated", "daily"]
+        disabled = []
+        if self.segment == "EQ" and getattr(
+            self, "combined_required", False
+        ):
+            required.append("combined")
+        else:
+            disabled.append("combined")
+        if self.segment in ("EQ", "SME"):
+            if self.get_download_option("include_delivery_data", True):
+                required.append("delivery")
+            else:
+                disabled.append("delivery")
+            if self.get_download_option("generate_symbol_files", True):
+                required.append("symbols")
+                if self.get_download_option("apply_corporate_actions", True):
+                    required.append("actions")
+                else:
+                    disabled.append("actions")
+            else:
+                disabled.extend(["symbols", "actions"])
+        else:
+            disabled.extend(["symbols", "delivery", "actions"])
+        return required, disabled
+
+    def _core_pipeline_ok(self, result: SegmentResult) -> bool:
+        """Return true when every pre-reconciliation enabled stage is complete."""
+
+        required, _ = self._pipeline_requirements()
+        deferred = {"combined"}
+        if getattr(self.config, "history_batch_coordinator", None) is not None:
+            deferred.update({"symbols", "actions"})
+        core_required = set(required).difference(deferred)
+        if not result.dates:
+            return False
+        for item in result.dates:
+            if item.status == "skipped":
+                continue
+            if not core_required.issubset(item.completed_stages):
+                return False
+            if set(item.failed_stages).difference(deferred):
+                return False
+        return True
+
+    def _is_cancel_requested(self) -> bool:
+        callback = getattr(self, "cancel_requested", None)
+        return bool(callback and callback())
+
+    def _pipeline(self) -> PipelineManifest:
+        """Return the manifest, including for lightweight test subclasses."""
+
+        manifest = getattr(self, "pipeline_manifest", None)
+        if manifest is None:
+            manifest = PipelineManifest(self.config.base_data_path)
+            self.pipeline_manifest = manifest
+        return manifest
+
+    def _combined_builder(self) -> CombinedFileBuilder:
+        """Return the persisted-component builder for lightweight subclasses."""
+
+        builder = getattr(self, "combined_builder", None)
+        if builder is None:
+            builder = CombinedFileBuilder(self.config)
+            self.combined_builder = builder
+        return builder
+
+    def _begin_pipeline_date(self, target_date: date) -> None:
+        required, disabled = self._pipeline_requirements()
+        pipeline = self._pipeline()
+        pipeline.begin(
+            self.exchange,
+            self.segment,
+            target_date,
+            required,
+            disabled,
+        )
+        # A historical rerun may already have a completed combined stage.
+        # Reset it before replacing any component so a crash cannot make the
+        # previous recipe look current.
+        if "combined" in required:
+            pipeline.require_stage(
+                self.exchange, self.segment, target_date, "combined"
+            )
+
+    def _mark_pipeline(
+        self,
+        target_date: date,
+        stage: str,
+        status: str,
+        **metadata: Any,
+    ) -> None:
+        self._pipeline().mark(
+            self.exchange,
+            self.segment,
+            target_date,
+            stage,
+            status,
+            **metadata,
+        )
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(
+                "pipeline_stage",
+                exchange_segment=self.exchange_segment,
+                exchange=self.exchange,
+                segment=self.segment,
+                date=target_date.isoformat(),
+                stage=stage,
+                status=status,
+            )
+
+    def _quarantine_download_payload(
+        self, payload: Optional[bytes], target_date: date, label: str
+    ) -> Optional[Path]:
+        """Keep an unexpected exchange response for diagnosis without publishing it."""
+
+        if not payload:
+            return None
+        digest = hashlib.sha256(payload).hexdigest()
+        directory = (
+            self.config.base_data_path
+            / ".state"
+            / "quarantine"
+            / "source_reports"
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        safe_label = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in label
+        )
+        target = directory / (
+            f"{self.exchange_segment}-{target_date.isoformat()}-"
+            f"{safe_label}-{digest[:12]}.bin"
+        )
+        if not target.exists():
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_bytes(payload)
+            temporary.replace(target)
+        return target
+
+    def save_processed_data(self, df: pd.DataFrame, target_date: date) -> Path:
         """
         Save processed DataFrame to final location
 
@@ -236,81 +421,485 @@ class BaseDownloader(ABC):
         Raises:
             FileOperationError: If save operation fails
         """
+        current_stage = "daily"
+        output_path: Optional[Path] = None
         try:
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
+            component = None
+            if self.segment in {"EQ", "SME", "INDEX"}:
+                component = self._combined_builder().save_component(
+                    self.exchange, self.segment, target_date, df
+                )
 
-            # Save without header and index (as per original code)
-            df.to_csv(output_path, index=False, header=False)
-
-            self.logger.info(f"Saved processed data: {filename}")
-
-            # Store data in memory for append operations
-            self.memory_append_manager.store_data(
-                exchange=self.exchange,
-                segment=self.segment,
-                target_date=target_date,
-                data=df
+            publication_deferred = bool(
+                self.segment == "EQ"
+                and getattr(self, "combined_required", False)
+            )
+            if not publication_deferred:
+                # Save without header and index (as per original code), but
+                # never expose a partially-written file if interrupted.
+                temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+                try:
+                    df.to_csv(temporary, index=False, header=False)
+                    temporary.replace(output_path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            component_metadata = {}
+            if component is not None:
+                component_metadata = {
+                    "component_path": str(component.path),
+                    "component_sha256": component.sha256,
+                }
+            published_sha256 = (
+                component.sha256
+                if publication_deferred and component is not None
+                else self._file_sha256(output_path)
+            )
+            self._mark_pipeline(
+                target_date,
+                "daily",
+                "complete",
+                path=str(output_path),
+                sha256=published_sha256,
+                rows=len(df),
+                publication_deferred=publication_deferred,
+                **component_metadata,
             )
 
-            # Try append operations (non-blocking)
-            append_results = self.memory_append_manager.try_append_operations(target_date)
-            if append_results:
-                self.logger.info(f"Append operations completed: {append_results}")
+            coordinator = getattr(self.config, "date_join_coordinator", None)
+            if coordinator is not None and component is not None:
+                join_result = coordinator.offer(
+                    self.exchange, self.segment, target_date, df
+                )
+                if join_result is not None:
+                    if join_result.ok:
+                        self.logger.info(
+                            "Staged date join published %s rows for %s %s",
+                            join_result.rows,
+                            self.exchange,
+                            target_date,
+                        )
+                    else:
+                        self.logger.error(
+                            "Staged date join failed for %s %s: %s",
+                            self.exchange,
+                            target_date,
+                            join_result.error,
+                        )
 
-            # Special handling for BSE EQ - try direct file append if memory append failed
-            if self.exchange == 'BSE' and self.segment == 'EQ':
-                self._try_direct_bse_append(target_date, output_path)
+            if publication_deferred:
+                self.logger.info(
+                    f"Staged processed data for combined publication: {filename}"
+                )
+            else:
+                self.logger.info(f"Saved processed data: {filename}")
+
+            options = {
+                "generate_symbol_files": self.get_download_option(
+                    "generate_symbol_files", True
+                )
+            }
+            internal_equity = getattr(self, "_internal_equity_data", None)
+            if (
+                options.get("generate_symbol_files", True)
+                and internal_equity is not None
+                and self.segment in ("EQ", "SME")
+            ):
+                current_stage = "symbols"
+                history_batch = getattr(
+                    self.config, "history_batch_coordinator", None
+                )
+                if history_batch is None:
+                    raise RuntimeError(
+                        "Staged history coordinator is unavailable for this run"
+                    )
+                snapshot = history_batch.offer(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    internal_equity,
+                )
+                self._mark_pipeline(
+                    target_date,
+                    "symbols",
+                    "pending",
+                    queued=True,
+                    snapshot_path=str(snapshot),
+                )
+                self.logger.info(
+                    "Queued %s %s rows for run-scoped history batch",
+                    len(internal_equity),
+                    self.exchange,
+                )
 
             return output_path
 
         except Exception as e:
+            from ..services.state_store import StateStoreError
+
+            try:
+                self._mark_pipeline(
+                    target_date, current_stage, "failed", error=str(e)
+                )
+            except Exception:
+                pass
+
+            if isinstance(e, StateStoreError):
+                raise FileOperationError(
+                    f"Repair required before symbol data can be updated: {e}",
+                    file_path=str(output_path) if output_path else None,
+                    operation="symbol_history_repair_required",
+                    details=str(e),
+                ) from e
             raise FileOperationError(
                 f"Failed to save processed data for {target_date}",
-                file_path=str(output_path),
+                file_path=str(output_path) if output_path else None,
                 operation="save_csv"
             ) from e
 
-    def _try_direct_bse_append(self, target_date: date, bse_eq_file_path: Path) -> None:
-        """Try direct BSE INDEX to BSE EQ file append (fallback method)"""
-        try:
-            # Check if BSE append is enabled
-            user_prefs = self.memory_append_manager.user_prefs
-            if not user_prefs.get_bse_index_append_to_eq():
-                self.logger.debug("BSE Index append disabled - skipping direct append")
-                return
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
-            # Look for BSE INDEX file for the same date
-            bse_index_file_path = self.data_path.parent / "INDEX" / f"{target_date.strftime('%Y-%m-%d')}-BSE-INDEX.txt"
+    def _with_pending_delivery_days(self, working_days: List[date]) -> List[date]:
+        """Include older dates whose delivery report was published late."""
 
-            if not bse_index_file_path.exists():
-                self.logger.debug(f"BSE INDEX file not found for direct append: {bse_index_file_path}")
-                return
+        if not self.get_download_option("include_delivery_data", True):
+            return working_days
+        if self.segment not in ("EQ", "SME"):
+            return working_days
 
-            # Check if append already done (look for BSE SENSEX in EQ file)
-            with open(bse_eq_file_path, 'r') as f:
-                eq_content = f.read()
+        from ..services.delivery_state import PendingDeliveryStore
 
-            if "BSE SENSEX" in eq_content:
-                self.logger.debug("BSE INDEX data already appears to be in EQ file - skipping direct append")
-                return
+        pending = PendingDeliveryStore(self.config.base_data_path).dates(
+            self.exchange, self.segment
+        )
+        return sorted(set(working_days).union(pending))
 
-            # Read BSE INDEX data
-            with open(bse_index_file_path, 'r') as f:
-                index_lines = f.readlines()
+    def _with_incomplete_pipeline_days(
+        self, working_days: List[date]
+    ) -> List[date]:
+        """Resume dates left partial by a prior crash or stage failure."""
 
-            if not index_lines:
-                self.logger.warning("BSE INDEX file is empty - skipping direct append")
-                return
+        pending = self._pipeline().incomplete_dates(
+            self.exchange, self.segment
+        )
+        return sorted(set(working_days).union(pending))
 
-            # Append INDEX data to EQ file
-            with open(bse_eq_file_path, 'a') as f:
-                f.writelines(index_lines)
+    async def _download_equity_implementation(self, working_days: List[date]) -> bool:
+        """Shared price + optional delivery workflow for cash-market segments."""
 
-            self.logger.info(f"✅ Direct BSE append completed: Added {len(index_lines)} INDEX rows to {bse_eq_file_path.name}")
+        from ..services.delivery_state import PendingDeliveryStore
+        from ..services.source_resolver import delivery_source, price_source
+        from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
+        from ..utils.date_utils import DateUtils
 
-        except Exception as e:
-            self.logger.error(f"Error in direct BSE append: {e}")
+        days = self._with_pending_delivery_days(working_days)
+        days = self._with_incomplete_pipeline_days(days)
+        self.total_files = len(days)
+        pending_store = PendingDeliveryStore(self.config.base_data_path)
+        include_delivery = self.get_download_option("include_delivery_data", True)
+        success_count = 0
+        processed_days: List[date] = []
+
+        for target_date in days:
+            if self._is_cancel_requested():
+                raise asyncio.CancelledError
+            if (
+                target_date == DateUtils.today_ist()
+                and self.data_manager.is_trading_day(target_date)
+                and not DateUtils.is_data_available_time()
+            ):
+                self.logger.info(
+                    f"Skipping {target_date} (current trading day; data is not ready)"
+                )
+                self._pipeline().skip_date(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    "Current trading-day data is not available yet",
+                )
+                continue
+
+            self._begin_pipeline_date(target_date)
+            self._update_progress(f"Processing {target_date}")
+            price_result = None
+            delivery_data = None
+            validated = False
+            tasks = [DownloadTask(
+                url=self.build_url(target_date),
+                date_str=target_date.isoformat(),
+                target_date=target_date,
+                exchange_segment=self.exchange_segment,
+            )]
+            if include_delivery:
+                tasks.append(DownloadTask(
+                    url=delivery_source(self.exchange, target_date).url,
+                    date_str=f"{target_date.isoformat()} delivery",
+                    target_date=target_date,
+                    exchange_segment=self.exchange_segment,
+                ))
+
+            try:
+                async with AsyncDownloadManager(self.config) as manager:
+                    await self.update_async_session_timeout(
+                        manager, self.config.download_settings.timeout_seconds
+                    )
+                    results = await manager.download_multiple(tasks)
+
+                price_result = results[0] if results else None
+                if not price_result or not price_result.success:
+                    error = (
+                        price_result.error_message if price_result
+                        else "No download result returned"
+                    )
+                    self._report_error(
+                        f"{self.exchange_segment} price report failed for "
+                        f"{target_date}: {error}"
+                    )
+                    self._mark_pipeline(
+                        target_date, "downloaded", "failed", error=error
+                    )
+                    continue
+
+                source = price_source(self.exchange, self.segment, target_date)
+                self._mark_pipeline(
+                    target_date,
+                    "downloaded",
+                    "complete",
+                    sha256=hashlib.sha256(price_result.file_data).hexdigest(),
+                    source_era=source.era,
+                    source_url=source.url,
+                )
+
+                delivery_ready = not include_delivery
+                if include_delivery:
+                    delivery_result = results[1] if len(results) > 1 else None
+                    if delivery_result and delivery_result.success:
+                        delivery_data = delivery_result.file_data
+                        delivery_ready = True
+                        self._mark_pipeline(
+                            target_date,
+                            "delivery",
+                            "complete",
+                            sha256=hashlib.sha256(delivery_data).hexdigest(),
+                        )
+                    else:
+                        pending_store.add(self.exchange, self.segment, target_date)
+                        detail = (
+                            delivery_result.error_message if delivery_result
+                            else "No delivery response returned"
+                        )
+                        self._report_notice(
+                            f"{self.exchange_segment} delivery pending for "
+                            f"{target_date}: {detail}"
+                        )
+                        self._mark_pipeline(
+                            target_date,
+                            "delivery",
+                            "failed",
+                            error=detail,
+                            pending=True,
+                        )
+
+                processed = await self._run_pipeline_stage(
+                    "prepare",
+                    self.process_downloaded_data,
+                    price_result.file_data,
+                    target_date,
+                    delivery_data,
+                )
+                if processed is None:
+                    self._mark_pipeline(
+                        target_date,
+                        "validated",
+                        "failed",
+                        error="Processor returned no data",
+                    )
+                    self._report_error(f"Failed to process data for {target_date}")
+                    continue
+
+                self._mark_pipeline(
+                    target_date, "validated", "complete", rows=len(processed)
+                )
+                validated = True
+                if self._is_cancel_requested():
+                    raise asyncio.CancelledError
+                await self._run_pipeline_stage(
+                    "persist", self.save_processed_data, processed, target_date
+                )
+                if delivery_ready and include_delivery:
+                    pending_store.discard(self.exchange, self.segment, target_date)
+                success_count += 1
+                processed_days.append(target_date)
+                self.completed_files += 1
+                self._update_progress(f"Completed {target_date}")
+            except Exception as error:
+                price_payload = price_result.file_data if price_result else None
+                quarantined = None
+                if not validated:
+                    quarantined = self._quarantine_download_payload(
+                        price_payload, target_date, "price"
+                    )
+                    self._quarantine_download_payload(
+                        delivery_data, target_date, "delivery"
+                    )
+                    try:
+                        self._mark_pipeline(
+                            target_date,
+                            "validated",
+                            "failed",
+                            error=str(error),
+                            quarantine=(
+                                str(quarantined) if quarantined else None
+                            ),
+                        )
+                    except Exception:
+                        pass
+                self._report_error(f"Error processing {target_date}: {error}")
+
+        self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
+        should_apply_actions = (
+            processed_days
+            and not self._is_cancel_requested()
+            and self.get_download_option("apply_corporate_actions", True)
+            and self.get_download_option("generate_symbol_files", True)
+        )
+        history_batch = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if should_apply_actions:
+            if history_batch is None:
+                raise RuntimeError(
+                    "Staged history coordinator is unavailable for corporate actions"
+                )
+            add_sme_suffix = SettingsService(
+                self.config
+            ).preferences.get_sme_add_suffix()
+            history_batch.register_action_window(
+                self.exchange,
+                self.segment,
+                processed_days,
+                add_sme_suffix=add_sme_suffix,
+                timeout=max(
+                    30, self.config.download_settings.timeout_seconds
+                ),
+            )
+        self.last_segment_result = self._pipeline().segment_result(
+            self.exchange, self.segment, days
+        )
+        return self._core_pipeline_ok(self.last_segment_result)
+
+    async def _download_price_implementation(
+        self, working_days: List[date]
+    ) -> bool:
+        """Shared validated workflow for FO and index price-only reports."""
+
+        from ..services.source_resolver import price_source
+        from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
+        from ..utils.date_utils import DateUtils
+
+        days = self._with_incomplete_pipeline_days(working_days)
+        self.total_files = len(days)
+        for target_date in days:
+            if self._is_cancel_requested():
+                raise asyncio.CancelledError
+            if (
+                target_date == DateUtils.today_ist()
+                and self.data_manager.is_trading_day(target_date)
+                and not DateUtils.is_data_available_time()
+            ):
+                self._pipeline().skip_date(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    "Current trading-day data is not available yet",
+                )
+                continue
+
+            self._begin_pipeline_date(target_date)
+            source = price_source(self.exchange, self.segment, target_date)
+            payload: Optional[bytes] = None
+            validated = False
+            try:
+                task = DownloadTask(
+                    url=source.url,
+                    date_str=target_date.isoformat(),
+                    target_date=target_date,
+                    exchange_segment=self.exchange_segment,
+                )
+                async with AsyncDownloadManager(self.config) as manager:
+                    await self.update_async_session_timeout(
+                        manager, self.config.download_settings.timeout_seconds
+                    )
+                    results = await manager.download_multiple([task])
+                result = results[0] if results else None
+                if not result or not result.success:
+                    error = result.error_message if result else "No result returned"
+                    self._mark_pipeline(
+                        target_date, "downloaded", "failed", error=error
+                    )
+                    self._report_error(
+                        f"{self.exchange_segment} report failed for "
+                        f"{target_date}: {error}"
+                    )
+                    continue
+
+                payload = result.file_data
+                self._mark_pipeline(
+                    target_date,
+                    "downloaded",
+                    "complete",
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    source_era=source.era,
+                    source_url=source.url,
+                )
+                processed = await self._run_pipeline_stage(
+                    "prepare", self.process_downloaded_data, payload, target_date
+                )
+                if processed is None or processed.empty:
+                    raise DataProcessingError("Processor returned no data")
+                self._mark_pipeline(
+                    target_date, "validated", "complete", rows=len(processed)
+                )
+                validated = True
+                if self._is_cancel_requested():
+                    raise asyncio.CancelledError
+                await self._run_pipeline_stage(
+                    "persist", self.save_processed_data, processed, target_date
+                )
+                self.completed_files += 1
+                self._update_progress(f"Completed {target_date}")
+            except Exception as error:
+                quarantined = None
+                if not validated:
+                    quarantined = self._quarantine_download_payload(
+                        payload, target_date, "price"
+                    )
+                    try:
+                        self._mark_pipeline(
+                            target_date,
+                            "validated",
+                            "failed",
+                            error=str(error),
+                            quarantine=(
+                                str(quarantined) if quarantined else None
+                            ),
+                        )
+                    except Exception:
+                        pass
+                self._report_error(f"Error processing {target_date}: {error}")
+
+        self.last_segment_result = self._pipeline().segment_result(
+            self.exchange, self.segment, days
+        )
+        self.logger.info(self.last_segment_result.summary())
+        return self._core_pipeline_ok(self.last_segment_result)
 
     def cleanup_temp_files(self) -> None:
         """Clean up temporary files for this downloader (no longer needed)"""
@@ -411,6 +1000,12 @@ class BaseDownloader(ABC):
 
             # Get working days
             working_days = self.get_working_days(start_date, end_date)
+            gap_days = self.data_manager.get_missing_file_dates(
+                self.exchange, self.segment
+            )
+            working_days = sorted(set(working_days).union(gap_days))
+            working_days = self._with_pending_delivery_days(working_days)
+            working_days = self._with_incomplete_pipeline_days(working_days)
 
             if not working_days:
                 self._update_status("No working days in date range")
@@ -425,12 +1020,23 @@ class BaseDownloader(ABC):
             # to handle the actual download logic
             success = await self._download_implementation(working_days)
 
-            if success:
-                self._update_status("Download completed successfully")
-            else:
-                self._update_status("Download completed with errors")
+            result = self.last_segment_result
+            if result is None:
+                result = self._pipeline().segment_result(
+                    self.exchange, self.segment, working_days
+                )
+                self.last_segment_result = result
 
-            return success
+            if success and result.ok:
+                self._update_status(
+                    f"Download completed successfully ({result.summary()})"
+                )
+            else:
+                self._update_status(
+                    f"Download completed with errors ({result.summary()})"
+                )
+
+            return success and result.ok
 
         except Exception as e:
             error_msg = f"Download failed: {e}"

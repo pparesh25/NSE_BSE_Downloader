@@ -9,16 +9,16 @@ Provides a professional donation interface with:
 """
 
 import logging
-from pathlib import Path
-from typing import Optional
+
+from runtime_paths import resource_path
 
 try:
     from PySide6.QtWidgets import (
         QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
         QLineEdit, QFrame, QMessageBox, QApplication
     )
-    from PySide6.QtCore import Qt, Signal
-    from PySide6.QtGui import QPixmap, QFont, QClipboard
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap, QFont
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -255,7 +255,9 @@ class DonateDialog(QDialog):
         """Load static QR code image for UPI payment"""
         try:
             # Load the QR image from resources folder
-            qr_image_path = Path(__file__).parent / "resources" / "QR_UPI.jpeg"
+            qr_image_path = resource_path(
+                "src", "gui", "resources", "QR_UPI.jpeg"
+            )
 
             if qr_image_path.exists():
                 # Load the QR image

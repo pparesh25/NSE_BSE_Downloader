@@ -4,11 +4,14 @@
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pytest-qt>=4.2.0
+pytest-cov>=6.0.0,<8
 
 # Code Quality
-flake8>=6.0.0
-black>=23.0.0
-mypy>=1.0.0
+# Pin the validated lint rule set so CI does not change when Ruff adds defaults.
+ruff==0.13.3
+mypy>=1.10.0,<3
+types-PyYAML>=6.0.0
+types-psutil>=5.9.0
 
 # Documentation
 sphinx>=5.0.0

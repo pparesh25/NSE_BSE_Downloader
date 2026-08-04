@@ -5,13 +5,13 @@ Handles loading and validation of configuration from YAML files.
 Provides cross-platform path resolution and default settings.
 """
 
-import os
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 from .exceptions import ConfigError
+from runtime_paths import default_config_path
 
 
 @dataclass
@@ -31,6 +31,13 @@ class DownloadSettings:
     timeout_seconds: int = 30
     chunk_size: int = 8192
     rate_limit_delay: float = 0.5
+    connect_timeout_seconds: Optional[float] = None
+    read_timeout_seconds: Optional[float] = None
+    attempt_timeout_seconds: Optional[float] = None
+    prepare_workers: int = 2
+    persistence_workers: int = 1
+    stage_queue_size: int = 2
+    prepared_cache_dates: int = 4
 
 
 @dataclass
@@ -66,12 +73,26 @@ class Config:
         Args:
             config_path: Path to configuration file. If None, uses default config.yaml
         """
-        self.config_path = Path(config_path) if config_path else Path("config.yaml")
+        self.config_path = (
+            Path(config_path) if config_path else default_config_path()
+        )
         self._config_data: Dict[str, Any] = {}
         self._exchange_configs: Dict[str, Dict[str, ExchangeConfig]] = {}
+        self._download_settings = DownloadSettings()
+        self._date_settings = DateSettings()
+        self._gui_settings = GUISettings()
+        # Run-scoped Phase 7 services are populated by DownloadWorker.  They
+        # live here explicitly so direct/CLI integrations can inspect or
+        # replace them without relying on undeclared dynamic attributes.
+        self.transport_pool: Any = None
+        self.pipeline_telemetry: Any = None
+        self.stage_executors: Dict[str, Any] = {}
+        self.date_join_coordinator: Any = None
+        self.history_batch_coordinator: Any = None
 
         self.load_config()
         self._validate_config()
+        self._load_typed_settings()
         self._setup_paths()
 
     def load_config(self) -> None:
@@ -127,41 +148,71 @@ class Config:
         # Setup holiday manager (use user home directory)
         from ..utils.holiday_manager import HolidayManager
         user_cache_dir = Path.home() / ".nse_bse_downloader"
-        self.holiday_manager = HolidayManager(user_cache_dir)
+        try:
+            holiday_start_year = int(self.date_settings.base_start_date[:4])
+        except (TypeError, ValueError):
+            holiday_start_year = 2025
+        self.holiday_manager = HolidayManager(
+            user_cache_dir,
+            start_year=holiday_start_year,
+        )
+
+    def _load_typed_settings(self) -> None:
+        """Materialize mutable runtime settings from the YAML configuration.
+
+        Returning a fresh dataclass from each property access made GUI overrides
+        disappear immediately.  These objects deliberately live for the lifetime
+        of the Config instance and are rebuilt only by ``reload_config``.
+        """
+
+        download_data = self._config_data.get('download_settings', {})
+        self._download_settings = DownloadSettings(
+            max_concurrent_downloads=download_data.get('max_concurrent_downloads', 5),
+            retry_attempts=download_data.get('retry_attempts', 3),
+            timeout_seconds=download_data.get('timeout_seconds', 30),
+            chunk_size=download_data.get('chunk_size', 8192),
+            rate_limit_delay=download_data.get('rate_limit_delay', 0.5),
+            connect_timeout_seconds=download_data.get('connect_timeout_seconds'),
+            read_timeout_seconds=download_data.get('read_timeout_seconds'),
+            attempt_timeout_seconds=download_data.get('attempt_timeout_seconds'),
+            prepare_workers=download_data.get('prepare_workers', 2),
+            persistence_workers=download_data.get('persistence_workers', 1),
+            stage_queue_size=download_data.get('stage_queue_size', 2),
+            prepared_cache_dates=download_data.get('prepared_cache_dates', 4),
+        )
+
+        date_data = self._config_data.get('date_settings', {})
+        self._date_settings = DateSettings(
+            base_start_date=date_data.get('base_start_date', '2025-01-01'),
+            weekend_skip=date_data.get('weekend_skip', True),
+            holiday_skip=date_data.get('holiday_skip', True),
+        )
+
+        gui_data = self._config_data.get('gui_settings', {})
+        self._gui_settings = GUISettings(
+            window_title=gui_data.get('window_title', 'NSE/BSE Data Downloader'),
+            window_width=gui_data.get('window_width', 800),
+            window_height=gui_data.get('window_height', 600),
+            default_exchanges=gui_data.get(
+                'default_exchanges', ['NSE_EQ', 'BSE_EQ']
+            ),
+            progress_update_interval=gui_data.get('progress_update_interval', 100),
+        )
 
     @property
     def download_settings(self) -> DownloadSettings:
         """Get download settings"""
-        settings_data = self._config_data.get('download_settings', {})
-        return DownloadSettings(
-            max_concurrent_downloads=settings_data.get('max_concurrent_downloads', 5),
-            retry_attempts=settings_data.get('retry_attempts', 3),
-            timeout_seconds=settings_data.get('timeout_seconds', 30),
-            chunk_size=settings_data.get('chunk_size', 8192),
-            rate_limit_delay=settings_data.get('rate_limit_delay', 0.5)
-        )
+        return self._download_settings
 
     @property
     def date_settings(self) -> DateSettings:
         """Get date settings"""
-        settings_data = self._config_data.get('date_settings', {})
-        return DateSettings(
-            base_start_date=settings_data.get('base_start_date', '2025-01-01'),
-            weekend_skip=settings_data.get('weekend_skip', True),
-            holiday_skip=settings_data.get('holiday_skip', True)
-        )
+        return self._date_settings
 
     @property
     def gui_settings(self) -> GUISettings:
         """Get GUI settings"""
-        settings_data = self._config_data.get('gui_settings', {})
-        return GUISettings(
-            window_title=settings_data.get('window_title', 'NSE/BSE Data Downloader'),
-            window_width=settings_data.get('window_width', 800),
-            window_height=settings_data.get('window_height', 600),
-            default_exchanges=settings_data.get('default_exchanges', ['NSE_EQ', 'BSE_EQ']),
-            progress_update_interval=settings_data.get('progress_update_interval', 100)
-        )
+        return self._gui_settings
 
     def get_exchange_config(self, exchange: str, segment: str) -> ExchangeConfig:
         """
@@ -252,7 +303,9 @@ class Config:
     def reload_config(self) -> None:
         """Reload configuration from file"""
         self.load_config()
+        self._exchange_configs.clear()
         self._validate_config()
+        self._load_typed_settings()
         self._setup_paths()
 
     def __str__(self) -> str:

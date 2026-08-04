@@ -1,5 +1,21 @@
 # NSE/BSE Data Downloader Configuration
 
+app_settings:
+  release_date: "2026-08-04"
+  features:
+    - "Date-aware legacy/current NSE and BSE downloads"
+    - "Delivery volume and percentage for NSE/BSE cash data"
+    - "Open interest and change in OI for NSE futures"
+    - "Corporate-action-adjusted symbol-wise text histories"
+    - "Strict source validation and resumable per-date repair"
+    - "Deterministic restart-safe EQ, SME and Index reconciliation"
+    - "Custom calendar ranges and collapsible GUI sections"
+    - "Official NSE holiday refresh with IST-aware trading dates"
+    - "Cooperative cancellation and typed GUI outcomes"
+    - "Nuitka-safe bundled resources and stable packaged-app identity"
+    - "Responsive default GUI layout and source-mode process identity"
+    - "Python 3.10/3.13 CI gates with enforced test coverage"
+    - "Automatic update notifications"
 
 # Data storage paths
 data_paths:
@@ -21,13 +37,24 @@ download_settings:
   timeout_seconds: 5  # Wait for server response (user configurable)
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
+  # Phase 7 bounded stage defaults; date selection/scheduling is unchanged.
+  prepare_workers: 2
+  persistence_workers: 1
+  stage_queue_size: 2
+  prepared_cache_dates: 4
 
 # Download options for data processing
 download_options:
+  # Extended canonical market data
+  include_delivery_data: true
+  include_fo_open_interest: true
+  generate_symbol_files: true
+  apply_corporate_actions: true
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 
-  # Data Append Options (Memory-based)
+  # Deterministic combined-file options
   sme_append_to_eq: true      # Append NSE SME data to NSE EQ files
   index_append_to_eq: true    # Append NSE Index data to NSE EQ files
   bse_index_append_to_eq: true # Append BSE Index data to BSE EQ files
@@ -41,8 +68,8 @@ date_settings:
 
 # GUI settings
 gui_settings:
-  window_title: "NSE/BSE Data Downloader"
-  window_width: 648
+  window_title: "NSE BSE Data Downloader"
+  window_width: 720
   window_height: 960
   default_exchanges:
     - "NSE_EQ"

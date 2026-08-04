@@ -83,8 +83,34 @@ migration branch.
 
 The first matrix run passed all three functional builds but was rejected during
 independent provenance review because `GITHUB_SHA` identified GitHub's temporary PR
-merge commit. The workflow and packager were corrected to use `SOURCE_COMMIT`, and
-the corrected matrix must pass before its artifacts are accepted as evidence.
+merge commit. The workflow and packager were corrected to use `SOURCE_COMMIT` before
+the accepted run described below.
+
+## Accepted clean matrix evidence
+
+- GitHub Actions run: `30948814245`.
+- Exact source commit: `9dba2aca8179f43cb1875c3288753bfa3fc75698`.
+- macOS 15 ARM64: passed in 16 minutes 25 seconds.
+- Ubuntu 24.04 x64: passed in 17 minutes 48 seconds.
+- Windows Server 2022 x64: passed in 26 minutes 9 seconds.
+- The push and pull-request Quality Gates runs for the same source commit also passed.
+
+The three Actions artifacts were downloaded to an isolated temporary directory and
+audited independently of their workflow steps. Every inner ZIP passed CRC/integrity,
+single-root layout, sidecar checksum, embedded version, exact source-commit,
+executable-mode, native binary-magic, resource-report, and clean-dependency checks.
+
+| Target | ZIP bytes | SHA-256 | Report modules |
+| --- | ---: | --- | ---: |
+| macOS ARM64 | 61,345,459 | `829460eaf5cd3dbcf98e4f94b8799fb2042f0bcb8f8a764ef1977791b849d053` | 1,165 |
+| Windows x64 | 46,382,818 | `ec625b1bea69ae88ac65d6150df6280a9695daa9df143ccb946e378bb66e7715` | 1,150 |
+| Linux x64 | 82,416,308 | `e26da32008e91fc3d6c579d9f1e86ff9e3f97b1e5d758363c6382710633c8aef` | 1,162 |
+
+All reports contained 21 runtime distributions. None included mypy, pytest,
+pydantic, pydantic-core, openpyxl, lxml, Pillow, or PyObjC. The native signatures
+were Mach-O ARM64 (`cffaedfe`), Windows PE (`4d5a`), and Linux ELF (`7f454c46`).
+The accepted files remain temporary Actions artifacts and are not final signed release
+assets.
 
 ## Validation completed after packaging changes
 

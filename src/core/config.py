@@ -37,6 +37,7 @@ class DownloadSettings:
     prepare_workers: int = 2
     persistence_workers: int = 1
     stage_queue_size: int = 2
+    prepared_cache_dates: int = 4
 
 
 @dataclass
@@ -86,6 +87,7 @@ class Config:
         self.transport_pool: Any = None
         self.pipeline_telemetry: Any = None
         self.stage_executors: Dict[str, Any] = {}
+        self.date_join_coordinator: Any = None
 
         self.load_config()
         self._validate_config()
@@ -175,6 +177,7 @@ class Config:
             prepare_workers=download_data.get('prepare_workers', 2),
             persistence_workers=download_data.get('persistence_workers', 1),
             stage_queue_size=download_data.get('stage_queue_size', 2),
+            prepared_cache_dates=download_data.get('prepared_cache_dates', 4),
         )
 
         date_data = self._config_data.get('date_settings', {})

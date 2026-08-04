@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import hashlib
+from io import StringIO
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -158,6 +159,15 @@ class CombinedFileBuilder:
     @staticmethod
     def _number(values: pd.Series) -> pd.Series:
         return pd.to_numeric(values.astype("object"), errors="coerce")
+
+    @staticmethod
+    def lexical_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        """Match the lexical representation produced by component reload."""
+
+        stream = StringIO()
+        frame.to_csv(stream, index=False)
+        stream.seek(0)
+        return pd.read_csv(stream, dtype=str, keep_default_na=False)
 
     @staticmethod
     def _validate_component_frame(
@@ -329,6 +339,52 @@ class CombinedFileBuilder:
                 frames[segment] = self.load_component(
                     exchange, segment, target_date
                 )
+        except Exception as error:
+            message = (
+                str(error)
+                if isinstance(error, (CombinedBuildError, FileOperationError))
+                else f"Combined reconciliation failed: {error}"
+            )
+            return self.record_failure(exchange, target_date, ordered, message)
+        return self.reconcile_frames(
+            exchange, target_date, ordered, frames
+        )
+
+    def reconcile_frames(
+        self,
+        exchange: str,
+        target_date: date,
+        dependencies: Iterable[str],
+        frames: dict[str, pd.DataFrame],
+    ) -> CombinedBuildResult:
+        """Publish from prepared frames while retaining persisted fallback."""
+
+        exchange = exchange.upper()
+        if exchange not in self.COMPONENT_ORDER:
+            raise ValueError(f"Unsupported combined exchange: {exchange}")
+        allowed = self.COMPONENT_ORDER[exchange][1:]
+        requested = tuple(dict.fromkeys(value.upper() for value in dependencies))
+        invalid = set(requested).difference(allowed)
+        if invalid:
+            raise ValueError(
+                f"Unsupported {exchange} combined components: {sorted(invalid)}"
+            )
+        ordered = tuple(value for value in allowed if value in requested)
+        self._ensure_pipeline_date(exchange, target_date)
+
+        try:
+            required = ("EQ", *ordered)
+            prepared = {}
+            for segment in required:
+                frame = frames.get(segment)
+                if frame is None:
+                    frame = self.load_component(exchange, segment, target_date)
+                self._validate_component_frame(
+                    exchange, segment, target_date, frame
+                )
+                prepared[segment] = frame
+
+            frames = prepared
             base_columns = list(frames["EQ"].columns)
             if base_columns not in (
                 EQUITY_DAILY_COLUMNS,

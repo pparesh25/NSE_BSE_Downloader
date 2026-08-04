@@ -35,6 +35,7 @@ from .donate_dialog import DonateDialog
 from ..core.base_downloader import BaseDownloader, ProgressCallback
 from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.date_join_coordinator import DateJoinCoordinator
 from ..services.pipeline_telemetry import PipelineTelemetry
 from ..services.settings import SettingsService
 from ..utils.transport_pool import TransportPool
@@ -322,6 +323,22 @@ class DownloadWorker(QThread):
         self.config.transport_pool = transport_pool
         self.config.pipeline_telemetry = PipelineTelemetry()
         settings = self.config.download_settings
+        staged_engine = getattr(self.config, "pipeline_engine", "legacy") == "staged"
+        if staged_engine:
+            dependencies = {
+                exchange: CombinedFileBuilder.dependencies_from_options(
+                    exchange, self.append_options, self.selected_exchanges
+                )
+                for exchange in ("NSE", "BSE")
+            }
+            self.config.date_join_coordinator = DateJoinCoordinator(
+                self.config,
+                dependencies,
+                max_cache_dates=getattr(settings, "prepared_cache_dates", 4),
+                telemetry=self.config.pipeline_telemetry,
+            )
+        else:
+            self.config.date_join_coordinator = None
         self.config.stage_executors = {
             "prepare": BoundedStageExecutor(
                 name="prepare",
@@ -363,7 +380,11 @@ class DownloadWorker(QThread):
         settled = dict(zip(self._tasks, results))
 
         if not self.is_cancel_requested():
-            self._reconcile_combined_outputs(settled)
+            if staged_engine:
+                self._finalize_staged_outputs()
+            else:
+                self._reconcile_combined_outputs(settled)
+        self.config.date_join_coordinator = None
 
         outcomes = []
         for exchange, result in settled.items():
@@ -379,6 +400,38 @@ class DownloadWorker(QThread):
 
         self.final_outcome = self._classify_overall_outcome(outcomes)
         return self.final_outcome == GUIOutcome.SUCCESS
+
+    def _finalize_staged_outputs(self) -> None:
+        """Finalize unresolved staged dates and refresh EQ structured results."""
+
+        coordinator = getattr(self.config, "date_join_coordinator", None)
+        if coordinator is None:
+            return
+        results = coordinator.finalize()
+        for result in results:
+            name = f"{result.exchange}_EQ"
+            if result.ok:
+                self.status_updated.emit(
+                    name,
+                    f"Staged combined publication: {result.rows} rows from "
+                    f"{', '.join(result.components)}",
+                )
+            else:
+                self.error_occurred.emit(
+                    name,
+                    f"Staged combined publication failed for "
+                    f"{result.target_date}: {result.error}",
+                )
+        for exchange in ("NSE", "BSE"):
+            name = f"{exchange}_EQ"
+            downloader = self.downloaders.get(name)
+            current = getattr(downloader, "last_segment_result", None)
+            if downloader is None or current is None:
+                continue
+            dates = [item.target_date for item in current.dates]
+            downloader.last_segment_result = coordinator.builder.pipeline.segment_result(
+                exchange, "EQ", dates
+            )
 
     def _classify_segment_outcome(
         self, exchange: str, result: object

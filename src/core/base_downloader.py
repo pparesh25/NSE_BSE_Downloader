@@ -432,6 +432,27 @@ class BaseDownloader(ABC):
                 **component_metadata,
             )
 
+            coordinator = getattr(self.config, "date_join_coordinator", None)
+            if coordinator is not None and component is not None:
+                join_result = coordinator.offer(
+                    self.exchange, self.segment, target_date, df
+                )
+                if join_result is not None:
+                    if join_result.ok:
+                        self.logger.info(
+                            "Staged date join published %s rows for %s %s",
+                            join_result.rows,
+                            self.exchange,
+                            target_date,
+                        )
+                    else:
+                        self.logger.error(
+                            "Staged date join failed for %s %s: %s",
+                            self.exchange,
+                            target_date,
+                            join_result.error,
+                        )
+
             if publication_deferred:
                 self.logger.info(
                     f"Staged processed data for combined publication: {filename}"

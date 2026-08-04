@@ -41,6 +41,7 @@ download_settings:
   prepare_workers: 2
   persistence_workers: 1
   stage_queue_size: 2
+  prepared_cache_dates: 4
 
 # Download options for data processing
 download_options:

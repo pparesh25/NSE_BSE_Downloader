@@ -1058,6 +1058,7 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_status_display)
         self.status_timer.start(1000)  # Update every second
+        QTimer.singleShot(0, self._fit_window_to_sections)
 
     def init_ui(self):
         """Initialize user interface"""
@@ -1167,6 +1168,39 @@ class MainWindow(QMainWindow):
     def on_section_toggled(self, section: str, expanded: bool) -> None:
         """Remember which panels the user wants open."""
         self.user_prefs.set_section_state(section, expanded)
+        QTimer.singleShot(0, self._fit_window_to_sections)
+
+    def _fit_window_to_sections(self) -> None:
+        """Fit utility-window height to visible panels within screen bounds."""
+
+        if self.isMaximized() or self.isFullScreen():
+            return
+        scroll_area = self.centralWidget()
+        if not isinstance(scroll_area, QScrollArea):
+            return
+        content = scroll_area.widget()
+        layout = content.layout() if content is not None else None
+        if layout is None:
+            return
+        layout.activate()
+        chrome_height = (
+            self.menuBar().sizeHint().height()
+            + self.statusBar().sizeHint().height()
+            + 12
+        )
+        target = layout.sizeHint().height() + chrome_height
+        screen = self.screen()
+        screen_limit = (
+            int(screen.availableGeometry().height() * 0.92)
+            if screen is not None
+            else self.maximumHeight()
+        )
+        target = max(
+            self.minimumHeight(),
+            min(target, self.maximumHeight(), screen_limit),
+        )
+        if abs(self.height() - target) > 1:
+            self.resize(self.width(), target)
 
     def expand_all_sections(self) -> None:
         for section in self.collapsible_sections.values():
@@ -1444,9 +1478,12 @@ class MainWindow(QMainWindow):
         )
         extended_grid.addWidget(self.corporate_actions_checkbox, 1, 1)
 
-        self.legacy_output_checkbox = QCheckBox("Legacy 7-column output")
+        self.legacy_output_checkbox = QCheckBox(
+            "7-column compatibility output"
+        )
         self.legacy_output_checkbox.setToolTip(
-            "Compatibility mode: omit delivery and open-interest columns"
+            "For older software only: daily EQ/SME files omit delivery fields; "
+            "FO files omit open-interest fields. Symbol histories are unchanged."
         )
         self.legacy_output_checkbox.setChecked(
             data_options["legacy_seven_column_output"]

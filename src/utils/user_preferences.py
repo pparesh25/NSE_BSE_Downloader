@@ -13,7 +13,7 @@ from datetime import date, timedelta
 
 from .date_utils import DateUtils
 
-CURRENT_LAYOUT_VERSION = 2
+CURRENT_LAYOUT_VERSION = 3
 RESPONSIVE_WINDOW_WIDTH = 720
 
 
@@ -67,7 +67,7 @@ class UserPreferences:
                 "window_height": 850,
                 "min_window_width": 680,
                 "max_window_width": 1400,
-                "min_window_height": 750,
+                "min_window_height": 420,
                 "max_window_height": 1000,
                 "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update"),
                 "date_selection": {
@@ -232,8 +232,8 @@ class UserPreferences:
         except (TypeError, ValueError):
             layout_version = 1
         if layout_version < int(gui_defaults["layout_version"]):
-            # Migrate the original narrow fixed-width window without
-            # discarding the user's height or disclosure preferences.
+            # Migrate fixed-size layouts without discarding the user's saved
+            # height or disclosure preferences.
             gui["window_width"] = max(
                 RESPONSIVE_WINDOW_WIDTH,
                 int(gui_defaults["window_width"]),
@@ -241,6 +241,8 @@ class UserPreferences:
             )
             gui["min_window_width"] = gui_defaults["min_window_width"]
             gui["max_window_width"] = gui_defaults["max_window_width"]
+            gui["min_window_height"] = gui_defaults["min_window_height"]
+            gui["max_window_height"] = gui_defaults["max_window_height"]
         gui["layout_version"] = gui_defaults["layout_version"]
         for key in (
             "min_window_width", "max_window_width",

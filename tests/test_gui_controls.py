@@ -34,9 +34,11 @@ def test_collapsible_section_hides_content_and_emits_state():
 
     assert section.is_expanded()
     assert not content.isHidden()
+    assert section.toggle_button.property("sectionState") == "expanded"
     section.set_expanded(False)
     assert not section.is_expanded()
     assert content.isHidden()
+    assert section.toggle_button.property("sectionState") == "collapsed"
     assert changes[-1] == ("sample", False)
 
 

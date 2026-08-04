@@ -14,6 +14,33 @@ class CollapsibleSection(QWidget):
     """A keyboard-accessible header that shows or hides one content widget."""
 
     toggled = Signal(str, bool)
+    HEADER_STYLE = """
+        QToolButton {
+            font-weight: 600;
+            text-align: left;
+            color: #35434d;
+            padding: 7px 9px;
+            border: 1px solid #cbd2d7;
+            border-radius: 5px;
+            background-color: #f3f5f6;
+        }
+        QToolButton:hover {
+            background-color: #edf1f3;
+            border-color: #aebbc4;
+        }
+        QToolButton:focus {
+            border-color: #5f879f;
+        }
+        QToolButton[sectionState="expanded"] {
+            color: #23465a;
+            background-color: #e8f0f4;
+            border-color: #9eb5c3;
+        }
+        QToolButton[sectionState="expanded"]:hover {
+            background-color: #e1ebf0;
+            border-color: #829fac;
+        }
+    """
 
     def __init__(
         self,
@@ -47,11 +74,7 @@ class CollapsibleSection(QWidget):
         self.toggle_button.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self.toggle_button.setStyleSheet(
-            "QToolButton { font-weight: 600; text-align: left; "
-            "padding: 6px; border: 1px solid #c8c8c8; "
-            "border-radius: 4px; background: #eeeeee; }"
-        )
+        self.toggle_button.setStyleSheet(self.HEADER_STYLE)
         self.toggle_button.toggled.connect(self._on_toggled)
 
         content.setObjectName(f"sectionContent_{key}")
@@ -76,6 +99,12 @@ class CollapsibleSection(QWidget):
 
     def _apply_state(self, expanded: bool) -> None:
         self.content.setVisible(expanded)
+        self.toggle_button.setProperty(
+            "sectionState", "expanded" if expanded else "collapsed"
+        )
+        style = self.toggle_button.style()
+        style.unpolish(self.toggle_button)
+        style.polish(self.toggle_button)
         vertical_policy = (
             (
                 QSizePolicy.Policy.Expanding

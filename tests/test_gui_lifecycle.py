@@ -234,6 +234,9 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     assert window.end_date_edit.width() >= 145
     assert window.donate_button.isVisibleTo(window)
     assert window.update_check_timer.isActive()
+    assert window.legacy_output_checkbox.text() == (
+        "7-column compatibility output"
+    )
     donate_right = window.donate_button.mapTo(
         scroll_area.viewport(), window.donate_button.rect().bottomRight()
     ).x()
@@ -242,6 +245,17 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     ).x()
     assert donate_right <= scroll_area.viewport().width()
     assert end_date_right <= scroll_area.viewport().width()
+
+    window.expand_all_sections()
+    app.processEvents()
+    window._fit_window_to_sections()
+    expanded_height = window.height()
+    window.collapse_all_sections()
+    app.processEvents()
+    window._fit_window_to_sections()
+    collapsed_height = window.height()
+    assert collapsed_height < expanded_height
+    assert collapsed_height >= window.minimumHeight()
 
     window.close()
     assert not window.update_check_timer.isActive()

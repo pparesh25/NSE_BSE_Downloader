@@ -73,11 +73,12 @@ def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(
     settings = SettingsService(_SettingsConfig()).preferences
     gui = settings.get_gui_settings()
 
-    assert gui["layout_version"] == 2
+    assert gui["layout_version"] == 3
     assert gui["window_width"] == 720
     assert gui["window_height"] == 910
     assert gui["min_window_width"] == 680
     assert gui["max_window_width"] == 1400
+    assert gui["min_window_height"] == 420
     assert not settings.get_section_states()["options"]
 
 

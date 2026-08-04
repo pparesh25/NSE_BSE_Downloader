@@ -1,5 +1,7 @@
 import hashlib
+import os
 from pathlib import Path
+import stat
 import zipfile
 
 from src.utils.update_checker import UpdateChecker
@@ -169,3 +171,30 @@ def test_update_extraction_replaces_existing_staging_atomically(tmp_path):
     assert (extract_to / "project-1.2.0" / "main.py").is_file()
     assert not (extract_to / "old.txt").exists()
     assert not (tmp_path / "extract.previous").exists()
+
+
+def test_update_extraction_restores_only_archived_executable_bits(tmp_path):
+    archive_path = tmp_path / "executable.zip"
+    executable = zipfile.ZipInfo("project-1.2.0/NSE_BSE_Downloader")
+    executable.create_system = 3
+    executable.external_attr = (stat.S_IFREG | 0o755) << 16
+    regular = zipfile.ZipInfo("project-1.2.0/config.yaml")
+    regular.create_system = 3
+    regular.external_attr = (stat.S_IFREG | 0o666) << 16
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(executable, b"binary")
+        archive.writestr(regular, b"settings")
+
+    checker = UpdateChecker(current_version="1.1.0")
+    success, result = checker.extract_update(archive_path, tmp_path / "extract")
+
+    assert success, result
+    extracted_root = Path(result)
+    executable_mode = stat.S_IMODE(
+        (extracted_root / "NSE_BSE_Downloader").stat().st_mode
+    )
+    regular_mode = stat.S_IMODE((extracted_root / "config.yaml").stat().st_mode)
+    assert executable_mode & 0o111 == 0o111
+    assert os.access(extracted_root / "NSE_BSE_Downloader", os.X_OK)
+    assert regular_mode & 0o111 == 0
+    assert regular_mode & 0o022 == 0

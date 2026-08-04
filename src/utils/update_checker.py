@@ -456,6 +456,28 @@ class UpdateChecker:
             raise ValueError("Unsafe update archive must contain one top-level folder")
         return next(iter(top_levels))
 
+    @staticmethod
+    def _restore_executable_permissions(
+        archive: zipfile.ZipFile,
+        staging: Path,
+    ) -> None:
+        """Restore only safe executable bits lost by ``ZipFile.extractall``."""
+
+        for member in archive.infolist():
+            archived_mode = (member.external_attr >> 16) & 0o777
+            executable_bits = archived_mode & 0o111
+            if member.is_dir() or not executable_bits:
+                continue
+            relative = PurePosixPath(member.filename.replace("\\", "/"))
+            extracted = staging.joinpath(*relative.parts)
+            if not extracted.is_file() or extracted.is_symlink():
+                raise ValueError(
+                    f"Executable update member was not extracted safely: "
+                    f"{member.filename!r}"
+                )
+            current_mode = stat.S_IMODE(extracted.stat().st_mode)
+            extracted.chmod(current_mode | executable_bits)
+
     def extract_update(self, zip_path: Path, extract_to: Optional[Path] = None) -> Tuple[bool, str]:
         """
         Extract downloaded update ZIP file
@@ -482,6 +504,7 @@ class UpdateChecker:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 top_level = self._validate_archive(zip_ref)
                 zip_ref.extractall(staging)
+                self._restore_executable_permissions(zip_ref, staging)
 
             staged_folder = staging / top_level
             if not staged_folder.is_dir():

@@ -5,8 +5,8 @@ Contains application version and build information.
 """
 
 __version__ = "1.1.0"
-__build_date__ = "2026-07-31"
-__build_number__ = 25
+__build_date__ = "2026-08-04"
+__build_number__ = 26
 
 # Release automation must replace both values together.  The desktop updater
 # remains notification-only while either field is blank, rather than executing
@@ -34,6 +34,8 @@ VERSION_HISTORY = {
             "Remembered automatic-update, skipped-version and validated effective settings",
             "Cooperative GUI cancellation with typed per-segment completion outcomes",
             "Nuitka-safe resource paths, stable app identity and guarded packaging dry run",
+            "Responsive default GUI layout with readable macOS source-process identity",
+            "Python 3.10/3.13 CI quality gates with enforced 70 percent coverage",
             "Legacy 7-column compatibility option"
         ],
         "bug_fixes": [
@@ -48,7 +50,8 @@ VERSION_HISTORY = {
             "Removed forced QThread termination during Stop and application close",
             "Prevented stale hard-coded holidays and host-timezone drift from selecting the wrong trading date",
             "Preserved update preferences through the same config and user-setting precedence path",
-            "Removed working-directory and duplicate version-data assumptions from packaged execution"
+            "Removed working-directory and duplicate version-data assumptions from packaged execution",
+            "Kept both date controls and the Donate action visible in the default window"
         ]
     },
 

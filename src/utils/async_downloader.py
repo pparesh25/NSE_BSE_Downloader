@@ -14,13 +14,12 @@ import logging
 import random
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from pathlib import Path
-from typing import List, Optional, Callable, Dict, Any, Tuple
+from typing import List, Optional, Callable, Dict, Any
 from dataclasses import dataclass
 import time
 
 from ..core.config import Config
-from ..core.exceptions import NetworkError, FileOperationError
+from ..core.exceptions import NetworkError
 
 
 @dataclass

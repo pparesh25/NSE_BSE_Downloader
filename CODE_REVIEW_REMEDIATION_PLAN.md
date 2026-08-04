@@ -86,13 +86,27 @@ pathsને પ્રમાણિત કરતી નથી.
   resource/dependency/metadata validate કરીને quoted command જ બતાવે છે. Compilation
   માટે explicit `--build` અને cleanup માટે અલગ `--clean` જરૂરી છે. આ તબક્કે userની
   સૂચના મુજબ કોઈ Nuitka build ચલાવાયો નથી.
-- બંને envમાં suite `93 passed`; macOS dry-run બંને Python 3.10/3.13 envમાં pass અને
-  `dist/` artifact બન્યો નથી. Strict committed mypy config હવે `0` errors/39
-  source files pass કરે છે. Current overall coverage હજુ `64%` છે, એટલે Phase 6
-  complete નથી.
+- બંને envમાં packaging-preparation suite `93 passed`; macOS dry-run બંને Python
+  3.10/3.13 envમાં pass અને `dist/` artifact બન્યો નથી. Strict committed mypy
+  config `0` errors/39 source files pass કરે છે.
+- Phase 6 quality gate: legacy/current downloader adapters, delivery/OI contract,
+  SME filename era, HTTP/file/memory safety, CLI entry point અને responsive GUIના
+  regression tests સાથે બંને Miniforge envમાં suite `126 passed` અને
+  `opentrader313`માં overall coverage `71.1%` થયું.
+  GitHub Actions Python 3.10/3.13 matrixમાં 70% minimum coverage તથા full Ruff,
+  mypy અને no-build Nuitka dry-run enforce કરે છે.
+- Default GUI width 720px છે; legacy 650px preferences one-time migrate થાય છે,
+  બંને date editors પૂર્ણ દેખાય છે અને Donate action Refreshની બાજુમાં રહે છે.
+  Qt window/display name અને macOS source process title હવે
+  `NSE BSE Data Downloader` છે. `opentrader313` native GUI capture અને OS process
+  inspection બંને pass થયા.
+- Userની સૂચના મુજબ actual Nuitka compilation/build હજી ચલાવાયો નથી; તેથી signing,
+  notarization, packaged fresh-user smoke અને immutable release asset અલગ explicit
+  release phaseમાં બાકી છે.
 
-P0-1, P0-2, P0-3 અને Phase 3–5 માટે regression guards હવે હાજર છે. આગળનું
-release-blocking કાર્ય Phase 6નું coverage/type/build/release-quality hardening છે.
+P0-1, P0-2, P0-3 અને Phase 3–6 source/quality preparation માટે regression guards
+હવે હાજર છે. આગળનું release-blocking કાર્ય માત્ર userની અલગ મંજૂરી પછી actual
+native build, signing/notarization, packaged-app અને fresh-user release validation છે.
 
 ## Severity અર્થ
 

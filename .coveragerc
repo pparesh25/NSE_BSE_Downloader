@@ -1,0 +1,14 @@
+[run]
+source =
+    src
+    main
+    runtime_paths
+    runtime_identity
+    app_metadata
+    version
+
+[report]
+fail_under = 70
+precision = 1
+show_missing = True
+skip_covered = True

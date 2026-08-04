@@ -8,11 +8,10 @@ Provides file operation utilities including:
 - File format conversions
 """
 
-import os
 import shutil
 import zipfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import logging
 
 from ..core.exceptions import FileOperationError

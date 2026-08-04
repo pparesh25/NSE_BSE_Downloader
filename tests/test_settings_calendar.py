@@ -54,6 +54,33 @@ def test_settings_precedence_and_invalid_user_values_are_bounded(
     assert "unknown_section" not in saved.preferences
 
 
+def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_dir = tmp_path / ".nse_bse_downloader"
+    config_dir.mkdir()
+    (config_dir / "user_preferences.json").write_text(json.dumps({
+        "gui_settings": {
+            "window_width": 648,
+            "window_height": 910,
+            "min_window_width": 550,
+            "max_window_width": 650,
+            "section_states": {"options": False},
+        }
+    }), encoding="utf-8")
+
+    settings = SettingsService(_SettingsConfig()).preferences
+    gui = settings.get_gui_settings()
+
+    assert gui["layout_version"] == 2
+    assert gui["window_width"] == 720
+    assert gui["window_height"] == 910
+    assert gui["min_window_width"] == 680
+    assert gui["max_window_width"] == 1400
+    assert not settings.get_section_states()["options"]
+
+
 def test_date_utils_use_ist_and_injected_clock():
     before_release = datetime(2026, 7, 31, 12, 29, tzinfo=timezone.utc)
     after_release = datetime(2026, 7, 31, 12, 31, tzinfo=timezone.utc)

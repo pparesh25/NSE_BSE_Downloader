@@ -23,6 +23,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - IST-aware trading dates and a 24-hour cached official NSE holiday calendar.
 - Cooperative Stop/close behavior with success, partial, pending, warning,
   repair-required, cancelled and failed outcomes.
+- Responsive 720-pixel default window with complete date controls and Donate
+  action kept beside the main controls.
 - Automatic/manual version checks, remembered skipped versions and a reset action.
 
 Daily bhavcopy files remain official unadjusted market records. Corporate-action adjustments are applied only to symbol-wise histories.
@@ -39,6 +41,8 @@ python main.py
 ```
 
 Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
+Source-mode launches also set the process title to **NSE BSE Data Downloader**;
+packaged releases use the same native product and bundle identity.
 
 ## Nuitka packaging preparation
 
@@ -218,6 +222,17 @@ commits, failed history publication, corrupt JSON/CSV state, unexpected history
 revisions and rebuilds from checksummed raw snapshots. Lifecycle coverage also
 checks cooperative cancellation/window close, settings precedence, skipped
 updates, IST boundaries, official-calendar parsing, TTL refresh and stale fallback.
+
+GitHub Actions runs the suite on Python 3.10 and 3.13 and fails below 70%
+coverage. Ruff, mypy and a no-build Nuitka command validation are separate
+release gates. The equivalent local commands are:
+
+```bash
+python -m ruff check .
+python -m mypy src main.py app_metadata.py runtime_paths.py runtime_identity.py build_nuitka_cross_platform.py
+python -m pytest --cov=src --cov=main --cov=runtime_paths --cov=runtime_identity --cov=app_metadata --cov=version --cov-fail-under=70
+python build_nuitka_cross_platform.py --target linux
+```
 They also verify bundle-root config/QR lookup, compiled-module version detection,
 platform-specific Nuitka command generation and the default no-build guard. The
 strict project mypy configuration currently passes all 39 source files.

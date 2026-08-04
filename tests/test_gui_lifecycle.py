@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea
 from PySide6.QtCore import QEventLoop, QTimer
 
 from src.core.config import Config
@@ -188,4 +188,34 @@ def test_window_close_requests_safe_stop_without_terminating(
     worker.running = False
     window.download_worker = None
     window._close_after_workers = False
+    window.close()
+
+
+def test_default_window_keeps_dates_and_donate_action_visible(
+    tmp_path, monkeypatch
+):
+    app = _application()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config = Config("config.yaml")
+    config.base_data_path = tmp_path / "data"
+    window = MainWindow(config)
+    window.show()
+    app.processEvents()
+
+    scroll_area = window.centralWidget()
+    assert isinstance(scroll_area, QScrollArea)
+    assert window.width() >= 720
+    assert window.windowTitle() == "NSE BSE Data Downloader"
+    assert window.start_date_edit.width() >= 145
+    assert window.end_date_edit.width() >= 145
+    assert window.donate_button.isVisibleTo(window)
+    donate_right = window.donate_button.mapTo(
+        scroll_area.viewport(), window.donate_button.rect().bottomRight()
+    ).x()
+    end_date_right = window.end_date_edit.mapTo(
+        scroll_area.viewport(), window.end_date_edit.rect().bottomRight()
+    ).x()
+    assert donate_right <= scroll_area.viewport().width()
+    assert end_date_right <= scroll_area.viewport().width()
+
     window.close()

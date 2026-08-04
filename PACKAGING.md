@@ -27,6 +27,8 @@ do not install packages, clean directories or invoke Nuitka compilation.
 The dry run is also covered by `tests/test_packaging_readiness.py`.
 Static typing can be checked independently with `python -m mypy`; the committed
 configuration passes all source modules without suppressing project errors.
+The CI matrix repeats tests on Python 3.10/3.13, enforces at least 70% coverage,
+and runs Ruff, mypy and the Linux packaging dry run.
 
 ## Build environment preparation
 
@@ -75,6 +77,11 @@ not the process working directory.
 - Bundle ID: `com.github.pparesh25.NSEBSEDownloader`
 - GUI app mode with multiple instances prohibited
 - Compilation report target: `dist/nuitka-compilation-report.xml`
+
+Qt application metadata, the main-window title and the source-mode process
+title all use the same product identity. `setproctitle` makes interpreted runs
+readable in macOS process viewers; a future Nuitka `.app` will provide the
+native executable/bundle identity.
 
 Before a distributable release, the remaining gates are:
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from src.core.config import Config
 from src.gui.main_window import MainWindow
 from runtime_paths import default_config_path
+from runtime_identity import configure_process_identity
 from version import get_version
 from app_metadata import (
     APP_NAME,
@@ -160,6 +161,7 @@ def run_gui_mode(config_path: str):
     os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
     os.environ['QT_SCALE_FACTOR'] = '1'
 
+    configure_process_identity()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(PRODUCT_NAME)

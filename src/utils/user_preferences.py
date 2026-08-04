@@ -13,6 +13,9 @@ from datetime import date, timedelta
 
 from .date_utils import DateUtils
 
+CURRENT_LAYOUT_VERSION = 2
+RESPONSIVE_WINDOW_WIDTH = 720
+
 
 class UserPreferences:
     """
@@ -59,10 +62,11 @@ class UserPreferences:
                 "bse_index_append_to_eq": False
             },
             "gui_settings": {
-                "window_width": 576,
+                "layout_version": CURRENT_LAYOUT_VERSION,
+                "window_width": RESPONSIVE_WINDOW_WIDTH,
                 "window_height": 850,
-                "min_window_width": 550,
-                "max_window_width": 650,
+                "min_window_width": 680,
+                "max_window_width": 1400,
                 "min_window_height": 750,
                 "max_window_height": 1000,
                 "last_download_location": str(Path.home() / "Downloads" / "NSE_BSE_Update"),
@@ -130,11 +134,8 @@ class UserPreferences:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     saved_prefs = json.load(f)
 
-                # Merge with defaults (in case new options were added)
-                merged_prefs = self._merge_preferences(self.default_preferences, saved_prefs)
-
                 self.logger.info(f"Loaded user preferences from: {self.config_file}")
-                return self._validate_preferences(merged_prefs)
+                return self._validate_preferences(saved_prefs)
             else:
                 self.logger.info("No existing preferences found, using defaults")
                 return self._validate_preferences({})
@@ -206,6 +207,7 @@ class UserPreferences:
     def _validate_preferences(self, values: Dict[str, Any]) -> Dict[str, Any]:
         """Return a schema-bounded, type-safe preference snapshot."""
 
+        incoming_gui = values.get("gui_settings", {})
         merged = self._merge_preferences(self.default_preferences, values)
         defaults = self.default_preferences
         for key, default in defaults["exchange_selection"].items():
@@ -225,6 +227,21 @@ class UserPreferences:
 
         gui = merged["gui_settings"]
         gui_defaults = defaults["gui_settings"]
+        try:
+            layout_version = int(incoming_gui.get("layout_version", 1))
+        except (TypeError, ValueError):
+            layout_version = 1
+        if layout_version < int(gui_defaults["layout_version"]):
+            # Migrate the original narrow fixed-width window without
+            # discarding the user's height or disclosure preferences.
+            gui["window_width"] = max(
+                RESPONSIVE_WINDOW_WIDTH,
+                int(gui_defaults["window_width"]),
+                int(gui.get("window_width", 0) or 0),
+            )
+            gui["min_window_width"] = gui_defaults["min_window_width"]
+            gui["max_window_width"] = gui_defaults["max_window_width"]
+        gui["layout_version"] = gui_defaults["layout_version"]
         for key in (
             "min_window_width", "max_window_width",
             "min_window_height", "max_window_height",

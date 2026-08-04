@@ -13,6 +13,9 @@ pyyaml>=6.0,<7
 # System monitoring
 psutil>=5.9.0,<8
 
+# Readable process identity during source-mode launches
+setproctitle>=1.3.0,<2
+
 # GUI Framework (PySide6 preferred for Nuitka)
 PySide6>=6.6.0,<6.12
 

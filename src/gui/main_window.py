@@ -626,6 +626,7 @@ class MainWindow(QMainWindow):
         self.download_worker: Optional[DownloadWorker] = None
         self.download_button: QPushButton
         self.stop_button: QPushButton
+        self.donate_button: QPushButton
 
         # Status tracking
         self.download_status: Dict[str, str] = {}
@@ -902,6 +903,11 @@ class MainWindow(QMainWindow):
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.start_date_edit.setDateRange(minimum, maximum)
+        self.start_date_edit.setMinimumWidth(145)
+        self.start_date_edit.setMaximumWidth(220)
+        self.start_date_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
 
         self.end_date_edit = QDateEdit(saved_end)
         self.end_date_edit.setObjectName("customEndDate")
@@ -909,6 +915,11 @@ class MainWindow(QMainWindow):
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.end_date_edit.setDateRange(minimum, maximum)
+        self.end_date_edit.setMinimumWidth(145)
+        self.end_date_edit.setMaximumWidth(220)
+        self.end_date_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
 
         layout.addWidget(QLabel("Start:"), 1, 0)
         layout.addWidget(self.start_date_edit, 1, 1)
@@ -916,6 +927,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.end_date_edit, 1, 3)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
+        layout.setColumnMinimumWidth(1, 145)
+        layout.setColumnMinimumWidth(3, 145)
 
         self.date_mode_label = QLabel()
         self.date_mode_label.setStyleSheet("color: #666666;")
@@ -1206,12 +1219,12 @@ class MainWindow(QMainWindow):
         refresh_button.clicked.connect(self.load_data_summary)
         layout.addWidget(refresh_button)
 
-        layout.addStretch()  # Add stretch to push buttons to left
-
-        # Donate button (right side)
-        donate_button = QPushButton("🤍 Donate")
-        donate_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        donate_button.setStyleSheet("""
+        # Keep Donate beside the other actions so it stays visible in the
+        # default window rather than being pushed beyond the viewport.
+        self.donate_button = QPushButton("🤍 Donate")
+        self.donate_button.setObjectName("donateButton")
+        self.donate_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.donate_button.setStyleSheet("""
             QPushButton {
                 background-color: #ff6b6b;
                 color: white;
@@ -1227,8 +1240,9 @@ class MainWindow(QMainWindow):
                 background-color: #e53935;
             }
         """)
-        donate_button.clicked.connect(self.show_donate_dialog)
-        layout.addWidget(donate_button)
+        self.donate_button.clicked.connect(self.show_donate_dialog)
+        layout.addWidget(self.donate_button)
+        layout.addStretch()
 
         return layout
 

@@ -11,6 +11,16 @@ def _zip_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def test_update_checker_targets_canonical_community_repository():
+    checker = UpdateChecker(current_version="1.1.0")
+
+    assert checker.GITHUB_REPOSITORY == "pparesh25/NSE_BSE_Downloader"
+    assert checker.version_info_url == (
+        "https://raw.githubusercontent.com/pparesh25/"
+        "NSE_BSE_Downloader/main/version.py"
+    )
+
+
 def test_update_requires_immutable_url_and_matching_hash(tmp_path, monkeypatch):
     source = tmp_path / "source.zip"
     payload = _zip_bytes(source)
@@ -18,7 +28,7 @@ def test_update_requires_immutable_url_and_matching_hash(tmp_path, monkeypatch):
 
     checker = UpdateChecker(current_version="1.1.0")
     configured, message = checker.configure_update_artifact(
-        "https://github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://github.com/pparesh25/NSE_BSE_Downloader/"
         "releases/download/v1.2.0/app.zip",
         expected,
         "1.2.0",
@@ -43,7 +53,7 @@ def test_update_rejects_mutable_branch_and_hash_mismatch(tmp_path, monkeypatch):
     checker = UpdateChecker(current_version="1.1.0")
 
     success, message = checker.configure_update_artifact(
-        "https://codeload.github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://codeload.github.com/pparesh25/NSE_BSE_Downloader/"
         "zip/refs/heads/main",
         hashlib.sha256(payload).hexdigest(),
         "1.2.0",
@@ -52,7 +62,7 @@ def test_update_rejects_mutable_branch_and_hash_mismatch(tmp_path, monkeypatch):
     assert "immutable" in message.lower()
 
     success, message = checker.configure_update_artifact(
-        "https://github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://github.com/pparesh25/NSE_BSE_Downloader/"
         "releases/download/v1.2.0/app.zip",
         "0" * 64,
         "1.2.0",
@@ -75,7 +85,7 @@ def test_update_rejects_mutable_branch_and_hash_mismatch(tmp_path, monkeypatch):
 def test_invalid_metadata_clears_previously_valid_artifact():
     checker = UpdateChecker(current_version="1.1.0")
     success, message = checker.configure_update_artifact(
-        "https://github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://github.com/pparesh25/NSE_BSE_Downloader/"
         "releases/download/v1.2.0/app.zip",
         "1" * 64,
         "1.2.0",
@@ -96,7 +106,7 @@ def test_invalid_metadata_clears_previously_valid_artifact():
 def test_version_without_verified_metadata_clears_artifact():
     checker = UpdateChecker(current_version="1.1.0")
     success, message = checker.configure_update_artifact(
-        "https://github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://github.com/pparesh25/NSE_BSE_Downloader/"
         "releases/download/v1.2.0/app.zip",
         "1" * 64,
         "1.2.0",
@@ -114,7 +124,7 @@ def test_update_release_tag_must_match_announced_version():
     checker = UpdateChecker(current_version="1.1.0")
 
     success, message = checker.configure_update_artifact(
-        "https://github.com/pparesh25/NSE_BSE_Downloader_PySide6/"
+        "https://github.com/pparesh25/NSE_BSE_Downloader/"
         "releases/download/v1.2.0/app.zip",
         "1" * 64,
         "1.3.0",

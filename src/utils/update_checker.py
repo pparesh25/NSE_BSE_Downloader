@@ -28,7 +28,7 @@ class UpdateChecker:
     MAX_UPDATE_BYTES = 500 * 1024 * 1024
     MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
     MAX_ARCHIVE_MEMBERS = 20_000
-    GITHUB_REPOSITORY = "pparesh25/NSE_BSE_Downloader_PySide6"
+    GITHUB_REPOSITORY = "pparesh25/NSE_BSE_Downloader"
 
     def __init__(self, current_version: Optional[str] = None, debug: bool = False):
         """
@@ -48,7 +48,9 @@ class UpdateChecker:
         self.current_version = current_version
 
         # GitHub URLs - Production repository
-        self.github_base = "https://raw.githubusercontent.com/pparesh25/NSE_BSE_Downloader_PySide6/main"
+        self.github_base = (
+            f"https://raw.githubusercontent.com/{self.GITHUB_REPOSITORY}/main"
+        )
         self.version_info_url = f"{self.github_base}/version.py"
         # The metadata endpoint may follow main so it can announce a release,
         # but executable code is accepted only from an immutable release/tag

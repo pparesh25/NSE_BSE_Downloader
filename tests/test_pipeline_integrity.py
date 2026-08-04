@@ -273,6 +273,20 @@ def test_integrity_scan_accepts_documented_close_only_combined_index_row(
     assert manager.validate_daily_output("NSE", "EQ", day, path)
 
 
+def test_integrity_scan_accepts_existing_v1_0_1_seven_column_daily_file(
+    tmp_path,
+):
+    manager = DataManager(_DataConfig(tmp_path))
+    day = date(2025, 8, 7)
+    path = tmp_path / "NSE" / "EQ" / f"{day}-NSE-EQ.txt"
+    original = b"ABC,20250807,10,12,9,11,100\n"
+    path.write_bytes(original)
+
+    assert manager.validate_daily_output("NSE", "EQ", day, path)
+    assert manager.get_available_file_dates("NSE", "EQ") == [day]
+    assert path.read_bytes() == original
+
+
 def test_integrity_scan_rejects_nonfinite_and_fake_close_only_rows(tmp_path):
     manager = DataManager(_DataConfig(tmp_path))
     day = date(2026, 7, 31)

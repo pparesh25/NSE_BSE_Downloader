@@ -1,6 +1,7 @@
 from datetime import date
 import logging
 from pathlib import Path
+import re
 
 import pandas as pd
 import pytest
@@ -94,3 +95,24 @@ def test_version_history_drives_update_notification():
         "calendar" in item.lower()
         for item in parsed["changelog"]["features"]
     )
+
+
+def test_version_metadata_remains_readable_by_v1_0_1_clients():
+    content = Path("version.py").read_text(encoding="utf-8")
+
+    version = re.search(
+        r'__version__\s*=\s*["\']([^"\']+)["\']', content
+    )
+    build_date = re.search(
+        r'__build_date__\s*=\s*["\']([^"\']+)["\']', content
+    )
+    history = re.search(
+        r'VERSION_HISTORY\s*=\s*({.*?})\s*(?=\n\w|\ndef|\Z)',
+        content,
+        re.DOTALL,
+    )
+
+    assert version is not None and version.group(1) == "1.1.0"
+    assert build_date is not None
+    assert history is not None
+    assert '"1.1.0"' in history.group(1)

@@ -84,6 +84,73 @@ def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(
     assert not settings.get_section_states()["options"]
 
 
+def test_v1_0_1_user_preferences_upgrade_without_losing_user_choices(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_dir = tmp_path / ".nse_bse_downloader"
+    config_dir.mkdir()
+    preference_path = config_dir / "user_preferences.json"
+    preference_path.write_text(json.dumps({
+        "version": "1.0",
+        "exchange_selection": {
+            "NSE_EQ": False,
+            "NSE_FO": True,
+            "NSE_SME": True,
+            "NSE_INDEX": False,
+            "BSE_EQ": True,
+            "BSE_INDEX": False,
+        },
+        "download_options": {
+            "include_weekends": True,
+            "timeout_seconds": 17,
+            "sme_add_suffix": True,
+            "sme_append_to_eq": True,
+            "index_append_to_eq": False,
+            "bse_index_append_to_eq": True,
+        },
+        "gui_settings": {
+            "window_width": 576,
+            "window_height": 875,
+            "min_window_width": 550,
+            "max_window_width": 650,
+            "min_window_height": 750,
+            "max_window_height": 1000,
+            "last_download_location": "/tmp/v1-update",
+        },
+        "advanced_options": {
+            "auto_check_updates": False,
+            "show_debug_logs": True,
+            "cache_enabled": False,
+        },
+    }), encoding="utf-8")
+
+    preferences = SettingsService(_SettingsConfig()).preferences
+
+    assert preferences.get_selected_exchanges() == [
+        "NSE_FO", "NSE_SME", "BSE_EQ"
+    ]
+    assert preferences.get_include_weekends() is True
+    assert preferences.get_timeout_seconds() == 17
+    assert preferences.get_append_options() == {
+        "sme_add_suffix": True,
+        "sme_append_to_eq": True,
+        "index_append_to_eq": False,
+        "bse_index_append_to_eq": True,
+    }
+    assert preferences.get_auto_check_updates() is False
+    assert preferences.get_data_options() == {
+        "include_delivery_data": False,
+        "include_fo_open_interest": True,
+        "generate_symbol_files": True,
+        "apply_corporate_actions": True,
+    }
+    assert preferences.get_window_size() == (720, 875)
+    assert preferences.get_gui_settings()["last_download_location"] == (
+        "/tmp/v1-update"
+    )
+
+
 def test_date_utils_use_ist_and_injected_clock():
     before_release = datetime(2026, 7, 31, 12, 29, tzinfo=timezone.utc)
     after_release = datetime(2026, 7, 31, 12, 31, tzinfo=timezone.utc)

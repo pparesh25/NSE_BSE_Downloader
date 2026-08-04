@@ -34,8 +34,8 @@ Daily bhavcopy files remain official unadjusted market records. Corporate-action
 Requirements: Python 3.10 or newer and an internet connection.
 
 ```bash
-git clone https://github.com/pparesh25/NSE_BSE_Downloader_PySide6.git
-cd NSE_BSE_Downloader_PySide6
+git clone https://github.com/pparesh25/NSE_BSE_Downloader.git
+cd NSE_BSE_Downloader
 pip install -r requirements.txt
 python main.py
 ```
@@ -44,9 +44,18 @@ Core dependencies include PySide6, aiohttp, pandas, NumPy and PyYAML.
 Source-mode launches also set the process title to **NSE BSE Data Downloader**;
 packaged releases use the same native product and bundle identity.
 
+### Upgrading from v1.0.1
+
+Version 1.1 keeps the existing `~/NSE_BSE_Data/` data root and
+`~/.nse_bse_downloader/` preference directory. Existing seven-column daily files
+remain readable and are not rewritten merely by launching the application. A date
+downloaded again is published under the current stable nine-column EQ/SME/FO
+contract. Back up important user data before a major upgrade and use the official
+GitHub Release assets rather than an archive from a mutable branch.
+
 ## Nuitka packaging preparation
 
-Nuitka packaging is configured but no packaged binary has been produced yet.
+Nuitka packaging is configured but no v1.1 packaged binary has been produced yet.
 The default commands only validate resources/dependencies and print the build
 command:
 

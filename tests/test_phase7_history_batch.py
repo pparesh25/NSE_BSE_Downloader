@@ -18,6 +18,7 @@ from src.services.corporate_actions import (
 )
 from src.services.history_batch import HistoryBatchCoordinator
 from src.services.pipeline_state import PipelineManifest
+from src.services.pipeline_telemetry import PipelineTelemetry
 from src.services.symbol_history import HistoryBatchItem, SymbolHistoryStore
 
 
@@ -51,6 +52,32 @@ def _symbol_bytes(root: Path) -> dict[str, bytes]:
         path.name: path.read_bytes()
         for path in sorted(symbols.glob("*.txt"))
     }
+
+
+def test_new_single_date_batch_fast_path_matches_legacy_bytes(tmp_path):
+    day = date(2025, 1, 2)
+    legacy_root = tmp_path / "legacy-single"
+    batch_root = tmp_path / "batch-single"
+    rows = _rows(day)
+
+    SymbolHistoryStore(legacy_root).upsert("NSE", "EQ", day, rows)
+    result = SymbolHistoryStore(batch_root).upsert_batch([
+        HistoryBatchItem("NSE", "EQ", day, rows)
+    ])
+
+    assert result.history_writes == 3
+    assert _symbol_bytes(batch_root) == _symbol_bytes(legacy_root)
+
+
+def test_new_single_date_batch_fast_path_keeps_numeric_validation(tmp_path):
+    day = date(2025, 1, 2)
+    rows = _rows(day).iloc[[0]].astype(object).copy()
+    rows.loc[:, "CLOSE"] = "invalid"
+
+    with pytest.raises(ValueError, match="invalid CLOSE"):
+        SymbolHistoryStore(tmp_path).upsert_batch([
+            HistoryBatchItem("NSE", "EQ", day, rows)
+        ])
 
 
 @pytest.mark.parametrize("day_count", [20, 100])
@@ -259,3 +286,65 @@ def test_staged_worker_applies_actions_only_after_history_commit(
         assert manifest.date_result("NSE", "EQ", day).status == "success"
     history = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "aaa.txt")
     assert float(history.loc[history["DATE"] == 20250101, "CLOSE"].iloc[0]) == 50
+
+
+def test_staged_action_windows_fetch_concurrently_with_timing_telemetry(
+    tmp_path, monkeypatch
+):
+    day = date(2025, 1, 2)
+    telemetry = PipelineTelemetry()
+    config = SimpleNamespace(
+        base_data_path=tmp_path,
+        download_settings=SimpleNamespace(timeout_seconds=5),
+        stage_executors={},
+        pipeline_telemetry=telemetry,
+    )
+    coordinator = HistoryBatchCoordinator(config, telemetry=telemetry)
+    for exchange, segment in (("NSE", "EQ"), ("NSE", "SME"), ("BSE", "EQ")):
+        coordinator.pipeline.begin(
+            exchange, segment, day, ("actions",)
+        )
+        coordinator.register_action_window(
+            exchange,
+            segment,
+            (day,),
+            add_sme_suffix=segment == "SME",
+            timeout=5,
+        )
+    config.history_batch_coordinator = coordinator
+    active = 0
+    peak_active = 0
+
+    async def fake_fetch(*_args, **_kwargs):
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return []
+
+    monkeypatch.setattr(CorporateActionClient, "fetch", fake_fetch)
+    monkeypatch.setattr(
+        CorporateActionEngine,
+        "apply",
+        lambda *_args, **_kwargs: {
+            "applied": 0,
+            "skipped": 0,
+            "manual_review": 0,
+        },
+    )
+
+    asyncio.run(DownloadWorker(config, [])._finalize_staged_histories())
+
+    fetch_events = [
+        event for event in telemetry.events
+        if event.kind == "corporate_action_fetch_finished"
+    ]
+    apply_events = [
+        event for event in telemetry.events
+        if event.kind == "corporate_action_apply_finished"
+    ]
+    assert peak_active == 3
+    assert len(fetch_events) == 3
+    assert all(event.fields["outcome"] == "success" for event in fetch_events)
+    assert len(apply_events) == 2

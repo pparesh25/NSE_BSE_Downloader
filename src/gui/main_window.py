@@ -8,6 +8,7 @@ and background download management.
 import asyncio
 from datetime import date
 from enum import Enum
+import time
 from threading import Event
 from typing import Any, Dict, List, Optional
 import logging
@@ -527,10 +528,11 @@ class DownloadWorker(QThread):
             CorporateActionEngine,
         )
 
-        actions_by_exchange: dict[str, list[Any]] = {}
-        windows_by_exchange: dict[str, list[Any]] = {}
-        for window in windows:
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+
+        async def fetch_window(window):
             client = CorporateActionClient(timeout=window.timeout)
+            started = time.monotonic_ns()
             try:
                 actions = await client.fetch(
                     window.exchange,
@@ -540,6 +542,41 @@ class DownloadWorker(QThread):
                     add_sme_suffix=window.add_sme_suffix,
                 )
             except Exception as error:
+                if telemetry is not None:
+                    telemetry.record(
+                        "corporate_action_fetch_finished",
+                        exchange_segment=(
+                            f"{window.exchange}_{window.segment}"
+                        ),
+                        outcome="error",
+                        error_type=type(error).__name__,
+                        duration_ms=(
+                            time.monotonic_ns() - started
+                        ) / 1_000_000,
+                    )
+                return error
+            if telemetry is not None:
+                telemetry.record(
+                    "corporate_action_fetch_finished",
+                    exchange_segment=f"{window.exchange}_{window.segment}",
+                    outcome="success",
+                    actions=len(actions),
+                    duration_ms=(
+                        time.monotonic_ns() - started
+                    ) / 1_000_000,
+                )
+            return actions
+
+        # Windows are independent read-only exchange requests. Gathering them
+        # overlaps network setup/latency while preserving result order below.
+        fetched_windows = await asyncio.gather(*(
+            fetch_window(window) for window in windows
+        ))
+
+        actions_by_exchange: dict[str, list[Any]] = {}
+        windows_by_exchange: dict[str, list[Any]] = {}
+        for window, fetched in zip(windows, fetched_windows):
+            if isinstance(fetched, Exception):
                 coordinator.pipeline.mark_many([
                     (
                         window.exchange,
@@ -547,21 +584,22 @@ class DownloadWorker(QThread):
                         target_date,
                         "actions",
                         "failed",
-                        {"error": str(error)},
+                        {"error": str(fetched)},
                     )
                     for target_date in window.dates
                 ])
                 self.error_occurred.emit(
                     f"{window.exchange}_{window.segment}",
-                    f"Corporate-action fetch failed: {error}",
+                    f"Corporate-action fetch failed: {fetched}",
                 )
                 continue
-            actions_by_exchange.setdefault(window.exchange, []).extend(actions)
+            actions_by_exchange.setdefault(window.exchange, []).extend(fetched)
             windows_by_exchange.setdefault(window.exchange, []).append(window)
 
         for exchange, actions in actions_by_exchange.items():
             engine = CorporateActionEngine(self.config.base_data_path)
             related = windows_by_exchange[exchange]
+            started = time.monotonic_ns()
             try:
                 if executor is None:
                     summary = engine.apply(actions)
@@ -591,6 +629,16 @@ class DownloadWorker(QThread):
                         "require manual review",
                     )
             except Exception as error:
+                if telemetry is not None:
+                    telemetry.record(
+                        "corporate_action_apply_finished",
+                        exchange=exchange,
+                        outcome="error",
+                        error_type=type(error).__name__,
+                        duration_ms=(
+                            time.monotonic_ns() - started
+                        ) / 1_000_000,
+                    )
                 coordinator.pipeline.mark_many([
                     (
                         window.exchange,
@@ -606,6 +654,19 @@ class DownloadWorker(QThread):
                 self.error_occurred.emit(
                     exchange, f"Corporate-action apply failed: {error}"
                 )
+            else:
+                if telemetry is not None:
+                    telemetry.record(
+                        "corporate_action_apply_finished",
+                        exchange=exchange,
+                        outcome="success",
+                        actions=len(actions),
+                        applied=summary.get("applied", 0),
+                        manual_review=summary.get("manual_review", 0),
+                        duration_ms=(
+                            time.monotonic_ns() - started
+                        ) / 1_000_000,
+                    )
 
     def _refresh_staged_task_results(
         self, settled: Dict[str, object]

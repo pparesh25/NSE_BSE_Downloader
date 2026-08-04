@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import re
 import shutil
@@ -284,6 +284,37 @@ class SymbolHistoryStore:
                 backup_temporary = backup.with_name(backup.name + ".tmp")
                 shutil.copy2(path, backup_temporary)
                 backup_temporary.replace(backup)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _write_new_single_history(
+        self, path: Path, frame: pd.DataFrame
+    ) -> None:
+        """Publish a validated one-row batch without generic sort/dedup work."""
+
+        if path.exists() or len(frame) != 1:
+            raise ValueError("single-history fast path requires one new row")
+        if list(frame.columns) != SYMBOL_HISTORY_COLUMNS:
+            raise ValueError(
+                "history columns do not match the required schema"
+            )
+        row = frame.iloc[0]
+        date_value = str(row["DATE"])
+        if not re.fullmatch(r"\d{8}", date_value):
+            raise ValueError("history contains an invalid date value")
+        try:
+            datetime.strptime(date_value, "%Y%m%d")
+        except ValueError as error:
+            raise ValueError("history contains an invalid date value") from error
+        for column in ("OPEN", "HIGH", "LOW", "CLOSE"):
+            if pd.isna(pd.to_numeric(row[column], errors="coerce")):
+                raise ValueError(f"history contains invalid {column} values")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".txt.tmp")
+        try:
+            frame.to_csv(temporary, index=False)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -650,6 +681,7 @@ class SymbolHistoryStore:
             registry = self._read_registry()
             action_records = self._read_applied_actions()
             history_cache: dict[Path, pd.DataFrame] = {}
+            incoming_cache: dict[Path, list[pd.Series]] = {}
             old_paths: set[Path] = set()
 
             def load(path: Path) -> pd.DataFrame:
@@ -699,6 +731,14 @@ class SymbolHistoryStore:
                                     ignore_index=True,
                                 )
                                 history_cache[new_path] = combined
+                                old_incoming = incoming_cache.pop(
+                                    old_path, []
+                                )
+                                if old_incoming:
+                                    incoming_cache[new_path] = [
+                                        *old_incoming,
+                                        *incoming_cache.get(new_path, []),
+                                    ]
                                 old_paths.add(old_path)
                                 old_paths.discard(new_path)
                                 registry["files"].setdefault(
@@ -709,19 +749,30 @@ class SymbolHistoryStore:
                     adjusted_row = self._apply_recorded_actions(
                         exchange, symbol, row, action_records
                     )
-                    incoming = self._history_rows(
-                        pd.DataFrame([adjusted_row])
-                    )
-                    existing = load(new_path)
-                    history_cache[new_path] = pd.concat(
-                        [existing, incoming], ignore_index=True
+                    incoming_cache.setdefault(new_path, []).append(
+                        adjusted_row
                     )
 
-            final_paths = set(history_cache).difference(old_paths)
+            for path, incoming_rows in incoming_cache.items():
+                incoming = self._history_rows(pd.DataFrame(incoming_rows))
+                existing = load(path)
+                history_cache[path] = (
+                    incoming
+                    if existing.empty
+                    else pd.concat([existing, incoming], ignore_index=True)
+                )
+
+            final_paths = (
+                set(history_cache) | set(incoming_cache)
+            ).difference(old_paths)
             for path in sorted(final_paths, key=str):
                 relative = str(path.relative_to(self.base_path))
                 if relative not in completed:
-                    self._write_history(path, history_cache[path])
+                    history = history_cache[path]
+                    if not path.exists() and len(history) == 1:
+                        self._write_new_single_history(path, history)
+                    else:
+                        self._write_history(path, history)
                     history_writes += 1
                     if on_symbol_written is not None:
                         on_symbol_written(relative)

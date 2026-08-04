@@ -56,6 +56,21 @@ def _telemetry_summary(root: Path) -> dict[str, object]:
         for event in events
         if event["kind"] == "event_loop_lag"
     ]
+    history = [
+        float(event["fields"]["duration_ms"])
+        for event in events
+        if event["kind"] == "history_batch_finished"
+    ]
+    action_fetch = [
+        float(event["fields"]["duration_ms"])
+        for event in events
+        if event["kind"] == "corporate_action_fetch_finished"
+    ]
+    action_apply = [
+        float(event["fields"]["duration_ms"])
+        for event in events
+        if event["kind"] == "corporate_action_apply_finished"
+    ]
     return {
         "event_count": len(events),
         "attempts": sum(
@@ -63,6 +78,9 @@ def _telemetry_summary(root: Path) -> dict[str, object]:
         ),
         "retries": sum(event["kind"] == "retry_scheduled" for event in events),
         "event_loop_lag_p95_ms": _percentile_95(lag),
+        "history_batch_ms": sum(history),
+        "action_fetch_critical_ms": max(action_fetch, default=0.0),
+        "action_apply_ms": sum(action_apply),
     }
 
 

@@ -57,6 +57,7 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
         target_platform="darwin",
         architecture="arm64",
         output_dir=tmp_path / "release",
+        trust_status="notarized",
     )
     release.validate_release_archive(archive_path)
 
@@ -69,6 +70,7 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
         )
         assert metadata["application"] == PRODUCT_NAME
         assert metadata["git_commit"] == "b" * 40
+        assert metadata["trust_status"] == "notarized"
         executable_name = (
             f"{expected_root}/{PRODUCT_NAME}.app/Contents/MacOS/{APP_NAME}"
         )
@@ -85,6 +87,30 @@ def test_git_commit_falls_back_to_github_sha(tmp_path, monkeypatch):
     monkeypatch.delenv("SOURCE_COMMIT", raising=False)
     monkeypatch.setenv("GITHUB_SHA", "c" * 40)
     assert release._git_commit(tmp_path) == "c" * 40
+
+
+def test_smoke_test_uses_isolated_gui_config(tmp_path, monkeypatch):
+    executable = tmp_path / release.APP_NAME
+    executable.write_bytes(b"binary")
+    executable.chmod(0o755)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if "--smoke-gui" in command:
+            config_path = Path(command[command.index("--config") + 1])
+            config = release.yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            Path(config["data_paths"]["base_folder"]).mkdir(parents=True)
+        return type("Result", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    release.smoke_test(executable, "linux")
+
+    assert calls[0][0][-1] == "--help"
+    gui_command, gui_options = calls[1]
+    assert "--smoke-gui" in gui_command
+    assert gui_options["env"]["QT_QPA_PLATFORM"] == "offscreen"
+    assert gui_options["env"]["HOME"] == gui_options["env"]["USERPROFILE"]
 
 
 def test_release_zip_rejects_symlinks(tmp_path):

@@ -276,6 +276,25 @@ def test_window_close_requests_safe_stop_without_terminating(
     window.close()
 
 
+def test_window_close_stops_owned_timers(tmp_path, monkeypatch):
+    _application()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config = Config("config.yaml")
+    config.base_data_path = tmp_path / "data"
+    window = MainWindow(config)
+    monkeypatch.setattr(window, "_save_exit_preferences", lambda: None)
+
+    assert window.update_timer.isActive()
+    assert window.status_timer.isActive()
+    assert window.update_check_timer.isActive()
+
+    window.close()
+
+    assert not window.update_timer.isActive()
+    assert not window.status_timer.isActive()
+    assert not window.update_check_timer.isActive()
+
+
 def test_default_window_keeps_dates_and_donate_action_visible(
     tmp_path, monkeypatch
 ):

@@ -11,6 +11,7 @@ name: Release Artifact Builds
       - "config.yaml"
       - "main.py"
       - "package_release_artifact.py"
+      - "RELEASE_TRUST_ASSETS.md"
       - "requirements.txt"
       - "requirements-build.txt"
       - "runtime_identity.py"

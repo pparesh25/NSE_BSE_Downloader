@@ -13,6 +13,7 @@ import platform
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,9 @@ REQUIRED_MODULES = {
 REQUIRED_RESOURCES = (
     Path("config.yaml"),
     Path("src/gui/resources/QR_UPI.jpeg"),
+    Path("src/gui/resources/icon.png"),
+    Path("src/gui/resources/icon.ico"),
+    Path("src/gui/resources/icon.icns"),
 )
 
 
@@ -79,10 +83,52 @@ def validate_project(project_root: Path = PROJECT_ROOT) -> List[str]:
         ):
             errors.append(f"Unsupported QR image format: {qr_path}")
 
+    errors.extend(validate_icon_resources(project_root / "src/gui/resources"))
+
     if re.fullmatch(r"\d+(?:\.\d+){1,3}", __version__) is None:
-        errors.append(
-            f"Version {__version__!r} is not valid for Nuitka metadata"
-        )
+        errors.append(f"Version {__version__!r} is not valid for Nuitka metadata")
+    return errors
+
+
+def validate_icon_resources(resources: Path) -> List[str]:
+    """Validate committed cross-platform icon containers without image tools."""
+
+    errors: List[str] = []
+    png_path = resources / "icon.png"
+    ico_path = resources / "icon.ico"
+    icns_path = resources / "icon.icns"
+    try:
+        header = png_path.read_bytes()[:26]
+        if not header.startswith(b"\x89PNG\r\n\x1a\n") or len(header) < 26:
+            errors.append(f"Invalid PNG application icon: {png_path}")
+        else:
+            width, height = struct.unpack(">II", header[16:24])
+            if (width, height) != (1024, 1024) or header[25] != 6:
+                errors.append(
+                    f"PNG application icon must be 1024x1024 RGBA: {png_path}"
+                )
+    except OSError as error:
+        errors.append(f"Application icon cannot be read: {error}")
+
+    try:
+        header = ico_path.read_bytes()[:6]
+        if len(header) != 6:
+            errors.append(f"Invalid Windows application icon: {ico_path}")
+        else:
+            reserved, image_type, count = struct.unpack("<HHH", header)
+            if reserved != 0 or image_type != 1 or count < 7:
+                errors.append(
+                    "Windows application icon must contain at least seven "
+                    f"sizes: {ico_path}"
+                )
+    except OSError as error:
+        errors.append(f"Windows application icon cannot be read: {error}")
+
+    try:
+        if icns_path.read_bytes()[:4] != b"icns":
+            errors.append(f"Invalid macOS application icon: {icns_path}")
+    except OSError as error:
+        errors.append(f"macOS application icon cannot be read: {error}")
     return errors
 
 
@@ -115,6 +161,8 @@ def get_nuitka_command(
     target_platform: Optional[str] = None,
     output_dir: Optional[Path] = None,
     standalone_folder: bool = False,
+    macos_sign_identity: Optional[str] = None,
+    macos_sign_notarization: bool = False,
 ) -> List[str]:
     """Create a platform-specific command without executing Nuitka."""
 
@@ -134,10 +182,7 @@ def get_nuitka_command(
         "--assume-yes-for-downloads",
         "--file-reference-choice=runtime",
         f"--include-data-files={project_root / 'config.yaml'}=config.yaml",
-        (
-            f"--include-data-dir={project_root / 'src/gui/resources'}="
-            "src/gui/resources"
-        ),
+        (f"--include-data-dir={project_root / 'src/gui/resources'}=src/gui/resources"),
         f"--output-dir={destination}",
         f"--output-filename={APP_NAME}",
         f"--company-name={ORGANIZATION_NAME}",
@@ -149,13 +194,25 @@ def get_nuitka_command(
         f"--report={destination / 'nuitka-compilation-report.xml'}",
     ]
     if target == "darwin":
-        command.extend([
-            f"--macos-app-name={PRODUCT_NAME}",
-            f"--macos-app-version={__version__}",
-            "--macos-app-mode=gui",
-            f"--macos-signed-app-name={MACOS_BUNDLE_ID}",
-            "--macos-prohibit-multiple-instances",
-        ])
+        command.extend(
+            [
+                f"--macos-app-name={PRODUCT_NAME}",
+                f"--macos-app-version={__version__}",
+                "--macos-app-mode=gui",
+                f"--macos-signed-app-name={MACOS_BUNDLE_ID}",
+                "--macos-prohibit-multiple-instances",
+            ]
+        )
+        if macos_sign_identity:
+            command.append(f"--macos-sign-identity={macos_sign_identity}")
+        if macos_sign_notarization:
+            if not macos_sign_identity:
+                raise ValueError(
+                    "macOS notarization signing requires --macos-sign-identity"
+                )
+            command.append("--macos-sign-notarization")
+    elif macos_sign_identity or macos_sign_notarization:
+        raise ValueError("macOS signing options require a darwin target")
     elif target == "windows":
         command.append("--windows-console-mode=disable")
     command.extend(optional_icon_args(project_root, target))
@@ -210,6 +267,151 @@ def verify_build(output_dir: Path, target_platform: str) -> bool:
     return (output_dir / f"{APP_NAME}{suffix}").is_file()
 
 
+def find_macos_app(output_dir: Path) -> Path:
+    """Return the macOS app bundle produced by Nuitka."""
+
+    for path in (
+        output_dir / f"{APP_NAME}.app",
+        output_dir / f"{PRODUCT_NAME}.app",
+        output_dir / "main.app",
+    ):
+        if path.is_dir():
+            return path
+    raise FileNotFoundError(f"No macOS app bundle found under {output_dir}")
+
+
+def macos_qt_link_replacements(
+    dependency_output: str,
+    executable_dir: Path,
+) -> List[tuple[str, str]]:
+    """Map framework-style PySide plugin links to Nuitka's flat Qt layout."""
+
+    replacements: List[tuple[str, str]] = []
+    pattern = re.compile(r"(@rpath/(Qt[A-Za-z0-9_]+)\.framework/Versions/A/\2)")
+    for old_path, library_name in pattern.findall(dependency_output):
+        if (executable_dir / library_name).is_file():
+            replacements.append((old_path, f"@executable_path/{library_name}"))
+    return replacements
+
+
+def _resolve_macos_sign_identity(requested_identity: Optional[str]) -> str:
+    if requested_identity and requested_identity != "auto":
+        return requested_identity
+    if not requested_identity:
+        return "-"
+
+    result = subprocess.run(
+        ["security", "find-identity", "-v", "-p", "codesigning"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    identities = re.findall(
+        r'^\s*\d+\)\s+[0-9A-Fa-f]+\s+"([^"]+)"',
+        result.stdout,
+        re.M,
+    )
+    developer_ids = [
+        identity
+        for identity in identities
+        if identity.startswith("Developer ID Application:")
+    ]
+    candidates = developer_ids or identities
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "--macos-sign-identity=auto requires exactly one usable "
+            f"code-signing identity; found {len(candidates)}"
+        )
+    return candidates[0]
+
+
+def repair_macos_qt_plugin_links(
+    output_dir: Path,
+    *,
+    sign_identity: Optional[str] = None,
+    hardened_runtime: bool = False,
+) -> int:
+    """Repair PySide plugin links, then restore valid bundle signatures.
+
+    PyPI PySide6 plugins reference Qt frameworks through ``@rpath`` while
+    Nuitka places the corresponding Qt libraries beside the app executable.
+    The repair is deterministic and only rewrites dependencies whose flat
+    library is present in the generated bundle.
+    """
+
+    app_path = find_macos_app(output_dir)
+    executable_dir = app_path / "Contents" / "MacOS"
+    plugin_root = executable_dir / "PySide6" / "qt-plugins"
+    if not plugin_root.is_dir():
+        raise FileNotFoundError(
+            f"Bundled PySide6 plugin directory is missing: {plugin_root}"
+        )
+
+    modified: List[Path] = []
+    for plugin_path in sorted(plugin_root.rglob("*.dylib")):
+        dependency_output = subprocess.run(
+            ["otool", "-L", str(plugin_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        ).stdout
+        replacements = macos_qt_link_replacements(
+            dependency_output,
+            executable_dir,
+        )
+        for old_path, new_path in replacements:
+            subprocess.run(
+                [
+                    "install_name_tool",
+                    "-change",
+                    old_path,
+                    new_path,
+                    str(plugin_path),
+                ],
+                check=True,
+            )
+        if replacements:
+            modified.append(plugin_path)
+
+    if not modified:
+        return 0
+
+    identity = _resolve_macos_sign_identity(sign_identity)
+    signing_options = (
+        ["--options", "runtime", "--timestamp"] if hardened_runtime else []
+    )
+    for plugin_path in modified:
+        subprocess.run(
+            [
+                "codesign",
+                "--force",
+                *signing_options,
+                "--sign",
+                identity,
+                str(plugin_path),
+            ],
+            check=True,
+        )
+    subprocess.run(
+        [
+            "codesign",
+            "--force",
+            *signing_options,
+            "--sign",
+            identity,
+            str(app_path),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(app_path)],
+        check=True,
+    )
+    return len(modified)
+
+
 def _print_errors(label: str, errors: Iterable[str]) -> None:
     print(label)
     for error in errors:
@@ -246,6 +448,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "dist",
     )
+    parser.add_argument(
+        "--macos-sign-identity",
+        help="Developer ID identity or 'auto'; darwin builds only",
+    )
+    parser.add_argument(
+        "--macos-sign-notarization",
+        action="store_true",
+        help="Enable hardened-runtime signing required by Apple notarization",
+    )
     return parser.parse_args(argv)
 
 
@@ -266,6 +477,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         target_platform=args.target_platform,
         output_dir=output_dir,
         standalone_folder=args.standalone_folder,
+        macos_sign_identity=args.macos_sign_identity,
+        macos_sign_notarization=args.macos_sign_notarization,
     )
     print(f"Packaging validation passed for {args.target_platform}.")
     print(shlex.join(command))
@@ -293,6 +506,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not verify_build(output_dir, args.target_platform):
         print("Nuitka returned success but the expected package was not found.")
         return 1
+    if args.target_platform == "darwin":
+        repaired_count = repair_macos_qt_plugin_links(
+            output_dir,
+            sign_identity=args.macos_sign_identity,
+            hardened_runtime=args.macos_sign_notarization,
+        )
+        print(f"Repaired {repaired_count} bundled macOS Qt plugins.")
     print(f"Build verified under: {output_dir}")
     return 0
 

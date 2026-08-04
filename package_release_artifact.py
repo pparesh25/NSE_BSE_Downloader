@@ -11,9 +11,12 @@ import platform
 import shutil
 import stat
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional, Sequence
+
+import yaml
 
 from app_metadata import APP_NAME, PRODUCT_NAME
 from version import __version__
@@ -72,12 +75,49 @@ def executable_path(package: Path, target_platform: str) -> Path:
 
 
 def smoke_test(package: Path, target_platform: str) -> None:
-    """Load the packaged program and exit through argparse before data setup."""
+    """Exercise CLI loading and an isolated real GUI startup."""
 
     executable = executable_path(package, target_platform)
+    _run_smoke_command(executable, ["--help"], package.parent, os.environ.copy())
+
+    with tempfile.TemporaryDirectory(prefix="nse-bse-gui-smoke-") as directory:
+        root = Path(directory)
+        config = yaml.safe_load(
+            (PROJECT_ROOT / "config.yaml").read_text(encoding="utf-8")
+        )
+        config["data_paths"]["base_folder"] = str(root / "market-data")
+        config_path = root / "smoke-config.yaml"
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        isolated_home = root / "home"
+        isolated_home.mkdir()
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(isolated_home),
+            "USERPROFILE": str(isolated_home),
+            "XDG_CONFIG_HOME": str(root / "xdg-config"),
+            "XDG_CACHE_HOME": str(root / "xdg-cache"),
+            "QT_QPA_PLATFORM": "offscreen",
+        })
+        _run_smoke_command(
+            executable,
+            ["--smoke-gui", "--config", str(config_path)],
+            package.parent,
+            environment,
+        )
+        if not (root / "market-data").is_dir():
+            raise RuntimeError("Packaged GUI did not initialize its isolated data root")
+
+
+def _run_smoke_command(
+    executable: Path,
+    arguments: Sequence[str],
+    cwd: Path,
+    environment: dict[str, str],
+) -> None:
     result = subprocess.run(
-        [str(executable), "--help"],
-        cwd=package.parent,
+        [str(executable), *arguments],
+        cwd=cwd,
+        env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -86,9 +126,10 @@ def smoke_test(package: Path, target_platform: str) -> None:
     )
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace")[-2000:]
+        command = " ".join(arguments)
         raise RuntimeError(
-            f"Packaged --help smoke test failed with {result.returncode}: "
-            f"{stderr}"
+            f"Packaged {command} smoke test failed with "
+            f"{result.returncode}: {stderr}"
         )
 
 
@@ -160,6 +201,7 @@ def create_release_archive(
     target_platform: str,
     architecture: str,
     output_dir: Path,
+    trust_status: str = "unsigned",
 ) -> tuple[Path, Path]:
     """Create a deterministic single-root ZIP and its SHA-256 sidecar."""
 
@@ -178,6 +220,7 @@ def create_release_archive(
         "platform": target_platform,
         "architecture": architecture,
         "git_commit": _git_commit(),
+        "trust_status": trust_status,
     }
 
     with zipfile.ZipFile(
@@ -252,6 +295,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--architecture", default=normalized_architecture())
     parser.add_argument(
+        "--trust-status",
+        choices=("unsigned", "signed", "notarized"),
+        default="unsigned",
+        help="Trust verification completed before packaging",
+    )
+    parser.add_argument(
         "--skip-smoke-test",
         action="store_true",
         help="Package without execution; intended only for unit-test fixtures",
@@ -269,6 +318,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         target_platform=args.target_platform,
         architecture=args.architecture,
         output_dir=args.output_dir.resolve(),
+        trust_status=args.trust_status,
     )
     validate_release_archive(archive_path)
     if not checksum_path.is_file():

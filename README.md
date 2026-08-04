@@ -53,11 +53,16 @@ downloaded again is published under the current stable nine-column EQ/SME/FO
 contract. Back up important user data before a major upgrade and use the official
 GitHub Release assets rather than an archive from a mutable branch.
 
-## Nuitka packaging preparation
+## Nuitka packaging and release trust
 
-Nuitka packaging is configured but no v1.1 packaged binary has been produced yet.
-The default commands only validate resources/dependencies and print the build
-command:
+Nuitka packaging and project-owned cross-platform icons are configured. GitHub
+Actions builds unsigned macOS ARM64, Windows x64, and Linux x64 test candidates;
+a separate manual workflow is reserved for credential-gated macOS
+signing/notarization and Windows Authenticode signing. No workflow publishes a
+release or enables the updater automatically.
+
+The default local commands only validate resources/dependencies and print the
+build command:
 
 ```bash
 /Users/paresh/miniforge3/envs/opentrader313/bin/python build_nuitka_cross_platform.py --target-platform=darwin
@@ -67,8 +72,9 @@ command:
 Neither command installs Nuitka, deletes output nor starts compilation without
 an explicit `--build`. Runtime config/QR paths work independently of the launch
 directory; user data and preferences remain outside the read-only app bundle.
-See [PACKAGING.md](PACKAGING.md) for the future build, signing/notarization and
-fresh-user verification checklist.
+See [PACKAGING.md](PACKAGING.md) and
+[RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md) for build evidence,
+credential setup, clean-machine verification, and publication gates.
 
 ## Using the app
 
@@ -246,7 +252,7 @@ python build_nuitka_cross_platform.py --target linux
 ```
 They also verify bundle-root config/QR lookup, compiled-module version detection,
 platform-specific Nuitka command generation and the default no-build guard. The
-strict project mypy configuration currently passes all 39 source files.
+strict project mypy configuration currently passes all 45 source files.
 
 ## Version history
 

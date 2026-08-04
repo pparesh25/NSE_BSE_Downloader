@@ -2,9 +2,15 @@
 
 ## Current status
 
-The repository is prepared for a Nuitka packaged-app build, but no binary or
-app bundle has been built yet. The build entry point defaults to a no-write dry
-run and requires `--build` before it can start compilation.
+Unsigned Nuitka artifact builds have been validated on macOS ARM64, Windows
+x64, and Linux x64. They are reproducible test candidates, not public releases.
+The build entry point still defaults to a no-write dry run and requires
+`--build` before compilation can start.
+
+Project-owned PNG, ICO, and ICNS icons are required packaging resources. A
+manual, credential-gated trusted-candidate workflow is also defined for macOS
+Developer ID signing/notarization and Windows Authenticode signing. See
+`RELEASE_TRUST_ASSETS.md` for credential setup and publication gates.
 
 Supported/tested source runtimes:
 
@@ -52,12 +58,20 @@ script refuses broad project/root cleanup targets.
 Use `--standalone-folder` for an inspectable `.app`/distribution folder rather
 than the default app/onefile mode.
 
+On macOS, the helper automatically repairs PySide6 plugin dependencies that
+still use framework-style `@rpath` references after Nuitka creates its flat Qt
+library layout. Modified plugins and the outer app bundle are re-signed, then
+the complete bundle signature is verified before the build is accepted.
+
 ## Bundled and writable data
 
 Bundled read-only resources:
 
 - `config.yaml`
 - `src/gui/resources/QR_UPI.jpeg`
+- `src/gui/resources/icon.png`
+- `src/gui/resources/icon.ico`
+- `src/gui/resources/icon.icns`
 
 `version.py` is compiled as a Python module and is not duplicated as editable
 data. `Market Holidays` is no longer bundled because calendars are retrieved
@@ -85,10 +99,11 @@ native executable/bundle identity.
 
 Before a distributable release, the remaining gates are:
 
-1. Add a project-owned `.icns` icon (the command safely uses Nuitka's default
-   icon until one exists).
-2. Run the actual Apple Silicon build and inspect its compilation report.
-3. Configure Developer ID signing and notarization credentials outside Git.
-4. Test first launch from a fresh macOS user account, data-folder permissions,
-   QR rendering, update notification and every segment download.
-5. Publish an immutable release asset and place its URL/SHA-256 in `version.py`.
+1. Configure the protected `release-signing` GitHub environment and credentials.
+2. Run the manual trusted workflow for the exact intended commit.
+3. Inspect signature, notarization, compilation, smoke-test, and checksum
+   evidence.
+4. Complete interactive first-launch and segment checks on fresh macOS and
+   Windows machines using an isolated data root.
+5. Publish immutable release assets and place the reviewed URL/SHA-256 pair in
+   `version.py` only after acceptance.

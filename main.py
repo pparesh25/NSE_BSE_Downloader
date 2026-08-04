@@ -19,7 +19,7 @@ from pathlib import Path
 
 from src.core.config import Config
 from src.gui.main_window import MainWindow
-from runtime_paths import default_config_path
+from runtime_paths import default_config_path, resource_path
 from runtime_identity import configure_process_identity
 from version import get_version
 from app_metadata import (
@@ -30,6 +30,7 @@ from app_metadata import (
 )
 
 try:
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
     GUI_AVAILABLE = True
 except ImportError:
@@ -65,6 +66,11 @@ Examples:
         nargs=2,
         metavar=("EXCHANGE", "SYMBOL"),
         help="Rebuild one symbol history from validated raw snapshots",
+    )
+    parser.add_argument(
+        "--smoke-gui",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     repair.add_argument(
         "--rebuild-exchange",
@@ -148,7 +154,7 @@ def run_rebuild_mode(config_path: str, args) -> int:
         return 1
 
 
-def run_gui_mode(config_path: str):
+def run_gui_mode(config_path: str, *, smoke_test: bool = False):
     """Run the application in GUI mode"""
     if not GUI_AVAILABLE:
         print("Error: PySide6 is not installed. Cannot run GUI mode.")
@@ -168,6 +174,11 @@ def run_gui_mode(config_path: str):
     app.setApplicationVersion(get_version())
     app.setOrganizationName(ORGANIZATION_NAME)
     app.setOrganizationDomain(ORGANIZATION_DOMAIN)
+    app_icon = QIcon(str(resource_path("src", "gui", "resources", "icon.png")))
+    if app_icon.isNull():
+        print("Error: bundled application icon could not be loaded.")
+        return 1
+    app.setWindowIcon(app_icon)
 
     # Set application style
     app.setStyle("Fusion")
@@ -178,7 +189,17 @@ def run_gui_mode(config_path: str):
 
         # Create and show main window
         main_window = MainWindow(config)
+        main_window.setWindowIcon(app_icon)
         main_window.show()
+
+        if smoke_test:
+            # Exercise real widget construction, one event-processing pass,
+            # and the normal close path without relying on a compiled Python
+            # timer callback to terminate the release probe.
+            app.processEvents()
+            main_window.close()
+            app.processEvents()
+            return 0
 
         # Run the application
         return app.exec()
@@ -213,6 +234,8 @@ def main():
             return run_rebuild_mode(str(config_path), args)
 
         # Run in GUI mode
+        if args.smoke_gui:
+            return run_gui_mode(str(config_path), smoke_test=True)
         return run_gui_mode(str(config_path))
 
     except KeyboardInterrupt:

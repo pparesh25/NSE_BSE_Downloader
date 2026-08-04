@@ -986,7 +986,7 @@ class MainWindow(QMainWindow):
 
         # Batch updates to reduce flickering
         self.pending_updates: Dict[str, tuple] = {}
-        self.update_timer = QTimer()
+        self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.process_pending_updates)
         self.update_timer.start(100)  # Process updates every 100ms
 
@@ -1005,7 +1005,7 @@ class MainWindow(QMainWindow):
         self.update_check_timer.start(3000)
 
         # Set up status update timer
-        self.status_timer = QTimer()
+        self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self.update_status_display)
         self.status_timer.start(1000)  # Update every second
         QTimer.singleShot(0, self._fit_window_to_sections)
@@ -2072,6 +2072,8 @@ class MainWindow(QMainWindow):
                     return
 
             self.update_check_timer.stop()
+            self.update_timer.stop()
+            self.status_timer.stop()
 
             if download_running or update_running:
                 self._close_after_workers = True

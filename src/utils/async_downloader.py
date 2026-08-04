@@ -10,8 +10,11 @@ Provides concurrent download capabilities with:
 
 import asyncio
 import aiohttp
+from io import BytesIO
 import logging
 import random
+import zipfile
+import zlib
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Optional, Callable, Dict, Any
@@ -99,12 +102,9 @@ class AsyncDownloadManager:
         }
         self.telemetry = getattr(config, "pipeline_telemetry", None) or PipelineTelemetry()
         self._lag_monitor = EventLoopLagMonitor(self.telemetry)
-        self.transport_pool: Optional[TransportPool] = getattr(
-            config, "transport_pool", None
-        )
-        self._owns_transport_pool = self.transport_pool is None
-        if self.transport_pool is None:
-            self.transport_pool = TransportPool(config)
+        shared_pool = getattr(config, "transport_pool", None)
+        self._owns_transport_pool = shared_pool is None
+        self.transport_pool: TransportPool = shared_pool or TransportPool(config)
 
     async def __aenter__(self):
         """Async context manager entry"""
@@ -122,45 +122,8 @@ class AsyncDownloadManager:
 
     async def _create_session(self) -> None:
         """Create aiohttp session with appropriate settings"""
-        if self.transport_pool is not None:
-            await self.transport_pool.start()
-            self.session = self.transport_pool.session
-            return
-        timeout = aiohttp.ClientTimeout(total=self.download_settings.timeout_seconds)
-
-        # Enhanced headers optimized for NSE/BSE servers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1'
-        }
-
-        # Enhanced connector with NSE-specific optimizations
-        connector = aiohttp.TCPConnector(
-            limit=self.download_settings.max_concurrent_downloads * 2,
-            limit_per_host=self.download_settings.max_concurrent_downloads,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=60,  # Keep connections alive longer for NSE
-            enable_cleanup_closed=True,  # Clean up closed connections
-            force_close=False,  # Reuse connections when possible
-            ssl=True,
-        )
-
-        self.session = aiohttp.ClientSession(
-            timeout=timeout,
-            headers=headers,
-            connector=connector
-        )
-
-        self.logger.info(f"Async session created with timeout: {self.download_settings.timeout_seconds}s")
+        await self.transport_pool.start()
+        self.session = self.transport_pool.session
 
     async def update_session_timeout(self, new_timeout_seconds: int) -> None:
         """
@@ -186,13 +149,12 @@ class AsyncDownloadManager:
 
     async def _close_session(self) -> None:
         """Close aiohttp session"""
-        if self.transport_pool is not None and not self._owns_transport_pool:
+        if not self._owns_transport_pool:
             self.session = self.transport_pool.session
             return
-        if self.session:
-            await self.session.close()
-            self.session = None
-            self.logger.info("Async session closed")
+        await self.transport_pool.close()
+        self.session = None
+        self.logger.info("Async session closed")
 
     def set_progress_callback(self, callback: Callable[[int, int, str], None]) -> None:
         """
@@ -361,7 +323,9 @@ class AsyncDownloadManager:
                 "technical_details": error_message
             }
 
-        if any(term in error_lower for term in ("html", "empty zip", "crc", "truncated", "mime")):
+        if any(term in error_lower for term in (
+            "html", "empty zip", "empty report", "crc", "truncated", "mime"
+        )):
             return {
                 "type": "retryable_payload",
                 "user_message": f"Transient report payload for {task.date_str}: {error_message}",
@@ -422,8 +386,16 @@ class AsyncDownloadManager:
                 "technical_details": error_message
             }
 
-        # Access denied (403, 401)
-        if status_code in {401, 403} or any(code in error_lower for code in ["403", "401", "forbidden", "unauthorized"]):
+        if status_code == 401 or "401" in error_lower or "unauthorized" in error_lower:
+            return {
+                "type": "unauthorized",
+                "user_message": f"Unauthorized request for {task.date_str}",
+                "should_retry": False,
+                "technical_details": error_message,
+            }
+
+        # One controlled retry is allowed for a transient access block.
+        if status_code == 403 or "403" in error_lower or "forbidden" in error_lower:
             return {
                 "type": "access_denied",
                 "user_message": f"Access denied for {task.date_str} - server may be blocking requests",
@@ -453,11 +425,6 @@ class AsyncDownloadManager:
 
         async with self.semaphore:  # Limit concurrent downloads
             try:
-                # Simple rate limiting
-                delay = self._calculate_delay(task)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-
                 # Simple retry logic for all servers
                 max_attempts = max(1, self._get_retry_attempts(task))
                 last_error = None
@@ -694,6 +661,9 @@ class AsyncDownloadManager:
                         url=task.url,
                         status_code=200,
                     )
+                await asyncio.to_thread(
+                    self._validate_payload_envelope, bytes(file_data), task.url
+                )
 
                 download_time = time.time() - start_time
 
@@ -723,10 +693,33 @@ class AsyncDownloadManager:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Let the outer retry loop retain the concrete exception type and
-            # message.  In particular, swallowing TimeoutError here previously
-            # disabled the timeout retry branch and produced a blank error.
+            # Preserve the concrete failure for the outer retry state machine.
             raise
+
+    @staticmethod
+    def _validate_payload_envelope(payload: bytes, url: str) -> None:
+        """Reject retryable empty, truncated, or CRC-invalid ZIP payloads."""
+        if not payload:
+            raise NetworkError("Server returned an empty report payload", url=url)
+        if not payload.startswith(b"PK"):
+            return
+        try:
+            with zipfile.ZipFile(BytesIO(payload)) as archive:
+                members = [item for item in archive.infolist() if not item.is_dir()]
+                if not members or all(item.file_size == 0 for item in members):
+                    raise NetworkError("Server returned an empty ZIP report", url=url)
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise NetworkError(
+                        f"ZIP CRC failure in {bad_member}", url=url
+                    )
+        except NetworkError:
+            raise
+        except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as error:
+            raise NetworkError(
+                f"Server returned a truncated or CRC-invalid ZIP report: {error}",
+                url=url,
+            ) from error
 
     @staticmethod
     def _parse_retry_after(value: Optional[str]) -> Optional[float]:

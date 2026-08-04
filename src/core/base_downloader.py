@@ -718,9 +718,10 @@ class BaseDownloader(ABC):
                     max(processed_days),
                     add_sme_suffix=add_sme_suffix,
                 )
-                summary = CorporateActionEngine(
-                    self.config.base_data_path
-                ).apply(actions)
+                engine = CorporateActionEngine(self.config.base_data_path)
+                summary = await self._run_pipeline_stage(
+                    "persist", engine.apply, actions
+                )
                 self.logger.info(f"Corporate-action summary: {summary}")
                 for target_date in processed_days:
                     self._mark_pipeline(

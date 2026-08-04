@@ -67,10 +67,23 @@ class TransportPool:
         self.session = aiohttp.ClientSession(
             timeout=timeout,
             headers={
-                "User-Agent": "Mozilla/5.0 (NSE BSE Data Downloader)",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/webp,image/apng,*/*;q=0.8"
+                ),
                 "Accept-Language": "en-US,en;q=0.9",
                 "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
             },
             connector=connector,
         )

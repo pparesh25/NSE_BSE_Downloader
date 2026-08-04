@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from src.services.pipeline_telemetry import PipelineTelemetry
+from src.services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
 from src.utils.stage_executor import BoundedStageExecutor
 
 
@@ -42,3 +42,29 @@ def test_stage_executor_close_drains_queued_jobs():
         return executor._workers
 
     assert asyncio.run(run()) == []
+
+
+def test_blocking_stage_work_keeps_event_loop_lag_under_gate():
+    async def run():
+        telemetry = PipelineTelemetry()
+        monitor = EventLoopLagMonitor(telemetry, interval=0.005)
+        executor = BoundedStageExecutor(
+            name="persist", max_workers=1, queue_size=2, telemetry=telemetry
+        )
+        await monitor.start()
+        await asyncio.gather(*[
+            executor.run(time.sleep, 0.03, stage="persist")
+            for _ in range(4)
+        ])
+        await monitor.stop()
+        await executor.close()
+        return sorted(
+            event.fields["lag_ms"]
+            for event in telemetry.events
+            if event.kind == "event_loop_lag"
+        )
+
+    lags = asyncio.run(run())
+    assert lags
+    p95 = lags[int(0.95 * (len(lags) - 1))]
+    assert p95 < 100

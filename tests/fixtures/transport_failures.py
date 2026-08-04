@@ -65,7 +65,16 @@ def fixture_response(case: str) -> FixtureResponse:
         return FixtureResponse(case, body=_zip_payload(b""))
     if case == "crc":
         payload = bytearray(_zip_payload())
-        payload[-1] ^= 0xFF
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            info = archive.infolist()[0]
+        name_length = int.from_bytes(
+            payload[info.header_offset + 26:info.header_offset + 28], "little"
+        )
+        extra_length = int.from_bytes(
+            payload[info.header_offset + 28:info.header_offset + 30], "little"
+        )
+        data_offset = info.header_offset + 30 + name_length + extra_length
+        payload[data_offset] ^= 0xFF
         return FixtureResponse(case, body=bytes(payload))
     if case == "cancel":
         return FixtureResponse(case)

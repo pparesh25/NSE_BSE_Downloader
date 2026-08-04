@@ -336,12 +336,9 @@ class DownloadWorker(QThread):
                 telemetry=self.config.pipeline_telemetry,
             ),
         }
-        for executor in self.config.stage_executors.values():
-            await executor.start()
-        await transport_pool.start()
-
-        # Wait for all downloads to complete
         try:
+            await transport_pool.start()
+            # Wait for all downloads to complete.
             results = await asyncio.gather(
                 *self._tasks.values(), return_exceptions=True
             )
@@ -351,10 +348,18 @@ class DownloadWorker(QThread):
             await transport_pool.close()
             base_data_path = getattr(self.config, "base_data_path", None)
             if base_data_path is not None:
-                telemetry_path = (
-                    base_data_path / ".state" / "transport_events.jsonl"
-                )
-                self.config.pipeline_telemetry.export_jsonl(telemetry_path)
+                try:
+                    telemetry_path = (
+                        base_data_path / ".state" / "transport_events.jsonl"
+                    )
+                    self.config.pipeline_telemetry.export_jsonl(telemetry_path)
+                except Exception as error:
+                    # Observability must never replace the real run outcome.
+                    self.logger.warning(
+                        "Could not persist pipeline telemetry: %s", error
+                    )
+            self.config.transport_pool = None
+            self.config.stage_executors = {}
         settled = dict(zip(self._tasks, results))
 
         if not self.is_cancel_requested():

@@ -80,6 +80,12 @@ class Config:
         self._download_settings = DownloadSettings()
         self._date_settings = DateSettings()
         self._gui_settings = GUISettings()
+        # Run-scoped Phase 7 services are populated by DownloadWorker.  They
+        # live here explicitly so direct/CLI integrations can inspect or
+        # replace them without relying on undeclared dynamic attributes.
+        self.transport_pool: Any = None
+        self.pipeline_telemetry: Any = None
+        self.stage_executors: Dict[str, Any] = {}
 
         self.load_config()
         self._validate_config()

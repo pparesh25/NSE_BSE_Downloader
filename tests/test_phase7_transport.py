@@ -1,12 +1,18 @@
 import asyncio
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
 from src.core.exceptions import NetworkError
 from src.services.pipeline_telemetry import PipelineTelemetry
-from src.utils.async_downloader import AsyncDownloadManager
+from src.utils.async_downloader import (
+    AsyncDownloadManager,
+    DownloadResult,
+    DownloadTask,
+)
 from src.utils.transport_pool import TransportPool
+from tests.fixtures.transport_failures import fixture_response
 
 
 def _config():
@@ -88,3 +94,72 @@ def test_two_managers_share_run_pool_without_closing_it():
     first, second, still_open = asyncio.run(run())
     assert first is second
     assert still_open
+
+
+def test_empty_and_crc_zip_payloads_are_rejected_before_processing():
+    for case in ("empty_zip", "crc"):
+        with pytest.raises(NetworkError, match="ZIP"):
+            AsyncDownloadManager._validate_payload_envelope(
+                fixture_response(case).body,
+                "https://example.test/report.zip",
+            )
+
+
+def test_payload_validation_failure_retries_and_can_recover():
+    async def run():
+        config = _config()
+        config.download_settings.retry_attempts = 3
+        manager = AsyncDownloadManager(config)
+        manager._get_retry_delay = lambda *_args, **_kwargs: 0
+        task = DownloadTask(
+            "https://example.test/report.zip",
+            "2026-08-04",
+            date(2026, 8, 4),
+        )
+        attempts = 0
+
+        async def attempt(_task):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise NetworkError("Server returned an empty ZIP report")
+            return DownloadResult(task=_task, success=True, file_data=b"ok", file_size=2)
+
+        manager._attempt_download = attempt
+        result = await manager.download_file(task)
+        return result, attempts
+
+    result, attempts = asyncio.run(run())
+    assert result.success
+    assert attempts == 2
+
+
+def test_403_gets_one_controlled_retry_but_401_is_terminal():
+    async def attempts_for(status):
+        config = _config()
+        config.download_settings.retry_attempts = 3
+        manager = AsyncDownloadManager(config)
+        manager._get_retry_delay = lambda *_args, **_kwargs: 0
+        task = DownloadTask(
+            "https://example.test/report",
+            "2026-08-04",
+            date(2026, 8, 4),
+        )
+        attempts = 0
+
+        async def attempt(_task):
+            nonlocal attempts
+            attempts += 1
+            return DownloadResult(
+                task=_task,
+                success=False,
+                error_message=f"HTTP {status}",
+                status_code=status,
+            )
+
+        manager._attempt_download = attempt
+        await manager.download_file(task)
+        return attempts
+
+    assert asyncio.run(attempts_for(403)) == 2
+    assert asyncio.run(attempts_for(401)) == 1

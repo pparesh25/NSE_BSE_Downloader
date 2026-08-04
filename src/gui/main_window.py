@@ -37,7 +37,11 @@ from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.date_join_coordinator import DateJoinCoordinator
 from ..services.history_batch import HistoryBatchCoordinator
-from ..services.pipeline_telemetry import PipelineTelemetry
+from ..services.pipeline_telemetry import (
+    PipelineEvent,
+    PipelineStatusPresenter,
+    PipelineTelemetry,
+)
 from ..services.settings import SettingsService
 from ..utils.transport_pool import TransportPool
 from ..utils.stage_executor import BoundedStageExecutor
@@ -100,6 +104,7 @@ class DownloadWorker(QThread):
     all_downloads_completed = Signal(bool)    # overall success
     segment_outcome = Signal(str, str)        # exchange, GUIOutcome value
     overall_outcome = Signal(str)             # GUIOutcome value
+    retry_candidates_ready = Signal(object)   # segment -> ISO date list
 
     def __init__(
         self,
@@ -110,12 +115,17 @@ class DownloadWorker(QThread):
         custom_start_date: Optional[date] = None,
         custom_end_date: Optional[date] = None,
         append_options: Optional[Dict[str, bool]] = None,
+        retry_dates: Optional[Dict[str, List[date]]] = None,
     ):
         super().__init__()
         self.config = config
         self.append_options = append_options or {}
+        self.retry_dates = self.expand_retry_dates(
+            retry_dates or {}, self.append_options
+        )
         self.selected_exchanges = self.expand_selected_exchanges(
-            selected_exchanges, self.append_options
+            list(dict.fromkeys([*selected_exchanges, *self.retry_dates])),
+            self.append_options,
         )
         self.include_weekends = include_weekends
         self.timeout_seconds = timeout_seconds
@@ -132,6 +142,7 @@ class DownloadWorker(QThread):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tasks: Dict[str, asyncio.Task] = {}
         self.final_outcome = GUIOutcome.FAILED
+        self._status_presenter = PipelineStatusPresenter()
 
         # Update config timeout
         self.config.download_settings.timeout_seconds = timeout_seconds
@@ -183,6 +194,39 @@ class DownloadWorker(QThread):
         )
         unique = set(selected)
         return [name for name in order if name in unique]
+
+    @staticmethod
+    def expand_retry_dates(
+        retry_dates: Dict[str, List[date]], append_options: Dict[str, bool]
+    ) -> Dict[str, List[date]]:
+        """Close exact retry dates over required combined-file dependencies."""
+
+        expanded = {
+            name: set(values) for name, values in retry_dates.items() if values
+        }
+        markets = {
+            "NSE": (
+                ("sme_append_to_eq", "NSE_SME"),
+                ("index_append_to_eq", "NSE_INDEX"),
+            ),
+            "BSE": (("bse_index_append_to_eq", "BSE_INDEX"),),
+        }
+        for market, option_segments in markets.items():
+            eq_name = f"{market}_EQ"
+            dependencies = [
+                name for option, name in option_segments
+                if append_options.get(option, False)
+            ]
+            relevant = [eq_name, *dependencies]
+            dates = set().union(*(
+                expanded.get(name, set()) for name in relevant
+            ))
+            if dates:
+                for name in relevant:
+                    expanded.setdefault(name, set()).update(dates)
+        return {
+            name: sorted(values) for name, values in expanded.items()
+        }
 
     def update_timeout(self, new_timeout_seconds: int):
         """
@@ -255,6 +299,13 @@ class DownloadWorker(QThread):
 
         return ProgressCallback(on_progress, on_status, on_error)
 
+    def _handle_pipeline_event(self, event: PipelineEvent) -> None:
+        update = self._status_presenter.present(event)
+        if update is not None:
+            self.status_updated.emit(
+                update.exchange_segment, update.message
+            )
+
     def run(self):
         """Run downloads in background thread"""
         loop: Optional[asyncio.AbstractEventLoop] = None
@@ -323,6 +374,9 @@ class DownloadWorker(QThread):
         transport_pool = TransportPool(self.config)
         self.config.transport_pool = transport_pool
         self.config.pipeline_telemetry = PipelineTelemetry()
+        self.config.pipeline_telemetry.subscribe(
+            self._handle_pipeline_event
+        )
         settings = self.config.download_settings
         staged_engine = getattr(self.config, "pipeline_engine", "legacy") == "staged"
         if staged_engine:
@@ -394,6 +448,9 @@ class DownloadWorker(QThread):
                     )
             self.config.transport_pool = None
             self.config.stage_executors = {}
+            self.config.pipeline_telemetry.unsubscribe(
+                self._handle_pipeline_event
+            )
         settled = dict(zip(self._tasks, results))
 
         if not self.is_cancel_requested():
@@ -418,7 +475,25 @@ class DownloadWorker(QThread):
                 self.error_occurred.emit(exchange, f"Download failed: {result}")
 
         self.final_outcome = self._classify_overall_outcome(outcomes)
+        self.retry_candidates_ready.emit(self._collect_retry_candidates())
         return self.final_outcome == GUIOutcome.SUCCESS
+
+    def _collect_retry_candidates(self) -> Dict[str, List[str]]:
+        """Return exact failed/pending dates; skipped dates stay terminal."""
+
+        candidates: Dict[str, List[str]] = {}
+        for name, downloader in self.downloaders.items():
+            result = getattr(downloader, "last_segment_result", None)
+            if result is None:
+                continue
+            dates = [
+                item.target_date.isoformat()
+                for item in result.dates
+                if item.status not in {"success", "skipped"}
+            ]
+            if dates:
+                candidates[name] = sorted(set(dates))
+        return candidates
 
     async def _finalize_staged_histories(self) -> None:
         """Publish queued histories, then apply actions once per exchange."""
@@ -747,35 +822,39 @@ class DownloadWorker(QThread):
             if hasattr(downloader, 'config'):
                 downloader.config.download_settings.timeout_seconds = self.timeout_seconds
 
-            # Get date range
-            start_date, end_date = downloader.get_date_range(
-                self.custom_start_date, self.custom_end_date
-            )
-
-            # Check stop again before processing
-            if self.is_cancel_requested():
-                self.status_updated.emit(exchange, "Download stopped")
-                return False
-
-            # Get working days with weekend option
-            working_days = []
-            if start_date <= end_date:
-                working_days = downloader.get_working_days(
-                    start_date, end_date, self.include_weekends
+            forced_dates = self.retry_dates.get(exchange)
+            if forced_dates is not None:
+                working_days = forced_dates
+                self.status_updated.emit(
+                    exchange,
+                    f"Retrying {len(working_days)} failed/pending date(s)",
                 )
-            # Delivery reports can be published after their price report.  A
-            # later app run must retry those dates even when there is no new
-            # price date in the normal range.
-            working_days = downloader._with_pending_delivery_days(working_days)
-            if hasattr(downloader, "data_manager"):
-                gap_days = downloader.data_manager.get_missing_file_dates(
-                    downloader.exchange, downloader.segment
+            else:
+                start_date, end_date = downloader.get_date_range(
+                    self.custom_start_date, self.custom_end_date
                 )
-                working_days = sorted(set(working_days).union(gap_days))
-            if hasattr(downloader, "_with_incomplete_pipeline_days"):
-                working_days = downloader._with_incomplete_pipeline_days(
+
+                if self.is_cancel_requested():
+                    self.status_updated.emit(exchange, "Download stopped")
+                    return False
+
+                working_days = []
+                if start_date <= end_date:
+                    working_days = downloader.get_working_days(
+                        start_date, end_date, self.include_weekends
+                    )
+                working_days = downloader._with_pending_delivery_days(
                     working_days
                 )
+                if hasattr(downloader, "data_manager"):
+                    gap_days = downloader.data_manager.get_missing_file_dates(
+                        downloader.exchange, downloader.segment
+                    )
+                    working_days = sorted(set(working_days).union(gap_days))
+                if hasattr(downloader, "_with_incomplete_pipeline_days"):
+                    working_days = downloader._with_incomplete_pipeline_days(
+                        working_days
+                    )
 
             if not working_days:
                 downloader.no_work = True
@@ -785,6 +864,7 @@ class DownloadWorker(QThread):
             # Update total files for progress tracking
             downloader.total_files = len(working_days)
             downloader.completed_files = 0
+            downloader._progress_started_at = None
 
             # Start download with working days
             success = await downloader._download_implementation(working_days)
@@ -876,6 +956,7 @@ class MainWindow(QMainWindow):
         self.download_worker: Optional[DownloadWorker] = None
         self.download_button: QPushButton
         self.stop_button: QPushButton
+        self.retry_button: QPushButton
         self.donate_button: QPushButton
 
         # Status tracking
@@ -883,6 +964,8 @@ class MainWindow(QMainWindow):
         self.segment_outcomes: Dict[str, GUIOutcome] = {}
         self.successful_downloads: List[str] = []
         self.selected_exchanges_for_download: List[str] = []
+        self._retry_candidates: Dict[str, List[str]] = {}
+        self._retry_override: Optional[Dict[str, List[date]]] = None
         self._close_after_workers = False
         self._update_check_forced = False
 
@@ -1464,6 +1547,14 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_download)
         layout.addWidget(self.stop_button)
 
+        self.retry_button = QPushButton("Retry Failed/Pending")
+        self.retry_button.setEnabled(False)
+        self.retry_button.setToolTip(
+            "Retry only incomplete dates for the currently selected segments"
+        )
+        self.retry_button.clicked.connect(self.retry_incomplete)
+        layout.addWidget(self.retry_button)
+
         # Refresh button
         refresh_button = QPushButton("Refresh Status")
         refresh_button.clicked.connect(self.load_data_summary)
@@ -1574,7 +1665,12 @@ class MainWindow(QMainWindow):
     def start_download(self):
         """Start download process"""
         try:
-            selected_exchanges = self.get_selected_exchanges()
+            retry_dates = self._retry_override
+            self._retry_override = None
+            selected_exchanges = (
+                list(retry_dates) if retry_dates
+                else self.get_selected_exchanges()
+            )
 
             if not selected_exchanges:
                 QMessageBox.warning(self, "Warning", "Please select at least one exchange to download.")
@@ -1587,11 +1683,19 @@ class MainWindow(QMainWindow):
                     self.bse_index_append_checkbox.isChecked()
                 ),
             }
+            if retry_dates:
+                retry_dates = DownloadWorker.expand_retry_dates(
+                    retry_dates, append_options
+                )
+                selected_exchanges = list(retry_dates)
             selected_exchanges = DownloadWorker.expand_selected_exchanges(
                 selected_exchanges, append_options
             )
 
-            custom_start, custom_end = self.get_selected_date_range()
+            custom_start, custom_end = (
+                (None, None) if retry_dates
+                else self.get_selected_date_range()
+            )
             if custom_start and custom_end and custom_start > custom_end:
                 QMessageBox.warning(
                     self,
@@ -1602,7 +1706,7 @@ class MainWindow(QMainWindow):
 
             # Automatic mode can stop early when every selected database is
             # current.  Custom mode intentionally permits historical reruns.
-            if custom_start is None:
+            if custom_start is None and not retry_dates:
                 data_manager = DataManager(self.config)
                 all_up_to_date, status_message = (
                     data_manager.check_all_databases_status(selected_exchanges)
@@ -1621,6 +1725,7 @@ class MainWindow(QMainWindow):
             self.download_button.setEnabled(False)
             self.download_button.setText("Downloading...")
             self.stop_button.setEnabled(True)
+            self.retry_button.setEnabled(False)
 
             progress_section = self.collapsible_sections.get("progress")
             if progress_section:
@@ -1655,6 +1760,7 @@ class MainWindow(QMainWindow):
                 custom_start,
                 custom_end,
                 append_options,
+                retry_dates,
             )
 
             # Connect signals
@@ -1667,6 +1773,9 @@ class MainWindow(QMainWindow):
             self.download_worker.overall_outcome.connect(
                 self.handle_overall_outcome
             )
+            self.download_worker.retry_candidates_ready.connect(
+                self.handle_retry_candidates
+            )
             self.download_worker.finished.connect(self._maybe_finish_close)
 
             # Start worker thread
@@ -1674,7 +1783,10 @@ class MainWindow(QMainWindow):
 
             self.status_bar.showMessage("Download started...")
             range_message = (
-                f"custom range {custom_start} to {custom_end}"
+                f"{sum(len(values) for values in retry_dates.values())} "
+                "failed/pending date(s)"
+                if retry_dates
+                else f"custom range {custom_start} to {custom_end}"
                 if custom_start
                 else "automatic date range"
             )
@@ -1686,6 +1798,38 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error starting download: {e}")
             QMessageBox.critical(self, "Error", f"Failed to start download: {e}")
             self.reset_download_ui()
+
+    def retry_incomplete(self) -> None:
+        """Retry exact incomplete dates for user-selected failed segments."""
+
+        selected = set(self.get_selected_exchanges())
+        retry = {
+            segment: [date.fromisoformat(value) for value in values]
+            for segment, values in self._retry_candidates.items()
+            if segment in selected
+        }
+        if not retry:
+            QMessageBox.information(
+                self,
+                "Nothing Selected to Retry",
+                "Select at least one segment that has failed or pending dates.",
+            )
+            return
+        details = "\n".join(
+            f"{segment}: {', '.join(value.isoformat() for value in values)}"
+            for segment, values in retry.items()
+        )
+        answer = QMessageBox.question(
+            self,
+            "Retry Failed/Pending Dates",
+            "Retry these exact dates?\n\n" + details,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._retry_override = retry
+        self.start_download()
 
     def stop_download(self):
         """Stop download process gracefully"""
@@ -2064,12 +2208,30 @@ class MainWindow(QMainWindow):
         # Refresh data summary without clearing console
         self.load_data_summary(clear_console=False)
 
+    def handle_retry_candidates(self, candidates: object) -> None:
+        """Expose exact retryable dates without including terminal skips."""
+
+        if not isinstance(candidates, dict):
+            return
+        self._retry_candidates = {
+            str(segment): [str(value) for value in values]
+            for segment, values in candidates.items()
+            if isinstance(values, list)
+        }
+        self.retry_button.setEnabled(bool(self._retry_candidates))
+        if self._retry_candidates:
+            count = sum(len(values) for values in self._retry_candidates.values())
+            self.append_status_message(
+                f"{count} failed/pending date(s) are available for exact retry."
+            )
+
     def reset_download_ui(self, preserve_status: bool = False):
         """Reset download UI to initial state"""
         self.download_button.setEnabled(True)
         self.download_button.setText("Start Download")
         self.stop_button.setEnabled(False)
         self.stop_button.setText("Stop Download")
+        self.retry_button.setEnabled(bool(self._retry_candidates))
 
         # Reset progress bars and status labels to initial state
         for exchange, progress_bar in self.progress_bars.items():

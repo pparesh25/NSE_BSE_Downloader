@@ -287,6 +287,7 @@ class HistoryBatchCoordinator:
             "history_queued",
             exchange=exchange,
             segment=segment,
+            exchange_segment=f"{exchange}_{segment}",
             target_date=target_date.isoformat(),
             rows=len(rows),
         )

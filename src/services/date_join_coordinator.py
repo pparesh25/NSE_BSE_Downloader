@@ -37,6 +37,14 @@ class DateJoinCoordinator:
         self._ready: dict[tuple[str, date], set[str]] = {}
         self._results: dict[tuple[str, date], CombinedBuildResult] = {}
         self._lock = RLock()
+        self.peak_cached_dates = 0
+
+    @property
+    def cached_dates(self) -> int:
+        """Current prepared-frame date count for rollout evidence."""
+
+        with self._lock:
+            return len(self._cache)
 
     def offer(
         self,
@@ -62,6 +70,9 @@ class DateJoinCoordinator:
             self._cache.move_to_end(key)
             while len(self._cache) > self.max_cache_dates:
                 self._cache.popitem(last=False)
+            self.peak_cached_dates = max(
+                self.peak_cached_dates, len(self._cache)
+            )
 
             required = {"EQ", *dependencies}
             if not required.issubset(self._ready[key]):

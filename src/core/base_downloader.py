@@ -8,6 +8,7 @@ Includes date management, folder operations, and data processing interfaces.
 import asyncio
 import hashlib
 import logging
+import time
 from abc import ABC, abstractmethod
 from datetime import date
 from pathlib import Path
@@ -97,6 +98,7 @@ class BaseDownloader(ABC):
         self.progress_callback: Optional[ProgressCallback] = None
         self.total_files = 0
         self.completed_files = 0
+        self._progress_started_at: Optional[float] = None
         self.cancel_requested: Optional[Callable[[], bool]] = None
         self.combined_dependencies: tuple[str, ...] = ()
         self.combined_required = False
@@ -108,7 +110,22 @@ class BaseDownloader(ABC):
     def _update_progress(self, message: str = "") -> None:
         """Update progress percentage"""
         if self.progress_callback and self.total_files > 0:
+            now = time.monotonic()
+            started = getattr(self, "_progress_started_at", None)
+            if started is None:
+                started = now
+                self._progress_started_at = started
             percentage = int((self.completed_files / self.total_files) * 100)
+            remaining = max(0, self.total_files - self.completed_files)
+            if self.completed_files > 0 and remaining:
+                elapsed = max(0.0, now - started)
+                eta_seconds = elapsed / self.completed_files * remaining
+                eta = (
+                    f"{eta_seconds / 60:.1f}m"
+                    if eta_seconds >= 60
+                    else f"{eta_seconds:.0f}s"
+                )
+                message = f"{message} · {remaining} remaining · ETA {eta}"
             self.progress_callback.on_progress(self.exchange_segment, percentage, message)
 
     def _update_status(self, message: str) -> None:
@@ -151,7 +168,11 @@ class BaseDownloader(ABC):
         executors = getattr(self.config, "stage_executors", None)
         executor = executors.get(stage) if executors else None
         if executor is not None:
-            return await executor.run(function, *args, stage=stage)
+            return await executor.run(
+                function,
+                *args,
+                stage=f"{self.exchange_segment}:{stage}",
+            )
         # Direct service use and older integrations still receive loop
         # isolation, with no global lifecycle assumption.
         return await asyncio.to_thread(function, *args)
@@ -342,6 +363,17 @@ class BaseDownloader(ABC):
             status,
             **metadata,
         )
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(
+                "pipeline_stage",
+                exchange_segment=self.exchange_segment,
+                exchange=self.exchange,
+                segment=self.segment,
+                date=target_date.isoformat(),
+                stage=stage,
+                status=status,
+            )
 
     def _quarantine_download_payload(
         self, payload: Optional[bytes], target_date: date, label: str
@@ -614,12 +646,14 @@ class BaseDownloader(ABC):
                 url=self.build_url(target_date),
                 date_str=target_date.isoformat(),
                 target_date=target_date,
+                exchange_segment=self.exchange_segment,
             )]
             if include_delivery:
                 tasks.append(DownloadTask(
                     url=delivery_source(self.exchange, target_date).url,
                     date_str=f"{target_date.isoformat()} delivery",
                     target_date=target_date,
+                    exchange_segment=self.exchange_segment,
                 ))
 
             try:
@@ -851,6 +885,7 @@ class BaseDownloader(ABC):
                     url=source.url,
                     date_str=target_date.isoformat(),
                     target_date=target_date,
+                    exchange_segment=self.exchange_segment,
                 )
                 async with AsyncDownloadManager(self.config) as manager:
                     await self.update_async_session_timeout(

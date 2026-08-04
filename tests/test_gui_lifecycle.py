@@ -130,6 +130,30 @@ def test_worker_classifies_pending_warning_and_repair_required():
         "NSE_EQ", True
     ) == GUIOutcome.WARNING
 
+
+def test_retry_candidates_include_failed_and_partial_but_not_skipped():
+    _application()
+    config = SimpleNamespace(
+        download_settings=SimpleNamespace(timeout_seconds=5)
+    )
+    worker = DownloadWorker(config, [])
+    days = [date(2026, 7, 30), date(2026, 7, 31), date(2026, 8, 3)]
+    worker.downloaders = {
+        "NSE_EQ": SimpleNamespace(last_segment_result=SegmentResult(
+            "NSE",
+            "EQ",
+            (
+                DateResult(days[0], "partial"),
+                DateResult(days[1], "failed"),
+                DateResult(days[2], "skipped"),
+            ),
+        ))
+    }
+
+    assert worker._collect_retry_candidates() == {
+        "NSE_EQ": ["2026-07-30", "2026-07-31"]
+    }
+
     worker.downloaders["NSE_EQ"] = SimpleNamespace(
         last_segment_result=None,
         no_work=True,

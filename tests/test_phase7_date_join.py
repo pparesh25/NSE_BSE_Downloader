@@ -107,6 +107,8 @@ def test_cache_eviction_uses_durable_component_fallback(tmp_path):
     )
     assert result is not None and result.ok
     assert result.rows == 3
+    assert coordinator.cached_dates <= 1
+    assert coordinator.peak_cached_dates == 1
 
 
 def test_finalize_missing_dependency_keeps_existing_public_eq(tmp_path):

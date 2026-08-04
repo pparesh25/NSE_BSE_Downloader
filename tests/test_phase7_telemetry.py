@@ -4,7 +4,11 @@ from datetime import date
 from types import SimpleNamespace
 
 from src.core.config import Config
-from src.services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
+from src.services.pipeline_telemetry import (
+    EventLoopLagMonitor,
+    PipelineStatusPresenter,
+    PipelineTelemetry,
+)
 from src.utils.async_downloader import AsyncDownloadManager, DownloadResult, DownloadTask
 
 
@@ -22,7 +26,12 @@ def _manager(telemetry):
 def test_attempt_telemetry_is_structured_and_does_not_change_retry_result():
     telemetry = PipelineTelemetry()
     manager = _manager(telemetry)
-    task = DownloadTask("https://example.test/data", "2026-08-04", date(2026, 8, 4))
+    task = DownloadTask(
+        "https://example.test/data",
+        "2026-08-04",
+        date(2026, 8, 4),
+        exchange_segment="NSE_EQ",
+    )
 
     async def attempt(_task):
         return type("Result", (), {"success": True, "status_code": 200, "file_size": 3})()
@@ -35,6 +44,7 @@ def test_attempt_telemetry_is_structured_and_does_not_change_retry_result():
         "download_attempt_started", "download_attempt_finished"
     ]
     assert telemetry.events[1].fields["duration_ms"] >= 0
+    assert telemetry.events[0].fields["exchange_segment"] == "NSE_EQ"
 
 
 def test_retry_telemetry_records_reason_and_delay():
@@ -77,6 +87,64 @@ def test_telemetry_export_is_jsonl(tmp_path):
     path = tmp_path / "events.jsonl"
     telemetry.export_jsonl(path)
     assert json.loads(path.read_text())['kind'] == "prepare"
+
+
+def test_telemetry_subscribers_are_non_fatal_and_removable():
+    telemetry = PipelineTelemetry()
+    received = []
+
+    def broken(_event):
+        raise RuntimeError("status display failed")
+
+    telemetry.subscribe(broken)
+    telemetry.subscribe(received.append)
+    telemetry.record("first", value=1)
+    telemetry.unsubscribe(received.append)
+    telemetry.record("second", value=2)
+
+    assert [event.kind for event in telemetry.events] == ["first", "second"]
+    assert [event.kind for event in received] == ["first"]
+
+
+def test_status_presenter_exposes_attempt_retry_queue_and_stage_outcome():
+    telemetry = PipelineTelemetry()
+    presenter = PipelineStatusPresenter()
+    events = [
+        telemetry.record(
+            "download_attempt_started",
+            exchange_segment="NSE_EQ",
+            date="2026-08-04",
+            attempt=1,
+            max_attempts=3,
+        ),
+        telemetry.record(
+            "retry_scheduled",
+            exchange_segment="NSE_EQ",
+            date="2026-08-04",
+            next_attempt=2,
+            max_attempts=3,
+            delay_seconds=0.5,
+            reason="server_error",
+        ),
+        telemetry.record(
+            "stage_queued",
+            stage="NSE_EQ:persist",
+            queue_depth=2,
+        ),
+        telemetry.record(
+            "stage_finished",
+            stage="NSE_EQ:persist",
+            outcome="success",
+        ),
+    ]
+
+    messages = [presenter.present(event).message for event in events]
+    assert messages == [
+        "Downloading 2026-08-04 · attempt 1/3",
+        "Retry 2/3 in 0.5s · server_error · 2026-08-04",
+        "Persist queued · queue depth 2",
+        "Persist success",
+    ]
 
 
 def test_pipeline_engine_defaults_to_legacy_and_accepts_staged(tmp_path):

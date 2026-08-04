@@ -34,6 +34,7 @@ class DownloadTask:
     date_str: str
     target_date: Any  # date object
     retry_count: int = 0
+    exchange_segment: str = ""
 
     def __str__(self) -> str:
         return f"DownloadTask(url={self.url}, date={self.date_str})"
@@ -428,6 +429,10 @@ class AsyncDownloadManager:
                 # Simple retry logic for all servers
                 max_attempts = max(1, self._get_retry_attempts(task))
                 last_error = None
+                identity = (
+                    {"exchange_segment": task.exchange_segment}
+                    if task.exchange_segment else {}
+                )
 
                 for attempt in range(max_attempts):
                     attempt_started = time.monotonic_ns()
@@ -437,6 +442,7 @@ class AsyncDownloadManager:
                         url=task.url,
                         attempt=attempt + 1,
                         max_attempts=max_attempts,
+                        **identity,
                     )
                     try:
                         try:
@@ -459,6 +465,7 @@ class AsyncDownloadManager:
                             success=result.success,
                             bytes=result.file_size,
                             duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
                         )
                         if result.success:
                             self.download_stats['successful_downloads'] += 1
@@ -488,6 +495,8 @@ class AsyncDownloadManager:
                                     next_attempt=attempt + 2,
                                     reason=error_info["type"],
                                     delay_seconds=wait_time,
+                                    max_attempts=max_attempts,
+                                    **identity,
                                 )
                                 self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                                 await asyncio.sleep(wait_time)
@@ -511,6 +520,7 @@ class AsyncDownloadManager:
                             success=False,
                             error_type="timeout",
                             duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
                         )
                         timeout_value = self._get_timeout(task)
                         last_error = f"Server timeout after {timeout_value}s"
@@ -524,6 +534,8 @@ class AsyncDownloadManager:
                                 next_attempt=attempt + 2,
                                 reason="timeout",
                                 delay_seconds=wait_time,
+                                max_attempts=max_attempts,
+                                **identity,
                             )
                             self.logger.info(f"⏱️ Timeout retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                             await asyncio.sleep(wait_time)
@@ -542,6 +554,7 @@ class AsyncDownloadManager:
                             success=False,
                             error_type=type(e).__name__,
                             duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                            **identity,
                         )
                         last_error = f"Download error: {e}"
                         error_info = self._classify_error(str(e), task)
@@ -557,6 +570,8 @@ class AsyncDownloadManager:
                                 next_attempt=attempt + 2,
                                 reason=error_info["type"],
                                 delay_seconds=wait_time,
+                                max_attempts=max_attempts,
+                                **identity,
                             )
                             self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts}): {error_info['user_message']}")
                             await asyncio.sleep(wait_time)

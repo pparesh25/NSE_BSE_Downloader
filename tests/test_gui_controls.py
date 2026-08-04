@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel
 
+from src.core.base_downloader import BaseDownloader, ProgressCallback
 from src.gui.collapsible_section import CollapsibleSection
 from src.gui.main_window import DownloadWorker
 from src.gui.update_dialog import UpdateDialog
@@ -78,6 +79,60 @@ def test_download_worker_passes_custom_calendar_range():
     assert asyncio.run(worker._download_exchange_data("NSE_EQ", downloader))
     assert downloader.received_range == (start, end)
     assert downloader.received_days == [start, end]
+
+
+def test_download_worker_uses_only_exact_retry_dates():
+    _application()
+    days = [date(2026, 7, 30), date(2026, 8, 3)]
+    config = SimpleNamespace(
+        download_settings=SimpleNamespace(timeout_seconds=5)
+    )
+    worker = DownloadWorker(config, [], retry_dates={"NSE_EQ": days})
+    downloader = _RangeDownloader()
+
+    assert asyncio.run(worker._download_exchange_data("NSE_EQ", downloader))
+    assert downloader.received_range is None
+    assert downloader.received_days == days
+
+
+def test_progress_message_includes_remaining_count_and_eta(monkeypatch):
+    downloader = _RangeDownloader()
+    downloader.exchange_segment = "NSE_EQ"
+    downloader.total_files = 4
+    downloader.completed_files = 2
+    downloader._progress_started_at = 0.0
+    updates = []
+    downloader.progress_callback = ProgressCallback(
+        lambda segment, percent, message: updates.append(
+            (segment, percent, message)
+        ),
+        lambda *_args: None,
+        lambda *_args: None,
+    )
+    monkeypatch.setattr("src.core.base_downloader.time.monotonic", lambda: 10.0)
+
+    BaseDownloader._update_progress(downloader, "Completed 2026-08-04")
+
+    assert updates == [(
+        "NSE_EQ",
+        50,
+        "Completed 2026-08-04 · 2 remaining · ETA 10s",
+    )]
+
+
+def test_retry_dates_close_over_combined_dependencies_without_range_growth():
+    first = date(2026, 7, 30)
+    second = date(2026, 8, 3)
+    expanded = DownloadWorker.expand_retry_dates(
+        {"NSE_INDEX": [second], "NSE_EQ": [first]},
+        {"sme_append_to_eq": True, "index_append_to_eq": True},
+    )
+
+    assert expanded == {
+        "NSE_EQ": [first, second],
+        "NSE_INDEX": [first, second],
+        "NSE_SME": [first, second],
+    }
 
 
 def test_combined_options_expand_required_segments_in_fixed_order():

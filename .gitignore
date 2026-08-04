@@ -17,6 +17,8 @@ env/
 # Packaging and Nuitka output
 build/
 dist/
+dist-*/
+release-dist*/
 *.build/
 *.dist/
 *.onefile-build/

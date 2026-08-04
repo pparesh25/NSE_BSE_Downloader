@@ -1,7 +1,7 @@
 # Canonical repository migration record
 
 Date started: 2026-08-05 (Asia/Kolkata)
-Status: Local migration validation passed; release notification not published
+Status: Release artifact validation in progress; release notification not published
 
 ## Objective
 
@@ -104,6 +104,11 @@ The existing v1.0.1 release and its assets remain untouched.
 The local code-validation gates are complete. Actual release builds, platform smoke
 tests, signing/notarization decisions, release-asset checksums, and final update
 metadata remain release blockers.
+
+The first unsigned local macOS ARM64 build, updater-compatible archive work, trust
+findings, and clean multi-platform workflow are recorded in
+`RELEASE_BUILD_EVIDENCE.md`. That local build is evidence only and is not approved
+for publication.
 
 ## Release blockers
 

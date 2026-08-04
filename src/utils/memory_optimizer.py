@@ -14,14 +14,17 @@ from pathlib import Path
 from typing import Iterator, Optional, Dict, Any, Callable
 from contextlib import contextmanager
 
-try:
-    import psutil
-except Exception:  # pragma: no cover
-    psutil = None  # Optional dependency
-
 import pandas as pd
 
 from ..core.exceptions import DataProcessingError
+
+psutil: Any
+try:
+    import psutil as _psutil
+except Exception:  # pragma: no cover
+    psutil = None  # Optional dependency
+else:
+    psutil = _psutil
 
 
 class MemoryOptimizer:

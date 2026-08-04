@@ -1,7 +1,7 @@
 """
 GUI module for NSE/BSE Data Downloader
 
-Contains PyQt6-based user interface components.
+Contains PySide6-based user interface components.
 """
 
 from .main_window import MainWindow

@@ -1,35 +1,27 @@
 """
 Main Window for NSE/BSE Data Downloader
 
-PyQt6-based main window with exchange selection, progress tracking,
+PySide6-based main window with exchange selection, progress tracking,
 and background download management.
 """
 
-import sys
 import asyncio
 from datetime import date
-from typing import Dict, List, Optional
+from enum import Enum
+import time
+from threading import Event
+from typing import Any, Dict, List, Optional
 import logging
 
-try:
-    from PyQt6.QtWidgets import (
-        QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
-        QGroupBox, QFrame, QSplitter, QMessageBox, QApplication,
-        QStatusBar, QMenuBar, QMenu, QSizePolicy
-    )
-    from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
-    from PyQt6.QtGui import QFont, QIcon, QAction
-    GUI_AVAILABLE = True
-except ImportError:
-    GUI_AVAILABLE = False
-    # Create dummy classes for when PyQt6 is not available
-    class QMainWindow: pass
-    class QThread: pass
-    class pyqtSignal: 
-        def __init__(self, *args): pass
-        def connect(self, *args): pass
-        def emit(self, *args): pass
+from aiohttp import ClientError
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
+    QGroupBox, QFrame, QMessageBox, QStatusBar, QSizePolicy, QDateEdit,
+    QScrollArea, QSpinBox,
+)
+from PySide6.QtCore import QDate, QThread, Signal, Qt, QTimer
+from PySide6.QtGui import QFont, QAction
 
 from ..core.config import Config
 from ..core.data_manager import DataManager
@@ -42,58 +34,201 @@ from ..downloaders.bse_index_downloader import BSEIndexDownloader
 from ..utils.update_checker import UpdateChecker
 from .update_dialog import UpdateDialog
 from .donate_dialog import DonateDialog
-from ..utils.user_preferences import UserPreferences
-from ..core.base_downloader import ProgressCallback
+from ..core.base_downloader import BaseDownloader, ProgressCallback
 from ..core.exceptions import GUIError
+from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.date_join_coordinator import DateJoinCoordinator
+from ..services.history_batch import HistoryBatchCoordinator
+from ..services.pipeline_telemetry import (
+    PipelineEvent,
+    PipelineStatusPresenter,
+    PipelineTelemetry,
+)
+from ..services.settings import SettingsService
+from ..utils.transport_pool import TransportPool
+from ..utils.stage_executor import BoundedStageExecutor
 
+from .collapsible_section import CollapsibleSection
+
+
+
+class GUIOutcome(str, Enum):
+    """Stable outcome vocabulary shared by workers and GUI rendering."""
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    PENDING = "pending"
+    WARNING = "warning"
+    REPAIR_REQUIRED = "repair-required"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class UpdateCheckWorker(QThread):
     """Worker thread for checking updates"""
 
-    update_checked = pyqtSignal(dict)  # Update result
+    update_checked = Signal(dict)  # Update result
 
     def __init__(self, update_checker: UpdateChecker):
         super().__init__()
         self.update_checker = update_checker
         self.logger = logging.getLogger(__name__)
 
+    def request_stop(self) -> None:
+        """Suppress results after a close request without killing the thread."""
+
+        self.requestInterruption()
+
     def run(self):
         """Check for updates in background"""
         try:
+            if self.isInterruptionRequested():
+                return
             result = self.update_checker.check_for_updates()
-            self.update_checked.emit(result)
+            if not self.isInterruptionRequested():
+                self.update_checked.emit(result)
         except Exception as e:
             self.logger.error(f"Error in update check worker: {e}")
-            self.update_checked.emit({"update_available": False, "error": str(e)})
+            if not self.isInterruptionRequested():
+                self.update_checked.emit({
+                    "update_available": False,
+                    "error": str(e),
+                })
 
 
 class DownloadWorker(QThread):
     """Background worker thread for downloads"""
 
-    progress_updated = pyqtSignal(str, int, str)  # exchange, percentage, message
-    status_updated = pyqtSignal(str, str)         # exchange, status
-    error_occurred = pyqtSignal(str, str)         # exchange, error
-    download_completed = pyqtSignal(str, bool)    # exchange, success
-    all_downloads_completed = pyqtSignal(bool)    # overall success
+    progress_updated = Signal(str, int, str)  # exchange, percentage, message
+    status_updated = Signal(str, str)         # exchange, status
+    error_occurred = Signal(str, str)         # exchange, error
+    download_completed = Signal(str, bool)    # exchange, success
+    all_downloads_completed = Signal(bool)    # overall success
+    segment_outcome = Signal(str, str)        # exchange, GUIOutcome value
+    overall_outcome = Signal(str)             # GUIOutcome value
+    retry_candidates_ready = Signal(object)   # segment -> ISO date list
 
-    def __init__(self, config: Config, selected_exchanges: List[str], include_weekends: bool = False, timeout_seconds: int = 5):
+    def __init__(
+        self,
+        config: Config,
+        selected_exchanges: List[str],
+        include_weekends: bool = False,
+        timeout_seconds: int = 5,
+        custom_start_date: Optional[date] = None,
+        custom_end_date: Optional[date] = None,
+        append_options: Optional[Dict[str, bool]] = None,
+        retry_dates: Optional[Dict[str, List[date]]] = None,
+    ):
         super().__init__()
         self.config = config
-        self.selected_exchanges = selected_exchanges
+        self.append_options = append_options or {}
+        self.retry_dates = self.expand_retry_dates(
+            retry_dates or {}, self.append_options
+        )
+        self.selected_exchanges = self.expand_selected_exchanges(
+            list(dict.fromkeys([*selected_exchanges, *self.retry_dates])),
+            self.append_options,
+        )
         self.include_weekends = include_weekends
         self.timeout_seconds = timeout_seconds
-        self.downloaders = {}
+        self.custom_start_date = custom_start_date
+        self.custom_end_date = custom_end_date
+        self.downloaders: Dict[str, BaseDownloader] = {}
         self.logger = logging.getLogger(__name__)
 
-        # Stop flag for graceful shutdown
+        # Cross-thread cancellation state.  QThread interruption alone does
+        # not wake asyncio network operations, so request_stop also cancels
+        # their tasks through the worker event loop.
         self.stop_requested = False
+        self._cancel_event = Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self.final_outcome = GUIOutcome.FAILED
+        self._status_presenter = PipelineStatusPresenter()
 
         # Update config timeout
         self.config.download_settings.timeout_seconds = timeout_seconds
 
         # Initialize downloaders
         self._initialize_downloaders()
+
+    def is_cancel_requested(self) -> bool:
+        return (
+            self.stop_requested
+            or self._cancel_event.is_set()
+            or self.isInterruptionRequested()
+        )
+
+    def request_stop(self) -> None:
+        """Cooperatively cancel active asyncio work from the GUI thread."""
+
+        self.stop_requested = True
+        self._cancel_event.set()
+        self.requestInterruption()
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._cancel_active_tasks)
+
+    def _cancel_active_tasks(self) -> None:
+        for task in tuple(self._tasks.values()):
+            if not task.done():
+                task.cancel()
+
+    @staticmethod
+    def expand_selected_exchanges(
+        selected_exchanges: List[str], append_options: Dict[str, bool]
+    ) -> List[str]:
+        """Include every segment explicitly required by a combined-file option."""
+
+        selected = list(dict.fromkeys(selected_exchanges))
+        if "NSE_EQ" in selected:
+            if append_options.get("sme_append_to_eq", False):
+                selected.append("NSE_SME")
+            if append_options.get("index_append_to_eq", False):
+                selected.append("NSE_INDEX")
+        if (
+            "BSE_EQ" in selected
+            and append_options.get("bse_index_append_to_eq", False)
+        ):
+            selected.append("BSE_INDEX")
+        order = (
+            "NSE_EQ", "NSE_FO", "NSE_SME", "NSE_INDEX", "BSE_EQ", "BSE_INDEX"
+        )
+        unique = set(selected)
+        return [name for name in order if name in unique]
+
+    @staticmethod
+    def expand_retry_dates(
+        retry_dates: Dict[str, List[date]], append_options: Dict[str, bool]
+    ) -> Dict[str, List[date]]:
+        """Close exact retry dates over required combined-file dependencies."""
+
+        expanded = {
+            name: set(values) for name, values in retry_dates.items() if values
+        }
+        markets = {
+            "NSE": (
+                ("sme_append_to_eq", "NSE_SME"),
+                ("index_append_to_eq", "NSE_INDEX"),
+            ),
+            "BSE": (("bse_index_append_to_eq", "BSE_INDEX"),),
+        }
+        for market, option_segments in markets.items():
+            eq_name = f"{market}_EQ"
+            dependencies = [
+                name for option, name in option_segments
+                if append_options.get(option, False)
+            ]
+            relevant = [eq_name, *dependencies]
+            dates = set().union(*(
+                expanded.get(name, set()) for name in relevant
+            ))
+            if dates:
+                for name in relevant:
+                    expanded.setdefault(name, set()).update(dates)
+        return {
+            name: sorted(values) for name, values in expanded.items()
+        }
 
     def update_timeout(self, new_timeout_seconds: int):
         """
@@ -114,7 +249,7 @@ class DownloadWorker(QThread):
 
     def _initialize_downloaders(self):
         """Initialize downloader instances"""
-        downloader_classes = {
+        downloader_classes: Dict[str, Any] = {
             'NSE_EQ': NSEEQDownloader,
             'NSE_FO': NSEFODownloader,
             'NSE_SME': NSESMEDownloader,
@@ -122,94 +257,571 @@ class DownloadWorker(QThread):
             'BSE_EQ': BSEEQDownloader,
             'BSE_INDEX': BSEIndexDownloader
         }
-        
+
         for exchange in self.selected_exchanges:
             if exchange in downloader_classes:
                 try:
-                    downloader = downloader_classes[exchange](self.config)
-                    
-                    # Set up progress callback
-                    progress_callback = ProgressCallback(
-                        on_progress=lambda ex, pct, msg, e=exchange: self.progress_updated.emit(e, pct, msg),
-                        on_status=lambda ex, msg, e=exchange: self.status_updated.emit(e, msg),
-                        on_error=lambda ex, err, e=exchange: self.error_occurred.emit(e, err)
+                    downloader: BaseDownloader = downloader_classes[exchange](
+                        self.config
                     )
-                    downloader.set_progress_callback(progress_callback)
-                    
+
+                    downloader.set_progress_callback(
+                        self._progress_callback_for(exchange)
+                    )
+                    downloader.cancel_requested = self.is_cancel_requested
+
+                    if exchange.endswith("_EQ"):
+                        market = exchange.split("_", 1)[0]
+                        dependencies = CombinedFileBuilder.dependencies_from_options(
+                            market,
+                            self.append_options,
+                            self.selected_exchanges,
+                        )
+                        downloader.combined_dependencies = dependencies
+                        downloader.combined_required = bool(dependencies)
+
                     self.downloaders[exchange] = downloader
-                    
+
                 except Exception as e:
                     self.logger.error(f"Failed to initialize {exchange} downloader: {e}")
-    
+
+    def _progress_callback_for(self, exchange: str) -> ProgressCallback:
+        """Bind downloader callbacks to the selected GUI segment."""
+
+        def on_progress(
+            _reported_exchange: str, percentage: int, message: str
+        ) -> None:
+            self.progress_updated.emit(exchange, percentage, message)
+
+        def on_status(_reported_exchange: str, message: str) -> None:
+            self.status_updated.emit(exchange, message)
+
+        def on_error(_reported_exchange: str, error: str) -> None:
+            self.error_occurred.emit(exchange, error)
+
+        return ProgressCallback(on_progress, on_status, on_error)
+
+    def _handle_pipeline_event(self, event: PipelineEvent) -> None:
+        update = self._status_presenter.present(event)
+        if update is not None:
+            self.status_updated.emit(
+                update.exchange_segment, update.message
+            )
+
     def run(self):
         """Run downloads in background thread"""
+        loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             # Set up asyncio event loop for this thread
             loop = asyncio.new_event_loop()
+            self._loop = loop
             asyncio.set_event_loop(loop)
-            
+
             # Run downloads
             overall_success = loop.run_until_complete(self._run_downloads())
-            
+
             # Emit completion signal
             self.all_downloads_completed.emit(overall_success)
-            
+            self.overall_outcome.emit(self.final_outcome.value)
+
         except Exception as e:
             self.logger.error(f"Error in download worker: {e}")
+            self.final_outcome = (
+                GUIOutcome.CANCELLED
+                if self.is_cancel_requested() else GUIOutcome.FAILED
+            )
             self.all_downloads_completed.emit(False)
+            self.overall_outcome.emit(self.final_outcome.value)
         finally:
             # Clean up event loop
             try:
-                loop.close()
+                if loop is not None:
+                    loop.close()
             except Exception:
                 pass
-    
+            self._loop = None
+            self._tasks.clear()
+
     async def _run_downloads(self) -> bool:
         """Run all downloads asynchronously"""
-        download_tasks = []
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        self._tasks = {}
 
         for exchange, downloader in self.downloaders.items():
             try:
                 # Check if stop requested
-                if self.stop_requested:
+                if self.is_cancel_requested():
                     self.logger.info("Download stopped by user request")
+                    self.final_outcome = GUIOutcome.CANCELLED
                     return False
                 # Create download task
                 task = asyncio.create_task(
                     self._download_exchange_data(exchange, downloader)
                 )
-                download_tasks.append(task)
-                
+                self._tasks[exchange] = task
+
             except Exception as e:
                 self.error_occurred.emit(exchange, f"Failed to start download: {e}")
-        
-        if not download_tasks:
+
+        if not self._tasks:
+            self.final_outcome = (
+                GUIOutcome.CANCELLED
+                if self.is_cancel_requested() else GUIOutcome.FAILED
+            )
             return False
-        
-        # Wait for all downloads to complete
-        results = await asyncio.gather(*download_tasks, return_exceptions=True)
-        
-        # Check results
-        success_count = 0
-        for i, result in enumerate(results):
-            exchange = list(self.downloaders.keys())[i]
-            
-            if isinstance(result, Exception):
+
+        # Share acquisition transport, bounded stage executors and staged
+        # publication coordinators across all selected segments in this run.
+        transport_pool = TransportPool(self.config)
+        self.config.transport_pool = transport_pool
+        self.config.pipeline_telemetry = PipelineTelemetry()
+        self.config.pipeline_telemetry.subscribe(
+            self._handle_pipeline_event
+        )
+        settings = self.config.download_settings
+        dependencies = {
+            exchange: CombinedFileBuilder.dependencies_from_options(
+                exchange, self.append_options, self.selected_exchanges
+            )
+            for exchange in ("NSE", "BSE")
+        }
+        self.config.date_join_coordinator = DateJoinCoordinator(
+            self.config,
+            dependencies,
+            max_cache_dates=getattr(settings, "prepared_cache_dates", 4),
+            telemetry=self.config.pipeline_telemetry,
+        )
+        self.config.history_batch_coordinator = HistoryBatchCoordinator(
+            self.config,
+            telemetry=self.config.pipeline_telemetry,
+        )
+        self.config.stage_executors = {
+            "prepare": BoundedStageExecutor(
+                name="prepare",
+                max_workers=getattr(settings, "prepare_workers", 2),
+                queue_size=getattr(settings, "stage_queue_size", 2),
+                telemetry=self.config.pipeline_telemetry,
+            ),
+            "persist": BoundedStageExecutor(
+                name="persist",
+                max_workers=getattr(settings, "persistence_workers", 1),
+                queue_size=getattr(settings, "stage_queue_size", 2),
+                telemetry=self.config.pipeline_telemetry,
+            ),
+        }
+        try:
+            await transport_pool.start()
+            # Wait for all downloads to complete.
+            results = await asyncio.gather(
+                *self._tasks.values(), return_exceptions=True
+            )
+            if not self.is_cancel_requested():
+                try:
+                    await self._finalize_staged_histories()
+                except Exception as error:
+                    self.logger.exception(
+                        "Staged history finalization failed: %s", error
+                    )
+                    self.error_occurred.emit(
+                        "Symbol histories",
+                        f"History batch failed; daily files remain available: {error}",
+                    )
+        finally:
+            for executor in getattr(self.config, "stage_executors", {}).values():
+                await executor.close()
+            await transport_pool.close()
+            base_data_path = getattr(self.config, "base_data_path", None)
+            if base_data_path is not None:
+                try:
+                    telemetry_path = (
+                        base_data_path / ".state" / "transport_events.jsonl"
+                    )
+                    self.config.pipeline_telemetry.export_jsonl(telemetry_path)
+                except Exception as error:
+                    # Observability must never replace the real run outcome.
+                    self.logger.warning(
+                        "Could not persist pipeline telemetry: %s", error
+                    )
+            self.config.transport_pool = None
+            self.config.stage_executors = {}
+            self.config.pipeline_telemetry.unsubscribe(
+                self._handle_pipeline_event
+            )
+        settled = dict(zip(self._tasks, results))
+
+        if not self.is_cancel_requested():
+            self._finalize_staged_outputs()
+            self._refresh_staged_task_results(settled)
+        self.config.date_join_coordinator = None
+        self.config.history_batch_coordinator = None
+
+        outcomes = []
+        for exchange, result in settled.items():
+            outcome = self._classify_segment_outcome(exchange, result)
+            outcomes.append(outcome)
+            self.segment_outcome.emit(exchange, outcome.value)
+            success = outcome == GUIOutcome.SUCCESS
+            self.download_completed.emit(exchange, success)
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
                 self.error_occurred.emit(exchange, f"Download failed: {result}")
-                self.download_completed.emit(exchange, False)
+
+        self.final_outcome = self._classify_overall_outcome(outcomes)
+        self.retry_candidates_ready.emit(self._collect_retry_candidates())
+        return self.final_outcome == GUIOutcome.SUCCESS
+
+    def _collect_retry_candidates(self) -> Dict[str, List[str]]:
+        """Return exact failed/pending dates; skipped dates stay terminal."""
+
+        candidates: Dict[str, List[str]] = {}
+        for name, downloader in self.downloaders.items():
+            result = getattr(downloader, "last_segment_result", None)
+            if result is None:
+                continue
+            dates = [
+                item.target_date.isoformat()
+                for item in result.dates
+                if item.status not in {"success", "skipped"}
+            ]
+            if dates:
+                candidates[name] = sorted(set(dates))
+        return candidates
+
+    async def _finalize_staged_histories(self) -> None:
+        """Publish queued histories, then apply actions once per exchange."""
+
+        coordinator = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if coordinator is None:
+            return
+        executor = getattr(self.config, "stage_executors", {}).get("persist")
+        if executor is None:
+            outcomes = coordinator.finalize()
+        else:
+            outcomes = await executor.run(
+                coordinator.finalize, stage="history_batch"
+            )
+        for outcome in outcomes:
+            result = outcome.result
+            self.status_updated.emit(
+                "Symbol histories",
+                f"History batch published {result.symbols} symbols from "
+                f"{result.entries} date/segment entries "
+                f"({result.history_reads} reads, {result.history_writes} writes)",
+            )
+
+        windows = coordinator.action_windows()
+        if not windows:
+            return
+        from ..services.corporate_actions import (
+            CorporateActionClient,
+            CorporateActionEngine,
+        )
+
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+
+        async def fetch_window(window):
+            client = CorporateActionClient(timeout=window.timeout)
+            started = time.monotonic_ns()
+            for attempt in (1, 2):
+                try:
+                    actions = await client.fetch(
+                        window.exchange,
+                        window.segment,
+                        min(window.dates),
+                        max(window.dates),
+                        add_sme_suffix=window.add_sme_suffix,
+                    )
+                except (asyncio.TimeoutError, ClientError) as error:
+                    if attempt == 1:
+                        if telemetry is not None:
+                            telemetry.record(
+                                "corporate_action_retry_scheduled",
+                                exchange_segment=(
+                                    f"{window.exchange}_{window.segment}"
+                                ),
+                                attempt=attempt,
+                                error_type=type(error).__name__,
+                                delay_seconds=0.5,
+                            )
+                        await asyncio.sleep(0.5)
+                        continue
+                    detail = str(error).strip() or type(error).__name__
+                    terminal_error = RuntimeError(detail)
+                    if telemetry is not None:
+                        telemetry.record(
+                            "corporate_action_fetch_finished",
+                            exchange_segment=(
+                                f"{window.exchange}_{window.segment}"
+                            ),
+                            outcome="error",
+                            attempts=attempt,
+                            error_type=type(error).__name__,
+                            duration_ms=(
+                                time.monotonic_ns() - started
+                            ) / 1_000_000,
+                        )
+                    return terminal_error
+                except Exception as error:
+                    detail = str(error).strip() or type(error).__name__
+                    terminal_error = RuntimeError(detail)
+                    if telemetry is not None:
+                        telemetry.record(
+                            "corporate_action_fetch_finished",
+                            exchange_segment=(
+                                f"{window.exchange}_{window.segment}"
+                            ),
+                            outcome="error",
+                            attempts=attempt,
+                            error_type=type(error).__name__,
+                            duration_ms=(
+                                time.monotonic_ns() - started
+                            ) / 1_000_000,
+                        )
+                    return terminal_error
+                break
+            if telemetry is not None:
+                telemetry.record(
+                    "corporate_action_fetch_finished",
+                    exchange_segment=f"{window.exchange}_{window.segment}",
+                    outcome="success",
+                    attempts=attempt,
+                    actions=len(actions),
+                    duration_ms=(
+                        time.monotonic_ns() - started
+                    ) / 1_000_000,
+                )
+            return actions
+
+        # Windows are independent read-only exchange requests. Gathering them
+        # overlaps network setup/latency while preserving result order below.
+        fetched_windows = await asyncio.gather(*(
+            fetch_window(window) for window in windows
+        ))
+
+        actions_by_exchange: dict[str, list[Any]] = {}
+        windows_by_exchange: dict[str, list[Any]] = {}
+        for window, fetched in zip(windows, fetched_windows):
+            if isinstance(fetched, Exception):
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "failed",
+                        {"error": str(fetched)},
+                    )
+                    for target_date in window.dates
+                ])
+                self.error_occurred.emit(
+                    f"{window.exchange}_{window.segment}",
+                    f"Corporate-action fetch failed: {fetched}",
+                )
+                continue
+            actions_by_exchange.setdefault(window.exchange, []).extend(fetched)
+            windows_by_exchange.setdefault(window.exchange, []).append(window)
+
+        for exchange, actions in actions_by_exchange.items():
+            engine = CorporateActionEngine(self.config.base_data_path)
+            related = windows_by_exchange[exchange]
+            started = time.monotonic_ns()
+            try:
+                if executor is None:
+                    summary = engine.apply(actions)
+                else:
+                    summary = await executor.run(
+                        engine.apply, actions, stage="corporate_actions"
+                    )
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "complete",
+                        {
+                            "applied": summary.get("applied", 0),
+                            "manual_review": summary.get("manual_review", 0),
+                        },
+                    )
+                    for window in related
+                    for target_date in window.dates
+                ])
+                if summary.get("manual_review"):
+                    self.status_updated.emit(
+                        exchange,
+                        f"{summary['manual_review']} corporate action(s) "
+                        "require manual review",
+                    )
+            except Exception as error:
+                if telemetry is not None:
+                    telemetry.record(
+                        "corporate_action_apply_finished",
+                        exchange=exchange,
+                        outcome="error",
+                        error_type=type(error).__name__,
+                        duration_ms=(
+                            time.monotonic_ns() - started
+                        ) / 1_000_000,
+                    )
+                coordinator.pipeline.mark_many([
+                    (
+                        window.exchange,
+                        window.segment,
+                        target_date,
+                        "actions",
+                        "failed",
+                        {"error": str(error)},
+                    )
+                    for window in related
+                    for target_date in window.dates
+                ])
+                self.error_occurred.emit(
+                    exchange, f"Corporate-action apply failed: {error}"
+                )
             else:
-                success = bool(result)
-                self.download_completed.emit(exchange, success)
-                if success:
-                    success_count += 1
-        
-        return success_count > 0
-    
+                if telemetry is not None:
+                    telemetry.record(
+                        "corporate_action_apply_finished",
+                        exchange=exchange,
+                        outcome="success",
+                        actions=len(actions),
+                        applied=summary.get("applied", 0),
+                        manual_review=summary.get("manual_review", 0),
+                        duration_ms=(
+                            time.monotonic_ns() - started
+                        ) / 1_000_000,
+                    )
+
+    def _refresh_staged_task_results(
+        self, settled: Dict[str, object]
+    ) -> None:
+        """Reclassify tasks after optional staged work reaches a terminal state."""
+
+        coordinator = getattr(
+            self.config, "history_batch_coordinator", None
+        )
+        if coordinator is None:
+            return
+        for name, downloader in self.downloaders.items():
+            if isinstance(settled.get(name), BaseException):
+                continue
+            current = getattr(downloader, "last_segment_result", None)
+            if current is None:
+                continue
+            dates = [item.target_date for item in current.dates]
+            refreshed = coordinator.pipeline.segment_result(
+                downloader.exchange, downloader.segment, dates
+            )
+            downloader.last_segment_result = refreshed
+            settled[name] = downloader._core_pipeline_ok(refreshed)
+
+    def _finalize_staged_outputs(self) -> None:
+        """Finalize unresolved staged dates and refresh EQ structured results."""
+
+        coordinator = getattr(self.config, "date_join_coordinator", None)
+        if coordinator is None:
+            return
+        results = coordinator.finalize()
+        for result in results:
+            name = f"{result.exchange}_EQ"
+            if result.ok:
+                self.status_updated.emit(
+                    name,
+                    f"Staged combined publication: {result.rows} rows from "
+                    f"{', '.join(result.components)}",
+                )
+            else:
+                self.error_occurred.emit(
+                    name,
+                    f"Staged combined publication failed for "
+                    f"{result.target_date}: {result.error}",
+                )
+        for exchange in ("NSE", "BSE"):
+            name = f"{exchange}_EQ"
+            downloader = self.downloaders.get(name)
+            current = getattr(downloader, "last_segment_result", None)
+            if downloader is None or current is None:
+                continue
+            dates = [item.target_date for item in current.dates]
+            downloader.last_segment_result = coordinator.builder.pipeline.segment_result(
+                exchange, "EQ", dates
+            )
+
+    def _classify_segment_outcome(
+        self, exchange: str, result: object
+    ) -> GUIOutcome:
+        if self.is_cancel_requested() or isinstance(
+            result, asyncio.CancelledError
+        ):
+            return GUIOutcome.CANCELLED
+        if isinstance(result, BaseException):
+            if "repair required" in str(result).lower():
+                return GUIOutcome.REPAIR_REQUIRED
+            return GUIOutcome.FAILED
+
+        structured = getattr(
+            self.downloaders[exchange], "last_segment_result", None
+        )
+        if getattr(self.downloaders[exchange], "no_work", False):
+            return GUIOutcome.WARNING
+        if structured is None:
+            return GUIOutcome.SUCCESS if bool(result) else GUIOutcome.FAILED
+        errors = " ".join(
+            item.error or "" for item in structured.dates
+        ).lower()
+        if "repair required" in errors:
+            return GUIOutcome.REPAIR_REQUIRED
+        if structured.ok and bool(result):
+            if structured.skipped_count == len(structured.dates):
+                return GUIOutcome.WARNING
+            return GUIOutcome.SUCCESS
+        has_daily = any(
+            "daily" in item.completed_stages for item in structured.dates
+        )
+        has_pending_delivery = any(
+            "delivery" in item.failed_stages for item in structured.dates
+        )
+        if has_daily and has_pending_delivery:
+            return GUIOutcome.PENDING
+        if structured.any_success or structured.partial_count or has_daily:
+            return GUIOutcome.PARTIAL
+        return GUIOutcome.FAILED
+
+    @staticmethod
+    def _classify_overall_outcome(
+        outcomes: List[GUIOutcome],
+    ) -> GUIOutcome:
+        if not outcomes:
+            return GUIOutcome.FAILED
+        if GUIOutcome.CANCELLED in outcomes:
+            return GUIOutcome.CANCELLED
+        if all(value == GUIOutcome.SUCCESS for value in outcomes):
+            return GUIOutcome.SUCCESS
+        if all(value in {GUIOutcome.SUCCESS, GUIOutcome.WARNING} for value in outcomes):
+            return GUIOutcome.WARNING
+        if GUIOutcome.REPAIR_REQUIRED in outcomes:
+            return GUIOutcome.REPAIR_REQUIRED
+        if all(value == GUIOutcome.PENDING for value in outcomes):
+            return GUIOutcome.PENDING
+        if any(value in {
+            GUIOutcome.SUCCESS,
+            GUIOutcome.WARNING,
+            GUIOutcome.PENDING,
+            GUIOutcome.PARTIAL,
+        } for value in outcomes):
+            return GUIOutcome.PARTIAL
+        return GUIOutcome.FAILED
+
     async def _download_exchange_data(self, exchange: str, downloader) -> bool:
         """Download data for a specific exchange"""
         try:
             # Check if stop requested
-            if self.stop_requested:
+            if self.is_cancel_requested():
                 self.status_updated.emit(exchange, "Download stopped")
                 return False
 
@@ -219,39 +831,82 @@ class DownloadWorker(QThread):
             if hasattr(downloader, 'config'):
                 downloader.config.download_settings.timeout_seconds = self.timeout_seconds
 
-            # Get date range
-            start_date, end_date = downloader.get_date_range()
+            forced_dates = self.retry_dates.get(exchange)
+            if forced_dates is not None:
+                working_days = forced_dates
+                self.status_updated.emit(
+                    exchange,
+                    f"Retrying {len(working_days)} failed/pending date(s)",
+                )
+            else:
+                start_date, end_date = downloader.get_date_range(
+                    self.custom_start_date, self.custom_end_date
+                )
 
-            if start_date > end_date:
-                self.status_updated.emit(exchange, "No new data to download")
-                return True
+                if self.is_cancel_requested():
+                    self.status_updated.emit(exchange, "Download stopped")
+                    return False
 
-            # Check stop again before processing
-            if self.stop_requested:
-                self.status_updated.emit(exchange, "Download stopped")
-                return False
-
-            # Get working days with weekend option
-            working_days = downloader.get_working_days(start_date, end_date, self.include_weekends)
+                working_days = []
+                if start_date <= end_date:
+                    working_days = downloader.get_working_days(
+                        start_date, end_date, self.include_weekends
+                    )
+                working_days = downloader._with_pending_delivery_days(
+                    working_days
+                )
+                if hasattr(downloader, "data_manager"):
+                    gap_days = downloader.data_manager.get_missing_file_dates(
+                        downloader.exchange, downloader.segment
+                    )
+                    working_days = sorted(set(working_days).union(gap_days))
+                if hasattr(downloader, "_with_incomplete_pipeline_days"):
+                    working_days = downloader._with_incomplete_pipeline_days(
+                        working_days
+                    )
 
             if not working_days:
+                downloader.no_work = True
                 self.status_updated.emit(exchange, "No working days in date range")
                 return True
 
             # Update total files for progress tracking
             downloader.total_files = len(working_days)
             downloader.completed_files = 0
+            downloader._progress_started_at = None
 
             # Start download with working days
             success = await downloader._download_implementation(working_days)
 
-            if success:
-                self.status_updated.emit(exchange, "Download completed successfully")
+            result = getattr(downloader, "last_segment_result", None)
+            detail = f" ({result.summary()})" if result is not None else ""
+            waiting_for_finalization = bool(
+                success
+                and result is not None
+                and not result.ok
+                and all(not item.failed_stages for item in result.dates)
+            )
+            if waiting_for_finalization:
+                self.status_updated.emit(
+                    exchange,
+                    f"Daily files ready; waiting for staged finalization{detail}",
+                )
+            elif success and (result is None or result.ok):
+                self.status_updated.emit(
+                    exchange, f"Segment data ready{detail}"
+                )
             else:
-                self.status_updated.emit(exchange, "Download completed with errors")
+                self.status_updated.emit(
+                    exchange, f"Download completed with errors{detail}"
+                )
 
-            return success
+            if waiting_for_finalization:
+                return success
+            return success and (result is None or result.ok)
 
+        except asyncio.CancelledError:
+            self.status_updated.emit(exchange, "Download cancelled safely")
+            raise
         except Exception as e:
             self.error_occurred.emit(exchange, f"Download error: {e}")
             return False
@@ -260,57 +915,70 @@ class DownloadWorker(QThread):
 class MainWindow(QMainWindow):
     """
     Main application window
-    
+
     Provides GUI interface for NSE/BSE data downloader with:
     - Exchange selection checkboxes
     - Progress tracking
     - Status updates
     - Download management
     """
-    
+
     def __init__(self, config: Config):
         super().__init__()
-        
-        if not GUI_AVAILABLE:
-            raise GUIError("PyQt6 is not available. Cannot create GUI.")
-        
+
         self.config = config
         self.data_manager = DataManager(config)
         self.logger = logging.getLogger(__name__)
-        
+
         # GUI components
         self.exchange_checkboxes: Dict[str, QCheckBox] = {}
         self.progress_bars: Dict[str, QProgressBar] = {}
         self.status_labels: Dict[str, QLabel] = {}
-        self.weekend_checkbox: Optional[QCheckBox] = None
+        self.weekend_checkbox: QCheckBox
 
         # Dynamic options (shown based on exchange selection)
-        self.sme_suffix_checkbox: Optional[QCheckBox] = None
-        self.sme_append_checkbox: Optional[QCheckBox] = None
-        self.index_append_checkbox: Optional[QCheckBox] = None
-        self.bse_index_append_checkbox: Optional[QCheckBox] = None
+        self.sme_suffix_checkbox: QCheckBox
+        self.sme_append_checkbox: QCheckBox
+        self.index_append_checkbox: QCheckBox
+        self.bse_index_append_checkbox: QCheckBox
+        self.delivery_checkbox: QCheckBox
+        self.fo_oi_checkbox: QCheckBox
+        self.symbol_files_checkbox: QCheckBox
+        self.corporate_actions_checkbox: QCheckBox
+        self.custom_date_checkbox: QCheckBox
+        self.start_date_edit: QDateEdit
+        self.end_date_edit: QDateEdit
+        self.collapsible_sections: Dict[str, CollapsibleSection] = {}
 
         # Timeout option
-        self.timeout_spinbox = None
+        self.timeout_spinbox: QSpinBox
 
         # Update checker (debug mode disabled to test real update checking)
         # UpdateChecker will auto-detect version from version.py
         self.update_checker = UpdateChecker(debug=False)
-        self.update_worker = None
+        self.update_worker: Optional[UpdateCheckWorker] = None
 
         # User preferences
-        self.user_prefs = UserPreferences()
+        self.settings = SettingsService(config)
+        self.user_prefs = self.settings.preferences
         self.logger.info(f"User preferences loaded from: {self.user_prefs.get_config_file_path()}")
-        
+
         # Download management
         self.download_worker: Optional[DownloadWorker] = None
-        self.download_button: Optional[QPushButton] = None
-        self.stop_button: Optional[QPushButton] = None
-        
+        self.download_button: QPushButton
+        self.stop_button: QPushButton
+        self.retry_button: QPushButton
+        self.donate_button: QPushButton
+
         # Status tracking
         self.download_status: Dict[str, str] = {}
+        self.segment_outcomes: Dict[str, GUIOutcome] = {}
         self.successful_downloads: List[str] = []
         self.selected_exchanges_for_download: List[str] = []
+        self._retry_candidates: Dict[str, List[str]] = {}
+        self._retry_override: Optional[Dict[str, List[date]]] = None
+        self._close_after_workers = False
+        self._update_check_forced = False
 
         # Update throttling to prevent flickering
         self.last_update_time: Dict[str, float] = {}
@@ -321,7 +989,7 @@ class MainWindow(QMainWindow):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.process_pending_updates)
         self.update_timer.start(100)  # Process updates every 100ms
-        
+
         # Initialize UI
         self.init_ui()
         self.load_data_summary()
@@ -329,14 +997,19 @@ class MainWindow(QMainWindow):
         # Update dynamic options based on initial selection
         self.update_dynamic_options()
 
-        # Check for updates after UI is loaded (delayed start)
-        QTimer.singleShot(3000, self.check_for_updates)  # Check after 3 seconds
-        
+        # Keep delayed update startup owned by the window so an early close
+        # can cancel it instead of starting a thread after teardown begins.
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.setSingleShot(True)
+        self.update_check_timer.timeout.connect(self.check_for_updates)
+        self.update_check_timer.start(3000)
+
         # Set up status update timer
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_status_display)
         self.status_timer.start(1000)  # Update every second
-    
+        QTimer.singleShot(0, self._fit_window_to_sections)
+
     def init_ui(self):
         """Initialize user interface"""
         try:
@@ -349,37 +1022,56 @@ class MainWindow(QMainWindow):
             self.logger.info(f"Loading window size from preferences: {width}x{height}")
 
             # Set window size constraints
-            gui_settings = self.user_prefs.get_gui_settings()
-            min_width = gui_settings.get('min_window_width', 500)
-            max_width = gui_settings.get('max_window_width', 1200)
-            min_height = gui_settings.get('min_window_height', 600)
-            max_height = gui_settings.get('max_window_height', 1400)
+            preference_gui_settings = self.user_prefs.get_gui_settings()
+            min_width = preference_gui_settings.get('min_window_width', 500)
+            max_width = preference_gui_settings.get('max_window_width', 1200)
+            min_height = preference_gui_settings.get('min_window_height', 600)
+            max_height = preference_gui_settings.get('max_window_height', 1400)
 
             self.setMinimumSize(min_width, min_height)
             self.setMaximumSize(max_width, max_height)
             self.setGeometry(100, 100, width, height)
-            
+
+            # Keep every section reachable on smaller displays even when all
+            # disclosure panels are expanded.
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+            self.setCentralWidget(scroll_area)
+
             # Create central widget
             central_widget = QWidget()
-            self.setCentralWidget(central_widget)
-            
+            scroll_area.setWidget(central_widget)
+
             # Create main layout
             main_layout = QVBoxLayout(central_widget)
-            
+
             # Create menu bar
             self.create_menu_bar()
-            
+
             # Create exchange selection area
             exchange_group = self.create_exchange_selection()
-            main_layout.addWidget(exchange_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "exchanges", "Exchange Selection", exchange_group
+            )
+
+            # Create automatic/custom date range area
+            date_group = self.create_date_selection_area()
+            self._add_collapsible_section(
+                main_layout, "date_range", "Date Range", date_group
+            )
 
             # Create options area
             options_group = self.create_options_area()
-            main_layout.addWidget(options_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "options", "Download Options", options_group
+            )
 
             # Create progress tracking area
             progress_group = self.create_progress_tracking()
-            main_layout.addWidget(progress_group, 0)  # No stretch
+            self._add_collapsible_section(
+                main_layout, "progress", "Download Progress", progress_group
+            )
 
             # Create control buttons
             button_layout = self.create_control_buttons()
@@ -387,49 +1079,152 @@ class MainWindow(QMainWindow):
 
             # Create status area (expandable)
             status_group = self.create_status_area()
-            main_layout.addWidget(status_group, 1)  # Stretch factor 1 - will expand
-            
+            self._add_collapsible_section(
+                main_layout, "status", "Status and Information", status_group
+            )
+            main_layout.addStretch(1)
+
             # Create status bar
             self.create_status_bar()
-            
+
             self.logger.info("GUI initialized successfully")
-            
+
         except Exception as e:
             raise GUIError(f"Failed to initialize GUI: {e}")
-    
+
+    def _add_collapsible_section(
+        self,
+        layout: QVBoxLayout,
+        key: str,
+        title: str,
+        content: QWidget,
+        stretch: int = 0,
+    ) -> CollapsibleSection:
+        """Wrap a main area in a persisted disclosure section."""
+        expanded = self.user_prefs.get_section_states().get(key, True)
+        section = CollapsibleSection(
+            key,
+            title,
+            content,
+            expanded,
+            fill_available=stretch > 0,
+            parent=self,
+        )
+        section.toggled.connect(self.on_section_toggled)
+        self.collapsible_sections[key] = section
+        layout.addWidget(section, stretch)
+        return section
+
+    def on_section_toggled(self, section: str, expanded: bool) -> None:
+        """Remember which panels the user wants open."""
+        self.user_prefs.set_section_state(section, expanded)
+        QTimer.singleShot(0, self._fit_window_to_sections)
+
+    def _fit_window_to_sections(self) -> None:
+        """Fit utility-window height to visible panels within screen bounds."""
+
+        if self.isMaximized() or self.isFullScreen():
+            return
+        scroll_area = self.centralWidget()
+        if not isinstance(scroll_area, QScrollArea):
+            return
+        content = scroll_area.widget()
+        layout = content.layout() if content is not None else None
+        if layout is None:
+            return
+        layout.activate()
+        chrome_height = (
+            self.menuBar().sizeHint().height()
+            + self.statusBar().sizeHint().height()
+            + 12
+        )
+        target = layout.sizeHint().height() + chrome_height
+        screen = self.screen()
+        screen_limit = (
+            int(screen.availableGeometry().height() * 0.92)
+            if screen is not None
+            else self.maximumHeight()
+        )
+        target = max(
+            self.minimumHeight(),
+            min(target, self.maximumHeight(), screen_limit),
+        )
+        if abs(self.height() - target) > 1:
+            self.resize(self.width(), target)
+
+    def expand_all_sections(self) -> None:
+        for section in self.collapsible_sections.values():
+            section.set_expanded(True)
+
+    def collapse_all_sections(self) -> None:
+        for section in self.collapsible_sections.values():
+            section.set_expanded(False)
+
     def create_menu_bar(self):
         """Create application menu bar"""
         menubar = self.menuBar()
-        
+
         # File menu
         file_menu = menubar.addMenu('File')
-        
+
         refresh_action = QAction('Refresh Data Summary', self)
         refresh_action.triggered.connect(self.load_data_summary)
         file_menu.addAction(refresh_action)
-        
+
         file_menu.addSeparator()
-        
+
         exit_action = QAction('Exit', self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
+
+        view_menu = menubar.addMenu('View')
+        expand_action = QAction('Expand All Sections', self)
+        expand_action.triggered.connect(self.expand_all_sections)
+        view_menu.addAction(expand_action)
+
+        collapse_action = QAction('Collapse All Sections', self)
+        collapse_action.triggered.connect(self.collapse_all_sections)
+        view_menu.addAction(collapse_action)
+
+        settings_menu = menubar.addMenu('Settings')
+        auto_update_action = QAction('Check for Updates Automatically', self)
+        auto_update_action.setCheckable(True)
+        auto_update_action.setChecked(
+            self.user_prefs.get_auto_check_updates()
+        )
+        auto_update_action.toggled.connect(
+            self.user_prefs.set_auto_check_updates
+        )
+        settings_menu.addAction(auto_update_action)
+
+        clear_skip_action = QAction('Reset Skipped Update Version', self)
+        clear_skip_action.triggered.connect(
+            lambda: self.user_prefs.set_skipped_update_version("")
+        )
+        settings_menu.addAction(clear_skip_action)
+
         # Help menu
         help_menu = menubar.addMenu('Help')
+
+        check_update_action = QAction('Check for Updates', self)
+        check_update_action.triggered.connect(
+            lambda: self.check_for_updates(force=True)
+        )
+        help_menu.addAction(check_update_action)
 
         about_action = QAction('About', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
-    
+
     def create_exchange_selection(self) -> QGroupBox:
         """Create exchange selection area"""
         group = QGroupBox("Select Exchanges to Download")
         layout = QGridLayout(group)
-        
+
         # Get available exchanges
         available_exchanges = self.config.get_available_exchanges()
         default_exchanges = self.config.gui_settings.default_exchanges
-        
+
         row, col = 0, 0
         for exchange in available_exchanges:
             checkbox = QCheckBox(exchange.replace('_', ' '))
@@ -450,8 +1245,116 @@ class MainWindow(QMainWindow):
             if col >= 2:  # 2 columns
                 col = 0
                 row += 1
-        
+
         return group
+
+    def create_date_selection_area(self) -> QGroupBox:
+        """Create automatic/custom calendar controls for the download range."""
+        group = QGroupBox("Date Range")
+        layout = QGridLayout(group)
+
+        saved = self.user_prefs.get_date_selection()
+        self.custom_date_checkbox = QCheckBox(
+            "Use custom date range (otherwise download only new dates)"
+        )
+        self.custom_date_checkbox.setObjectName("useCustomDateRange")
+        self.custom_date_checkbox.setChecked(
+            bool(saved.get("use_custom_range", False))
+        )
+        layout.addWidget(self.custom_date_checkbox, 0, 0, 1, 4)
+
+        minimum = QDate(1990, 1, 1)
+        maximum = QDate.currentDate()
+        default_start = QDate.fromString(
+            self.config.date_settings.base_start_date, "yyyy-MM-dd"
+        )
+        saved_start = QDate.fromString(
+            str(saved.get("start_date", "")), "yyyy-MM-dd"
+        )
+        saved_end = QDate.fromString(
+            str(saved.get("end_date", "")), "yyyy-MM-dd"
+        )
+        if not saved_start.isValid():
+            saved_start = default_start if default_start.isValid() else maximum.addDays(-7)
+        if not saved_end.isValid():
+            saved_end = maximum
+
+        self.start_date_edit = QDateEdit(saved_start)
+        self.start_date_edit.setObjectName("customStartDate")
+        self.start_date_edit.setAccessibleName("Custom start date")
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setDateRange(minimum, maximum)
+        self.start_date_edit.setMinimumWidth(145)
+        self.start_date_edit.setMaximumWidth(220)
+        self.start_date_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+
+        self.end_date_edit = QDateEdit(saved_end)
+        self.end_date_edit.setObjectName("customEndDate")
+        self.end_date_edit.setAccessibleName("Custom end date")
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setDateRange(minimum, maximum)
+        self.end_date_edit.setMinimumWidth(145)
+        self.end_date_edit.setMaximumWidth(220)
+        self.end_date_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+
+        layout.addWidget(QLabel("Start:"), 1, 0)
+        layout.addWidget(self.start_date_edit, 1, 1)
+        layout.addWidget(QLabel("End:"), 1, 2)
+        layout.addWidget(self.end_date_edit, 1, 3)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
+        layout.setColumnMinimumWidth(1, 145)
+        layout.setColumnMinimumWidth(3, 145)
+
+        self.date_mode_label = QLabel()
+        self.date_mode_label.setStyleSheet("color: #666666;")
+        layout.addWidget(self.date_mode_label, 2, 0, 1, 4)
+
+        self.custom_date_checkbox.stateChanged.connect(
+            self.on_date_selection_changed
+        )
+        self.start_date_edit.dateChanged.connect(self.on_date_selection_changed)
+        self.end_date_edit.dateChanged.connect(self.on_date_selection_changed)
+        self._update_date_controls()
+        return group
+
+    @staticmethod
+    def _python_date(value: QDate) -> date:
+        return date(value.year(), value.month(), value.day())
+
+    def get_selected_date_range(self):
+        """Return custom Python dates, or ``(None, None)`` in auto mode."""
+        if not self.custom_date_checkbox.isChecked():
+            return None, None
+        return (
+            self._python_date(self.start_date_edit.date()),
+            self._python_date(self.end_date_edit.date()),
+        )
+
+    def _update_date_controls(self) -> None:
+        custom = self.custom_date_checkbox.isChecked()
+        self.start_date_edit.setEnabled(custom)
+        self.end_date_edit.setEnabled(custom)
+        self.date_mode_label.setText(
+            "Custom range will re-download and atomically update those dates."
+            if custom
+            else "Automatic mode continues from the last downloaded market date."
+        )
+
+    def on_date_selection_changed(self, *args) -> None:
+        """Validate control state and persist the selected range."""
+        self._update_date_controls()
+        self.user_prefs.set_date_selection(
+            self.custom_date_checkbox.isChecked(),
+            self._python_date(self.start_date_edit.date()),
+            self._python_date(self.end_date_edit.date()),
+        )
 
     def create_options_area(self) -> QGroupBox:
         """Create download options area"""
@@ -469,7 +1372,6 @@ class MainWindow(QMainWindow):
         basic_row.addWidget(self.weekend_checkbox)
 
         # Response timeout option
-        from PyQt6.QtWidgets import QSpinBox
         timeout_label = QLabel("Response Timeout (sec):")
         self.timeout_spinbox = QSpinBox()
         self.timeout_spinbox.setMinimum(1)
@@ -483,6 +1385,50 @@ class MainWindow(QMainWindow):
         basic_row.addStretch()
 
         layout.addLayout(basic_row)
+
+        data_options = self.user_prefs.get_data_options()
+        extended_grid = QGridLayout()
+
+        self.delivery_checkbox = QCheckBox("Include NSE/BSE delivery data")
+        self.delivery_checkbox.setToolTip(
+            "Merge delivery quantity and percentage into equity/SME output"
+        )
+        self.delivery_checkbox.setChecked(data_options["include_delivery_data"])
+        self.delivery_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.delivery_checkbox, 0, 0)
+
+        self.fo_oi_checkbox = QCheckBox("Include NSE FO open interest")
+        self.fo_oi_checkbox.setToolTip(
+            "Keep OPEN_INTEREST and CHANGE_IN_OI in futures output"
+        )
+        self.fo_oi_checkbox.setChecked(data_options["include_fo_open_interest"])
+        self.fo_oi_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.fo_oi_checkbox, 0, 1)
+
+        self.symbol_files_checkbox = QCheckBox("Create symbol-wise .txt histories")
+        self.symbol_files_checkbox.setToolTip(
+            "Create files such as NSE/SYMBOLS/reliance.txt"
+        )
+        self.symbol_files_checkbox.setChecked(data_options["generate_symbol_files"])
+        self.symbol_files_checkbox.stateChanged.connect(self.on_data_option_changed)
+        extended_grid.addWidget(self.symbol_files_checkbox, 1, 0)
+
+        self.corporate_actions_checkbox = QCheckBox("Apply corporate actions")
+        self.corporate_actions_checkbox.setToolTip(
+            "Adjust pre-ex-date OHLC in symbol-wise history files"
+        )
+        self.corporate_actions_checkbox.setChecked(
+            data_options["apply_corporate_actions"]
+        )
+        self.corporate_actions_checkbox.setEnabled(
+            data_options["generate_symbol_files"]
+        )
+        self.corporate_actions_checkbox.stateChanged.connect(
+            self.on_data_option_changed
+        )
+        extended_grid.addWidget(self.corporate_actions_checkbox, 1, 1)
+
+        layout.addLayout(extended_grid)
 
         # Dynamic options for NSE SME (initially hidden)
         self.sme_options_row = QHBoxLayout()
@@ -534,24 +1480,35 @@ class MainWindow(QMainWindow):
 
     def update_dynamic_options(self):
         """Update visibility of dynamic options based on exchange selection"""
+        # Append controls stay visible when EQ is selected so a persisted
+        # dependency preference never becomes hidden and surprising.
+        nse_eq_selected = self.exchange_checkboxes.get(
+            'NSE_EQ', QCheckBox()
+        ).isChecked()
+
         # Check if NSE SME is selected
         nse_sme_selected = self.exchange_checkboxes.get('NSE_SME', QCheckBox()).isChecked()
 
         # Show/hide NSE SME options
         self.sme_suffix_checkbox.setVisible(nse_sme_selected)
-        self.sme_append_checkbox.setVisible(nse_sme_selected)
+        self.sme_append_checkbox.setVisible(nse_sme_selected or nse_eq_selected)
 
         # Check if NSE INDEX is selected
         nse_index_selected = self.exchange_checkboxes.get('NSE_INDEX', QCheckBox()).isChecked()
 
         # Show/hide NSE INDEX options
-        self.index_append_checkbox.setVisible(nse_index_selected)
+        self.index_append_checkbox.setVisible(nse_index_selected or nse_eq_selected)
 
         # Check if BSE INDEX is selected
         bse_index_selected = self.exchange_checkboxes.get('BSE_INDEX', QCheckBox()).isChecked()
 
         # Show/hide BSE INDEX options
-        self.bse_index_append_checkbox.setVisible(bse_index_selected)
+        bse_eq_selected = self.exchange_checkboxes.get(
+            'BSE_EQ', QCheckBox()
+        ).isChecked()
+        self.bse_index_append_checkbox.setVisible(
+            bse_index_selected or bse_eq_selected
+        )
 
         # Update layout to accommodate changes
         self.update()
@@ -568,7 +1525,7 @@ class MainWindow(QMainWindow):
         layout.setColumnStretch(0, 0)  # Don't stretch exchange column
         layout.setColumnStretch(1, 0)  # Don't stretch progress column
         layout.setColumnStretch(2, 1)  # Allow status column to expand
-        
+
         # Create progress bars and status labels for each exchange
         available_exchanges = self.config.get_available_exchanges()
 
@@ -594,13 +1551,13 @@ class MainWindow(QMainWindow):
             status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)  # Left align
             self.status_labels[exchange] = status_label
             layout.addWidget(status_label, i, 2)
-        
+
         return group
-    
+
     def create_control_buttons(self) -> QHBoxLayout:
         """Create control buttons"""
         layout = QHBoxLayout()
-        
+
         # Download button
         self.download_button = QPushButton("Start Download")
         self.download_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
@@ -622,24 +1579,32 @@ class MainWindow(QMainWindow):
         """)
         self.download_button.clicked.connect(self.start_download)
         layout.addWidget(self.download_button)
-        
+
         # Stop button
         self.stop_button = QPushButton("Stop Download")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_download)
         layout.addWidget(self.stop_button)
-        
+
+        self.retry_button = QPushButton("Retry Failed/Pending")
+        self.retry_button.setEnabled(False)
+        self.retry_button.setToolTip(
+            "Retry only incomplete dates for the currently selected segments"
+        )
+        self.retry_button.clicked.connect(self.retry_incomplete)
+        layout.addWidget(self.retry_button)
+
         # Refresh button
         refresh_button = QPushButton("Refresh Status")
         refresh_button.clicked.connect(self.load_data_summary)
         layout.addWidget(refresh_button)
 
-        layout.addStretch()  # Add stretch to push buttons to left
-
-        # Donate button (right side)
-        donate_button = QPushButton("🤍 Donate")
-        donate_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        donate_button.setStyleSheet("""
+        # Keep Donate beside the other actions so it stays visible in the
+        # default window rather than being pushed beyond the viewport.
+        self.donate_button = QPushButton("🤍 Donate")
+        self.donate_button.setObjectName("donateButton")
+        self.donate_button.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.donate_button.setStyleSheet("""
             QPushButton {
                 background-color: #ff6b6b;
                 color: white;
@@ -655,9 +1620,10 @@ class MainWindow(QMainWindow):
                 background-color: #e53935;
             }
         """)
-        donate_button.clicked.connect(self.show_donate_dialog)
-        layout.addWidget(donate_button)
-        
+        self.donate_button.clicked.connect(self.show_donate_dialog)
+        layout.addWidget(self.donate_button)
+        layout.addStretch()
+
         return layout
 
     def create_status_area(self) -> QGroupBox:
@@ -738,30 +1704,71 @@ class MainWindow(QMainWindow):
     def start_download(self):
         """Start download process"""
         try:
-            selected_exchanges = self.get_selected_exchanges()
+            retry_dates = self._retry_override
+            self._retry_override = None
+            selected_exchanges = (
+                list(retry_dates) if retry_dates
+                else self.get_selected_exchanges()
+            )
 
             if not selected_exchanges:
                 QMessageBox.warning(self, "Warning", "Please select at least one exchange to download.")
                 return
 
-            # Check if databases are up-to-date
-            data_manager = DataManager(self.config)
-            all_up_to_date, status_message = data_manager.check_all_databases_status(selected_exchanges)
+            append_options = {
+                "sme_append_to_eq": self.sme_append_checkbox.isChecked(),
+                "index_append_to_eq": self.index_append_checkbox.isChecked(),
+                "bse_index_append_to_eq": (
+                    self.bse_index_append_checkbox.isChecked()
+                ),
+            }
+            if retry_dates:
+                retry_dates = DownloadWorker.expand_retry_dates(
+                    retry_dates, append_options
+                )
+                selected_exchanges = list(retry_dates)
+            selected_exchanges = DownloadWorker.expand_selected_exchanges(
+                selected_exchanges, append_options
+            )
 
-            if all_up_to_date:
-                # Show up-to-date dialog
-                message = f"Database is Up-to-Date!\n\n{status_message}"
-                QMessageBox.information(self, "Database Status", message)
+            custom_start, custom_end = (
+                (None, None) if retry_dates
+                else self.get_selected_date_range()
+            )
+            if custom_start and custom_end and custom_start > custom_end:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Date Range",
+                    "Start date cannot be after end date.",
+                )
                 return
+
+            # Automatic mode can stop early when every selected database is
+            # current.  Custom mode intentionally permits historical reruns.
+            if custom_start is None and not retry_dates:
+                data_manager = DataManager(self.config)
+                all_up_to_date, status_message = (
+                    data_manager.check_all_databases_status(selected_exchanges)
+                )
+                if all_up_to_date:
+                    message = f"Database is Up-to-Date!\n\n{status_message}"
+                    QMessageBox.information(self, "Database Status", message)
+                    return
 
             # Store selected exchanges for completion message
             self.selected_exchanges_for_download = selected_exchanges.copy()
             self.successful_downloads = []
+            self.segment_outcomes = {}
 
             # Disable download button and enable stop button
             self.download_button.setEnabled(False)
             self.download_button.setText("Downloading...")
             self.stop_button.setEnabled(True)
+            self.retry_button.setEnabled(False)
+
+            progress_section = self.collapsible_sections.get("progress")
+            if progress_section:
+                progress_section.set_expanded(True)
 
             # Show progress bars for selected exchanges with stable layout
             for exchange in selected_exchanges:
@@ -784,106 +1791,129 @@ class MainWindow(QMainWindow):
             timeout_seconds = self.timeout_spinbox.value() if self.timeout_spinbox else 5
 
             # Create and start download worker
-            self.download_worker = DownloadWorker(self.config, selected_exchanges, include_weekends, timeout_seconds)
+            self.download_worker = DownloadWorker(
+                self.config,
+                selected_exchanges,
+                include_weekends,
+                timeout_seconds,
+                custom_start,
+                custom_end,
+                append_options,
+                retry_dates,
+            )
 
             # Connect signals
             self.download_worker.progress_updated.connect(self.update_progress)
             self.download_worker.status_updated.connect(self.update_status)
             self.download_worker.error_occurred.connect(self.handle_error)
-            self.download_worker.download_completed.connect(self.handle_download_completed)
-            self.download_worker.all_downloads_completed.connect(self.handle_all_downloads_completed)
+            self.download_worker.segment_outcome.connect(
+                self.handle_segment_outcome
+            )
+            self.download_worker.overall_outcome.connect(
+                self.handle_overall_outcome
+            )
+            self.download_worker.retry_candidates_ready.connect(
+                self.handle_retry_candidates
+            )
+            self.download_worker.finished.connect(self._maybe_finish_close)
 
             # Start worker thread
             self.download_worker.start()
 
             self.status_bar.showMessage("Download started...")
-            self.append_status_message("Download started for selected exchanges")
+            range_message = (
+                f"{sum(len(values) for values in retry_dates.values())} "
+                "failed/pending date(s)"
+                if retry_dates
+                else f"custom range {custom_start} to {custom_end}"
+                if custom_start
+                else "automatic date range"
+            )
+            self.append_status_message(
+                f"Download started for selected exchanges ({range_message})"
+            )
 
         except Exception as e:
             self.logger.error(f"Error starting download: {e}")
             QMessageBox.critical(self, "Error", f"Failed to start download: {e}")
             self.reset_download_ui()
 
+    def retry_incomplete(self) -> None:
+        """Retry exact incomplete dates for user-selected failed segments."""
+
+        selected = set(self.get_selected_exchanges())
+        retry = {
+            segment: [date.fromisoformat(value) for value in values]
+            for segment, values in self._retry_candidates.items()
+            if segment in selected
+        }
+        if not retry:
+            QMessageBox.information(
+                self,
+                "Nothing Selected to Retry",
+                "Select at least one segment that has failed or pending dates.",
+            )
+            return
+        details = "\n".join(
+            f"{segment}: {', '.join(value.isoformat() for value in values)}"
+            for segment, values in retry.items()
+        )
+        answer = QMessageBox.question(
+            self,
+            "Retry Failed/Pending Dates",
+            "Retry these exact dates?\n\n" + details,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._retry_override = retry
+        self.start_download()
+
     def stop_download(self):
         """Stop download process gracefully"""
         if self.download_worker and self.download_worker.isRunning():
             try:
-                # Set stop flag for graceful shutdown
-                self.download_worker.stop_requested = True
-                self.append_status_message("Stopping download... Please wait.")
+                self.download_worker.request_stop()
+                self.append_status_message(
+                    "Cancellation requested; waiting for the current atomic "
+                    "operation to finish safely..."
+                )
 
                 # Disable stop button to prevent multiple clicks
                 self.stop_button.setEnabled(False)
                 self.stop_button.setText("Stopping...")
 
-                # Use QTimer to check if worker stopped gracefully
-                self.stop_timer = QTimer()
-                self.stop_timer.timeout.connect(self.check_worker_stopped)
-                self.stop_timer.start(500)  # Check every 500ms
-
-                # Set timeout for forced termination
-                self.stop_timeout = QTimer()
-                self.stop_timeout.timeout.connect(self.force_stop_worker)
-                self.stop_timeout.setSingleShot(True)
-                self.stop_timeout.start(5000)  # Force stop after 5 seconds
+                QTimer.singleShot(5000, self._report_slow_safe_stop)
 
             except Exception as e:
                 self.logger.error(f"Error stopping download: {e}")
-                self.force_stop_worker()
 
-    def check_worker_stopped(self):
-        """Check if worker stopped gracefully"""
-        if not self.download_worker or not self.download_worker.isRunning():
-            # Worker stopped gracefully
-            self.stop_timer.stop()
-            self.stop_timeout.stop()
-            self.append_status_message("Download stopped successfully")
-            self.reset_download_ui()
+    def _report_slow_safe_stop(self) -> None:
+        if self.download_worker and self.download_worker.isRunning():
+            self.append_status_message(
+                "Still waiting for safe cancellation; no thread will be "
+                "forcibly terminated."
+            )
 
-    def force_stop_worker(self):
-        """Force stop worker if graceful stop failed"""
-        try:
-            if self.download_worker and self.download_worker.isRunning():
-                self.append_status_message("Force stopping download...")
-                self.download_worker.terminate()
-
-                # Don't wait() in main thread - use QTimer
-                self.force_timer = QTimer()
-                self.force_timer.timeout.connect(self.finalize_stop)
-                self.force_timer.setSingleShot(True)
-                self.force_timer.start(1000)  # Wait 1 second then finalize
-            else:
-                self.finalize_stop()
-        except Exception as e:
-            self.logger.error(f"Error force stopping: {e}")
-            self.finalize_stop()
-
-    def finalize_stop(self):
-        """Finalize stop process"""
-        try:
-            # Stop all timers
-            if hasattr(self, 'stop_timer'):
-                self.stop_timer.stop()
-            if hasattr(self, 'stop_timeout'):
-                self.stop_timeout.stop()
-            if hasattr(self, 'force_timer'):
-                self.force_timer.stop()
-
-            self.append_status_message("Download stopped")
-            self.reset_download_ui()
-
-        except Exception as e:
-            self.logger.error(f"Error finalizing stop: {e}")
-            self.reset_download_ui()
-
-    def check_for_updates(self):
+    def check_for_updates(self, force: bool = False):
         """Check for application updates in background"""
         try:
+            if self._close_after_workers:
+                return
+            if not force and not self.user_prefs.get_auto_check_updates():
+                self.logger.info("Automatic update checks are disabled")
+                return
+            if self.update_worker and self.update_worker.isRunning():
+                self.logger.debug("Update check is already running")
+                return
             self.logger.info("Checking for updates...")
+            self._update_check_forced = force
 
             # Create update worker thread
             self.update_worker = UpdateCheckWorker(self.update_checker)
             self.update_worker.update_checked.connect(self.handle_update_result)
+            self.update_worker.finished.connect(self._maybe_finish_close)
             self.update_worker.start()
 
         except Exception as e:
@@ -892,12 +1922,25 @@ class MainWindow(QMainWindow):
     def handle_update_result(self, result: dict):
         """Handle update check result"""
         try:
+            if self._close_after_workers:
+                return
             self.logger.info(f"🔍 DEBUG: Update check result received: {result}")
 
             if result.get("update_available", False):
                 update_info = result.get("update_info")
                 if update_info:
                     latest_version = update_info.get('latest_version', 'Unknown')
+                    if (
+                        not self._update_check_forced
+                        and
+                        latest_version
+                        == self.user_prefs.get_skipped_update_version()
+                    ):
+                        self.logger.info(
+                            "Skipping update notification for version %s",
+                            latest_version,
+                        )
+                        return
                     self.logger.info(f"🔍 DEBUG: Update available - showing dialog for version {latest_version}")
                     self.show_update_dialog(update_info)
                 else:
@@ -910,17 +1953,24 @@ class MainWindow(QMainWindow):
             self.logger.error(f"🔍 DEBUG: Error handling update result: {e}")
             import traceback
             self.logger.error(f"🔍 DEBUG: Traceback: {traceback.format_exc()}")
+        finally:
+            self._update_check_forced = False
 
     def show_update_dialog(self, update_info: dict):
         """Show update dialog to user"""
         try:
-            dialog = UpdateDialog(update_info, self, self.update_checker)
+            dialog = UpdateDialog(
+                update_info,
+                self,
+                self.update_checker,
+                preferences=self.user_prefs,
+            )
             dialog.exec()
 
         except Exception as e:
             self.logger.error(f"Error showing update dialog: {e}")
             # Fallback to simple message box
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(
                 self,
                 "Update Available",
@@ -944,6 +1994,23 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.logger.error(f"Error saving append options: {e}")
+
+    def on_data_option_changed(self):
+        """Persist canonical output, delivery and symbol-history settings."""
+        try:
+            options = {
+                "include_delivery_data": self.delivery_checkbox.isChecked(),
+                "include_fo_open_interest": self.fo_oi_checkbox.isChecked(),
+                "generate_symbol_files": self.symbol_files_checkbox.isChecked(),
+                "apply_corporate_actions": self.corporate_actions_checkbox.isChecked(),
+            }
+            self.user_prefs.set_data_options(options)
+            self.corporate_actions_checkbox.setEnabled(
+                self.symbol_files_checkbox.isChecked()
+            )
+            self.logger.info(f"Saved extended data options: {options}")
+        except Exception as e:
+            self.logger.error(f"Error saving extended data options: {e}")
 
     def on_exchange_selection_changed(self):
         """Handle exchange selection changes"""
@@ -983,8 +2050,15 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event"""
         try:
-            # Check if download is in progress
-            if self.download_worker and self.download_worker.isRunning():
+            download_worker = self.download_worker
+            update_worker = self.update_worker
+            download_running = bool(
+                download_worker and download_worker.isRunning()
+            )
+            update_running = bool(
+                update_worker and update_worker.isRunning()
+            )
+            if download_running and not self._close_after_workers:
                 reply = QMessageBox.question(
                     self,
                     "Confirm Exit",
@@ -996,30 +2070,55 @@ class MainWindow(QMainWindow):
                 if reply == QMessageBox.StandardButton.No:
                     event.ignore()
                     return
-                else:
-                    # User confirmed exit, stop download
-                    self.download_worker.terminate()
-                    self.download_worker.wait()
 
-            # Save window size to preferences
-            size = self.size()
-            self.logger.info(f"Current window size before saving: {size.width()}x{size.height()}")
-            self.user_prefs.set_window_size(size.width(), size.height())
+            self.update_check_timer.stop()
 
-            # Save current download options
-            download_options = {
-                "include_weekends": self.weekend_checkbox.isChecked(),
-                "timeout_seconds": self.timeout_spinbox.value()
-            }
-            self.user_prefs.set_download_options(download_options)
+            if download_running or update_running:
+                self._close_after_workers = True
+                if download_running and download_worker is not None:
+                    download_worker.request_stop()
+                if update_running and update_worker is not None:
+                    update_worker.request_stop()
+                self.status_bar.showMessage(
+                    "Closing after background work stops safely..."
+                )
+                event.ignore()
+                QTimer.singleShot(0, self._maybe_finish_close)
+                return
 
-            self.logger.info(f"Saved user preferences on exit - Window size: {size.width()}x{size.height()}")
+            self._save_exit_preferences()
 
         except Exception as e:
             self.logger.error(f"Error saving preferences on exit: {e}")
 
         # Accept the close event
         event.accept()
+
+    def _save_exit_preferences(self) -> None:
+        size = self.size()
+        self.user_prefs.set_window_size(size.width(), size.height())
+        self.user_prefs.set_download_options({
+            "include_weekends": self.weekend_checkbox.isChecked(),
+            "timeout_seconds": self.timeout_spinbox.value(),
+        })
+        self.logger.info(
+            "Saved user preferences on exit - Window size: %sx%s",
+            size.width(),
+            size.height(),
+        )
+
+    def _maybe_finish_close(self) -> None:
+        if not self._close_after_workers:
+            return
+        download_running = bool(
+            self.download_worker and self.download_worker.isRunning()
+        )
+        update_running = bool(
+            self.update_worker and self.update_worker.isRunning()
+        )
+        if not download_running and not update_running:
+            self._close_after_workers = False
+            QTimer.singleShot(0, self.close)
 
     def update_progress(self, exchange: str, percentage: int, message: str):
         """Update progress for specific exchange with batching"""
@@ -1046,28 +2145,50 @@ class MainWindow(QMainWindow):
 
     def handle_download_completed(self, exchange: str, success: bool):
         """Handle completion of download for specific exchange"""
-        if success:
+        outcome = GUIOutcome.SUCCESS if success else GUIOutcome.FAILED
+        self.handle_segment_outcome(exchange, outcome.value)
+
+    def handle_segment_outcome(self, exchange: str, raw_outcome: str):
+        """Render a typed segment outcome without inferring from log text."""
+
+        outcome = GUIOutcome(raw_outcome)
+        self.segment_outcomes[exchange] = outcome
+        labels = {
+            GUIOutcome.SUCCESS: ("Completed", "green"),
+            GUIOutcome.PARTIAL: ("Partial", "#d97706"),
+            GUIOutcome.PENDING: ("Pending", "#d97706"),
+            GUIOutcome.WARNING: ("Warning", "#b45309"),
+            GUIOutcome.REPAIR_REQUIRED: ("Repair required", "#7e22ce"),
+            GUIOutcome.CANCELLED: ("Cancelled", "gray"),
+            GUIOutcome.FAILED: ("Failed", "red"),
+        }
+        text, color = labels[outcome]
+        if exchange in self.status_labels:
+            self.status_labels[exchange].setText(text)
+            self.status_labels[exchange].setStyleSheet(f"color: {color};")
+
+        if outcome in {GUIOutcome.SUCCESS, GUIOutcome.WARNING}:
             if exchange in self.status_labels:
-                self.status_labels[exchange].setText("Completed")
-                self.status_labels[exchange].setStyleSheet("color: green;")
+                self.status_labels[exchange].setText(text)
             if exchange in self.progress_bars:
                 self.progress_bars[exchange].setValue(100)
-
-            self.append_status_message(f"[{exchange}] Download completed successfully")
-
-            # Track successful downloads
             if exchange not in self.successful_downloads:
                 self.successful_downloads.append(exchange)
-        else:
-            if exchange in self.status_labels:
-                self.status_labels[exchange].setText("Failed")
-                self.status_labels[exchange].setStyleSheet("color: red;")
-
-            self.append_status_message(f"[{exchange}] Download failed")
+        self.append_status_message(f"[{exchange}] Outcome: {outcome.value}")
 
     def handle_all_downloads_completed(self, overall_success: bool):
         """Handle completion of all downloads"""
-        self.reset_download_ui()
+        outcome = GUIOutcome.SUCCESS if overall_success else GUIOutcome.FAILED
+        self.handle_overall_outcome(outcome.value)
+
+    def handle_overall_outcome(self, raw_outcome: str):
+        """Finish the run using the worker's typed aggregate outcome."""
+
+        outcome = GUIOutcome(raw_outcome)
+        self.reset_download_ui(preserve_status=True)
+
+        if self._close_after_workers:
+            return
 
         # Generate smart completion message
         data_manager = DataManager(self.config)
@@ -1075,18 +2196,50 @@ class MainWindow(QMainWindow):
             self.selected_exchanges_for_download,
             self.successful_downloads
         )
+        attention_messages = {
+            GUIOutcome.PENDING: (
+                "Price data was saved, but one or more enabled reports are "
+                "pending and will be retried."
+            ),
+            GUIOutcome.PARTIAL: (
+                "Only part of the requested pipeline completed. Incomplete "
+                "dates remain scheduled for repair."
+            ),
+            GUIOutcome.WARNING: (
+                "The request completed with a warning, such as data not yet "
+                "being published for the selected date."
+            ),
+            GUIOutcome.REPAIR_REQUIRED: (
+                "Validated state is damaged or inconsistent. Existing data "
+                "was preserved; run the documented repair command."
+            ),
+        }
+        if outcome in attention_messages:
+            completion_message = (
+                attention_messages[outcome] + "\n\n" + completion_message
+            )
 
-        success_count = len(self.successful_downloads)
-        total_count = len(self.selected_exchanges_for_download)
-
-        if success_count == total_count and success_count > 0:
+        if outcome == GUIOutcome.SUCCESS:
             self.status_bar.showMessage("All downloads completed successfully")
             self.append_status_message("All downloads completed successfully")
             QMessageBox.information(self, "Download Complete", completion_message)
-        elif success_count > 0:
+        elif outcome == GUIOutcome.CANCELLED:
+            self.status_bar.showMessage("Download cancelled safely")
+            self.append_status_message("Download cancelled safely")
+        elif outcome in {
+            GUIOutcome.PARTIAL, GUIOutcome.PENDING, GUIOutcome.WARNING
+        }:
             self.status_bar.showMessage("Downloads completed with some errors")
-            self.append_status_message("Downloads completed with some errors")
-            QMessageBox.warning(self, "Download Partially Complete", completion_message)
+            self.append_status_message(f"Download outcome: {outcome.value}")
+            QMessageBox.warning(
+                self, "Download Needs Attention", completion_message
+            )
+        elif outcome == GUIOutcome.REPAIR_REQUIRED:
+            self.status_bar.showMessage("Data repair is required")
+            self.append_status_message("Download stopped: data repair required")
+            QMessageBox.critical(
+                self, "Repair Required", completion_message
+            )
         else:
             self.status_bar.showMessage("Downloads completed with errors")
             self.append_status_message("Downloads completed with errors")
@@ -1095,21 +2248,40 @@ class MainWindow(QMainWindow):
         # Refresh data summary without clearing console
         self.load_data_summary(clear_console=False)
 
-    def reset_download_ui(self):
+    def handle_retry_candidates(self, candidates: object) -> None:
+        """Expose exact retryable dates without including terminal skips."""
+
+        if not isinstance(candidates, dict):
+            return
+        self._retry_candidates = {
+            str(segment): [str(value) for value in values]
+            for segment, values in candidates.items()
+            if isinstance(values, list)
+        }
+        self.retry_button.setEnabled(bool(self._retry_candidates))
+        if self._retry_candidates:
+            count = sum(len(values) for values in self._retry_candidates.values())
+            self.append_status_message(
+                f"{count} failed/pending date(s) are available for exact retry."
+            )
+
+    def reset_download_ui(self, preserve_status: bool = False):
         """Reset download UI to initial state"""
         self.download_button.setEnabled(True)
         self.download_button.setText("Start Download")
         self.stop_button.setEnabled(False)
         self.stop_button.setText("Stop Download")
+        self.retry_button.setEnabled(bool(self._retry_candidates))
 
         # Reset progress bars and status labels to initial state
         for exchange, progress_bar in self.progress_bars.items():
             progress_bar.setVisible(False)
             progress_bar.setValue(0)
 
-        for exchange, status_label in self.status_labels.items():
-            status_label.setText("Ready")
-            status_label.setStyleSheet("color: gray;")
+        if not preserve_status:
+            for exchange, status_label in self.status_labels.items():
+                status_label.setText("Ready")
+                status_label.setStyleSheet("color: gray;")
 
         # Clear update throttling and pending updates
         self.last_update_time.clear()
@@ -1176,11 +2348,15 @@ class MainWindow(QMainWindow):
     def show_about(self):
         """Show about dialog with dynamic version info"""
         try:
-            # Get version info from config
+            # Keep the About dialog aligned with version.py via UpdateChecker.
             app_info = self.config.get_app_settings()
-            version = app_info.get('version', '1.0.0')
-            features = app_info.get('features', [])
-            release_date = app_info.get('release_date', '2025-07-30')
+            version = self.update_checker.get_current_version()
+            features = app_info.get('features', [
+                'NSE and BSE multi-segment downloads',
+                'Smart append operations',
+                'Automatic update notifications'
+            ])
+            release_date = app_info.get('release_date', '2026-07-31')
 
             features_text = '\n'.join([f"• {feature}" for feature in features])
 
@@ -1193,10 +2369,10 @@ Release Date: {release_date}
 Key Features:
 {features_text}
 
-Developed with PyQt6 and modern Python architecture.
+Developed with PySide6 and modern Python architecture.
 Built for traders, analysts, and financial professionals.
 
-© 2025 Paresh Patel. All rights reserved.
+© 2026 Paresh Patel. All rights reserved.
             """
 
             QMessageBox.about(self, f"About NSE/BSE Data Downloader v{version}", about_text.strip())
@@ -1205,11 +2381,11 @@ Built for traders, analysts, and financial professionals.
             self.logger.error(f"Error showing about dialog: {e}")
             # Fallback about text
             fallback_text = """
-NSE/BSE Data Downloader v1.0.0
+NSE/BSE Data Downloader v1.1.0
 
 A comprehensive data downloader for NSE and BSE market data.
             """
-            QMessageBox.about(self, "About NSE/BSE Data Downloader", fallback_text.strip())
+            QMessageBox.about(self, "About NSE/BSE Data Downloader v1.1.0", fallback_text.strip())
 
     def show_donate_dialog(self):
         """Show donate dialog"""

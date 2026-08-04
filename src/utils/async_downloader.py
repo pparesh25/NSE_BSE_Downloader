@@ -20,6 +20,7 @@ import time
 
 from ..core.config import Config
 from ..core.exceptions import NetworkError
+from ..services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
 
 
 @dataclass
@@ -94,14 +95,18 @@ class AsyncDownloadManager:
             'total_time': 0.0,
             'retry_count': 0
         }
+        self.telemetry = getattr(config, "pipeline_telemetry", None) or PipelineTelemetry()
+        self._lag_monitor = EventLoopLagMonitor(self.telemetry)
 
     async def __aenter__(self):
         """Async context manager entry"""
         await self._create_session()
+        await self._lag_monitor.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
+        await self._lag_monitor.stop()
         await self._close_session()
 
     async def _create_session(self) -> None:
@@ -416,8 +421,26 @@ class AsyncDownloadManager:
                 last_error = None
 
                 for attempt in range(max_attempts):
+                    attempt_started = time.monotonic_ns()
+                    self.telemetry.record(
+                        "download_attempt_started",
+                        date=task.date_str,
+                        url=task.url,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                    )
                     try:
                         result = await self._attempt_download(task)
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            status_code=result.status_code,
+                            success=result.success,
+                            bytes=result.file_size,
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                        )
                         if result.success:
                             self.download_stats['successful_downloads'] += 1
                             self.download_stats['total_bytes'] += result.file_size
@@ -437,6 +460,15 @@ class AsyncDownloadManager:
                                 wait_time = self._get_retry_delay(
                                     task, attempt, result.retry_after
                                 )
+                                self.telemetry.record(
+                                    "retry_scheduled",
+                                    date=task.date_str,
+                                    url=task.url,
+                                    attempt=attempt + 1,
+                                    next_attempt=attempt + 2,
+                                    reason=error_info["type"],
+                                    delay_seconds=wait_time,
+                                )
                                 self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                                 await asyncio.sleep(wait_time)
                                 self.download_stats['retry_count'] += 1
@@ -451,10 +483,28 @@ class AsyncDownloadManager:
                         raise
 
                     except asyncio.TimeoutError:
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            success=False,
+                            error_type="timeout",
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                        )
                         timeout_value = self._get_timeout(task)
                         last_error = f"Server timeout after {timeout_value}s"
                         if attempt < max_attempts - 1:
                             wait_time = self._get_retry_delay(task, attempt)
+                            self.telemetry.record(
+                                "retry_scheduled",
+                                date=task.date_str,
+                                url=task.url,
+                                attempt=attempt + 1,
+                                next_attempt=attempt + 2,
+                                reason="timeout",
+                                delay_seconds=wait_time,
+                            )
                             self.logger.info(f"⏱️ Timeout retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts})")
                             await asyncio.sleep(wait_time)
                             self.download_stats['retry_count'] += 1
@@ -464,11 +514,29 @@ class AsyncDownloadManager:
                             break
 
                     except Exception as e:
+                        self.telemetry.record(
+                            "download_attempt_finished",
+                            date=task.date_str,
+                            url=task.url,
+                            attempt=attempt + 1,
+                            success=False,
+                            error_type=type(e).__name__,
+                            duration_ms=(time.monotonic_ns() - attempt_started) / 1_000_000,
+                        )
                         last_error = f"Download error: {e}"
                         error_info = self._classify_error(str(e), task)
 
                         if error_info["should_retry"] and attempt < max_attempts - 1:
                             wait_time = self._get_retry_delay(task, attempt)
+                            self.telemetry.record(
+                                "retry_scheduled",
+                                date=task.date_str,
+                                url=task.url,
+                                attempt=attempt + 1,
+                                next_attempt=attempt + 2,
+                                reason=error_info["type"],
+                                delay_seconds=wait_time,
+                            )
                             self.logger.info(f"🔄 {error_info['type'].title()} retry {task.date_str} in {wait_time}s (attempt {attempt + 2}/{max_attempts}): {error_info['user_message']}")
                             await asyncio.sleep(wait_time)
                             self.download_stats['retry_count'] += 1
@@ -645,6 +713,7 @@ class AsyncDownloadManager:
 
         self.logger.info(f"Starting concurrent download of {len(tasks)} files")
         self._update_progress("Starting downloads...")
+        await self._lag_monitor.start()
 
         try:
             # Create download coroutines
@@ -677,6 +746,14 @@ class AsyncDownloadManager:
             successful = sum(1 for r in processed_results if r.success)
             failed = len(processed_results) - successful
             total_bytes = sum(r.file_size for r in processed_results if r.success)
+            self.telemetry.record(
+                "download_batch_finished",
+                count=len(tasks),
+                successful=successful,
+                failed=failed,
+                duration_ms=total_time * 1000,
+                bytes=total_bytes,
+            )
 
             self.logger.info(
                 f"Download completed: {successful} successful, {failed} failed, "
@@ -690,6 +767,8 @@ class AsyncDownloadManager:
         except Exception as e:
             self.logger.error(f"Error in concurrent download: {e}")
             raise NetworkError(f"Concurrent download failed: {e}")
+        finally:
+            await self._lag_monitor.stop()
 
     def get_download_stats(self) -> Dict[str, Any]:
         """

@@ -40,6 +40,8 @@ download_settings:
 
 # Download options for data processing
 download_options:
+  # Phase 7 groundwork; staged is not active until a reviewed migration.
+  pipeline_engine: legacy
   # Extended canonical market data
   include_delivery_data: true
   include_fo_open_interest: true

@@ -103,6 +103,13 @@ pathsને પ્રમાણિત કરતી નથી.
 - Userની સૂચના મુજબ actual Nuitka compilation/build હજી ચલાવાયો નથી; તેથી signing,
   notarization, packaged fresh-user smoke અને immutable release asset અલગ explicit
   release phaseમાં બાકી છે.
+- Phase 7 download-pipeline architecture audit પૂર્ણ છે. Current NSE/BSE combine બંને
+  disk-checkpoint આધારિત છે; Select All slowdownનો મુખ્ય risk same event loop પર
+  synchronous pandas/state/symbol I/O, per-date HTTP session churn અને host-global
+  throttlingના અભાવમાં છે. Target staged/hybrid design અને rollout gates માટે
+  `DOWNLOAD_PIPELINE_ARCHITECTURE_PLAN.md` જુઓ.
+- GitHub Actionsનું Ubuntu `libEGL.so.1` setup અને pinned Ruff/config mismatch userની
+  સૂચના મુજબ deferred છે; download optimization commit સાથે તેને mix કરવાનું નથી.
 
 P0-1, P0-2, P0-3 અને Phase 3–6 source/quality preparation માટે regression guards
 હવે હાજર છે. આગળનું release-blocking કાર્ય માત્ર userની અલગ મંજૂરી પછી actual

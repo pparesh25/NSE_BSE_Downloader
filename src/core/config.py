@@ -274,6 +274,12 @@ class Config:
         """Get download options for data processing"""
         return self._config_data.get("download_options", {})
 
+    @property
+    def pipeline_engine(self) -> str:
+        """Phase 7 groundwork flag; legacy remains the safe default."""
+        value = self.get_download_options().get("pipeline_engine", "legacy")
+        return value if value in {"legacy", "staged"} else "legacy"
+
     def get_output_directory(self) -> Path:
         """Get base output directory for data files"""
         return self.base_data_path

@@ -1,4 +1,4 @@
-"""Reproducible legacy-versus-staged Phase 7.6 publication benchmark."""
+"""Reproducible staged publication scale and golden-output benchmark."""
 
 from __future__ import annotations
 
@@ -102,9 +102,35 @@ def _output_evidence(root: Path) -> dict[str, dict[str, object]]:
     return evidence
 
 
-def _run_engine(
-    root: Path, days: list[date], mode: str, engine: str
-) -> dict[str, Any]:
+def _expected_evidence(
+    days: list[date], mode: str
+) -> dict[str, dict[str, object]]:
+    exchanges = ("NSE",) if mode == "single_segment" else ("NSE", "BSE")
+    dependencies: dict[str, tuple[str, ...]] = {
+        "NSE": () if mode == "single_segment" else ("SME", "INDEX"),
+        "BSE": ("INDEX",),
+    }
+    evidence: dict[str, dict[str, object]] = {}
+    for exchange in exchanges:
+        for target_date in days:
+            frames = _frames(exchange, target_date)
+            combined = pd.concat([
+                frames[segment].reindex(columns=EQUITY_DAILY_COLUMNS)
+                for segment in ("EQ", *dependencies[exchange])
+            ], ignore_index=True)
+            payload = combined.to_csv(index=False, header=False).encode()
+            relative = (
+                f"{exchange}/EQ/{target_date.isoformat()}-{exchange}-EQ.txt"
+            )
+            evidence[relative] = {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "rows": len(combined),
+                "columns": list(EQUITY_DAILY_COLUMNS),
+            }
+    return evidence
+
+
+def _run_staged(root: Path, days: list[date], mode: str) -> dict[str, Any]:
     config = _config(root)
     exchanges = ("NSE",) if mode == "single_segment" else ("NSE", "BSE")
     dependencies: dict[str, tuple[str, ...]] = {
@@ -120,43 +146,27 @@ def _run_engine(
 
     tracemalloc.start()
     started = time.perf_counter()
-    if engine == "legacy":
-        for exchange in exchanges:
-            segments = ("EQ", *dependencies[exchange])
+    for exchange in exchanges:
+        segments = ("EQ", *dependencies[exchange])
+        if not dependencies[exchange]:
             for target_date in days:
-                frames = _frames(exchange, target_date)
-                for segment in segments:
-                    builder.save_component(
-                        exchange, segment, target_date, frames[segment]
-                    )
-            for target_date in days:
-                result = builder.reconcile(
-                    exchange, target_date, dependencies[exchange]
-                )
+                frame = _frames(exchange, target_date)["EQ"]
+                builder.save_component(exchange, "EQ", target_date, frame)
+                result = builder.reconcile(exchange, target_date, ())
                 if not result.ok:
                     raise RuntimeError(result.error)
-    else:
-        for exchange in exchanges:
-            segments = ("EQ", *dependencies[exchange])
-            if not dependencies[exchange]:
-                for target_date in days:
-                    frame = _frames(exchange, target_date)["EQ"]
-                    builder.save_component(exchange, "EQ", target_date, frame)
-                    result = builder.reconcile(exchange, target_date, ())
-                    if not result.ok:
-                        raise RuntimeError(result.error)
-                continue
-            # Segment-major arrival intentionally holds many dates open and
-            # demonstrates that prepared DataFrames stay at the configured cap.
-            for segment in segments:
-                for target_date in days:
-                    frame = _frames(exchange, target_date)[segment]
-                    builder.save_component(exchange, segment, target_date, frame)
-                    offered = coordinator.offer(
-                        exchange, segment, target_date, frame
-                    )
-                    if offered is not None and not offered.ok:
-                        raise RuntimeError(offered.error)
+            continue
+        # Segment-major arrival intentionally holds many dates open and
+        # demonstrates that prepared DataFrames stay at the configured cap.
+        for segment in segments:
+            for target_date in days:
+                frame = _frames(exchange, target_date)[segment]
+                builder.save_component(exchange, segment, target_date, frame)
+                offered = coordinator.offer(
+                    exchange, segment, target_date, frame
+                )
+                if offered is not None and not offered.ok:
+                    raise RuntimeError(offered.error)
         unresolved = [result for result in coordinator.finalize() if not result.ok]
         if unresolved:
             raise RuntimeError(unresolved[0].error)
@@ -174,15 +184,15 @@ def _run_engine(
 def run_case(output: Path, day_count: int, mode: str) -> dict[str, Any]:
     days = [START + timedelta(days=offset) for offset in range(day_count)]
     case_root = output / f"{mode}-{day_count}"
-    legacy = _run_engine(case_root / "legacy", days, mode, "legacy")
-    staged = _run_engine(case_root / "staged", days, mode, "staged")
-    parity = legacy["outputs"] == staged["outputs"]
+    staged = _run_staged(case_root / "staged", days, mode)
+    expected = _expected_evidence(days, mode)
+    parity = expected == staged["outputs"]
     return {
         "days": day_count,
         "mode": mode,
-        "legacy": legacy,
         "staged": staged,
-        "output_parity": parity,
+        "golden_outputs": expected,
+        "golden_output_parity": parity,
         "output_count": len(staged["outputs"]),
         "cache_within_cap": staged["peak_cached_dates"] <= CACHE_DATE_CAP,
     }
@@ -194,7 +204,7 @@ def main() -> None:
     args = parser.parse_args()
     temporary = None
     if args.output is None:
-        temporary = tempfile.TemporaryDirectory(prefix="phase7-ab-")
+        temporary = tempfile.TemporaryDirectory(prefix="phase7-staged-")
         output = Path(temporary.name)
     else:
         output = args.output.resolve()
@@ -208,15 +218,15 @@ def main() -> None:
         "cache_date_cap": CACHE_DATE_CAP,
         "cases": cases,
         "acceptance": {
-            "output_parity_100_percent": all(
-                case["output_parity"] for case in cases
+            "golden_output_parity_100_percent": all(
+                case["golden_output_parity"] for case in cases
             ),
             "memory_cache_within_cap": all(
                 case["cache_within_cap"] for case in cases
             ),
         },
     }
-    report_path = output / "ab-benchmark-results.json"
+    report_path = output / "staged-benchmark-results.json"
     report_path.write_text(
         json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
     )

@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from .pipeline_state import PipelineManifest, StageUpdate
 from .pipeline_telemetry import PipelineTelemetry
@@ -55,12 +56,20 @@ class HistoryBatchJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:

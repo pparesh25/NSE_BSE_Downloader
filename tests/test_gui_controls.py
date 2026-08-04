@@ -15,7 +15,7 @@ from src.gui.collapsible_section import CollapsibleSection
 from src.gui.main_window import DownloadWorker
 from src.gui.update_dialog import UpdateDialog
 from src.services.canonical_data import EQUITY_DAILY_COLUMNS, INDEX_DAILY_COLUMNS
-from src.services.combined_file_builder import CombinedFileBuilder
+from src.services.date_join_coordinator import DateJoinCoordinator
 from src.services.pipeline_state import PipelineManifest
 from src.utils.update_checker import UpdateChecker
 from src.utils.user_preferences import UserPreferences
@@ -175,11 +175,13 @@ def _completed_result(manifest, exchange, segment, day):
     return manifest.segment_result(exchange, segment, [day])
 
 
-def test_worker_reconciles_only_after_all_selected_components_settle(tmp_path):
+def test_worker_finalizes_staged_components_after_tasks_settle(tmp_path):
     _application()
     day = date(2026, 7, 31)
     config = _CombinedConfig(tmp_path)
-    builder = CombinedFileBuilder(config)
+    coordinator = DateJoinCoordinator(
+        config, {"NSE": ("SME", "INDEX")}
+    )
     equity = pd.DataFrame([[
         "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50,
     ]], columns=EQUITY_DAILY_COLUMNS)
@@ -189,9 +191,9 @@ def test_worker_reconciles_only_after_all_selected_components_settle(tmp_path):
     index = pd.DataFrame([[
         "NIFTY 50", "20260731", 1, 2, 1, 2, 0,
     ]], columns=INDEX_DAILY_COLUMNS)
-    builder.save_component("NSE", "INDEX", day, index)
-    builder.save_component("NSE", "EQ", day, equity)
-    builder.save_component("NSE", "SME", day, sme)
+    coordinator.offer("NSE", "INDEX", day, index)
+    coordinator.offer("NSE", "EQ", day, equity)
+    coordinator.offer("NSE", "SME", day, sme)
 
     manifest = PipelineManifest(tmp_path)
     downloaders = {
@@ -220,7 +222,8 @@ def test_worker_reconciles_only_after_all_selected_components_settle(tmp_path):
         },
     )
     worker.downloaders = downloaders
-    worker._reconcile_combined_outputs({name: True for name in downloaders})
+    config.date_join_coordinator = coordinator
+    worker._finalize_staged_outputs()
 
     result = downloaders["NSE_EQ"].last_segment_result
     assert result.ok
@@ -230,15 +233,15 @@ def test_worker_reconciles_only_after_all_selected_components_settle(tmp_path):
     assert output.iloc[:, 0].tolist() == ["ABC", "SMALL_SME", "NIFTY 50"]
 
 
-def test_worker_dependency_failure_preserves_previous_combined_file(tmp_path):
+def test_worker_staged_failure_preserves_previous_combined_file(tmp_path):
     _application()
     day = date(2026, 7, 31)
     config = _CombinedConfig(tmp_path)
-    builder = CombinedFileBuilder(config)
+    coordinator = DateJoinCoordinator(config, {"NSE": ("INDEX",)})
     equity = pd.DataFrame([[
         "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50,
     ]], columns=EQUITY_DAILY_COLUMNS)
-    builder.save_component("NSE", "EQ", day, equity)
+    coordinator.offer("NSE", "EQ", day, equity)
     output = config.get_data_path("NSE", "EQ") / f"{day}-NSE-EQ.txt"
     output.write_bytes(b"previous-validated-combined\n")
 
@@ -257,7 +260,8 @@ def test_worker_dependency_failure_preserves_previous_combined_file(tmp_path):
         append_options={"index_append_to_eq": True},
     )
     worker.downloaders = downloaders
-    worker._reconcile_combined_outputs({"NSE_EQ": True, "NSE_INDEX": False})
+    config.date_join_coordinator = coordinator
+    worker._finalize_staged_outputs()
 
     assert output.read_bytes() == b"previous-validated-combined\n"
     result = downloaders["NSE_EQ"].last_segment_result

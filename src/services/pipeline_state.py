@@ -115,12 +115,6 @@ class PipelineManifest:
             shutil.copy2(self.path, self.legacy_backup_path)
         self._state.import_manifest(data)
 
-    def export_legacy_snapshot(self) -> Path:
-        """Explicit rollback helper; not called during normal SQLite writes."""
-
-        self._legacy_state.write(self._state.export_manifest())
-        return self.path
-
     def manifest_data(self) -> dict[str, Any]:
         """Return a validated compatibility-shaped snapshot for verification."""
 

@@ -296,7 +296,10 @@ class BaseDownloader(ABC):
         """Return true when every pre-reconciliation enabled stage is complete."""
 
         required, _ = self._pipeline_requirements()
-        core_required = set(required).difference({"combined"})
+        deferred = {"combined"}
+        if getattr(self.config, "history_batch_coordinator", None) is not None:
+            deferred.update({"symbols", "actions"})
+        core_required = set(required).difference(deferred)
         if not result.dates:
             return False
         for item in result.dates:
@@ -304,7 +307,7 @@ class BaseDownloader(ABC):
                 continue
             if not core_required.issubset(item.completed_stages):
                 return False
-            if set(item.failed_stages).difference({"combined"}):
+            if set(item.failed_stages).difference(deferred):
                 return False
         return True
 
@@ -507,42 +510,28 @@ class BaseDownloader(ABC):
                 history_batch = getattr(
                     self.config, "history_batch_coordinator", None
                 )
-                if history_batch is not None:
-                    snapshot = history_batch.offer(
-                        self.exchange,
-                        self.segment,
-                        target_date,
-                        internal_equity,
+                if history_batch is None:
+                    raise RuntimeError(
+                        "Staged history coordinator is unavailable for this run"
                     )
-                    self._mark_pipeline(
-                        target_date,
-                        "symbols",
-                        "pending",
-                        queued=True,
-                        snapshot_path=str(snapshot),
-                    )
-                    self.logger.info(
-                        "Queued %s %s rows for run-scoped history batch",
-                        len(internal_equity),
-                        self.exchange,
-                    )
-                else:
-                    from ..services.symbol_history import SymbolHistoryStore
-
-                    written = SymbolHistoryStore(
-                        self.config.base_data_path
-                    ).upsert(
-                        self.exchange,
-                        self.segment,
-                        target_date,
-                        internal_equity,
-                    )
-                    self.logger.info(
-                        f"Updated {written} {self.exchange} symbol history files"
-                    )
-                    self._mark_pipeline(
-                        target_date, "symbols", "complete", files=written
-                    )
+                snapshot = history_batch.offer(
+                    self.exchange,
+                    self.segment,
+                    target_date,
+                    internal_equity,
+                )
+                self._mark_pipeline(
+                    target_date,
+                    "symbols",
+                    "pending",
+                    queued=True,
+                    snapshot_path=str(snapshot),
+                )
+                self.logger.info(
+                    "Queued %s %s rows for run-scoped history batch",
+                    len(internal_equity),
+                    self.exchange,
+                )
 
             return output_path
 
@@ -784,7 +773,11 @@ class BaseDownloader(ABC):
         history_batch = getattr(
             self.config, "history_batch_coordinator", None
         )
-        if should_apply_actions and history_batch is not None:
+        if should_apply_actions:
+            if history_batch is None:
+                raise RuntimeError(
+                    "Staged history coordinator is unavailable for corporate actions"
+                )
             add_sme_suffix = SettingsService(
                 self.config
             ).preferences.get_sme_add_suffix()
@@ -797,53 +790,6 @@ class BaseDownloader(ABC):
                     30, self.config.download_settings.timeout_seconds
                 ),
             )
-        elif should_apply_actions:
-            try:
-                from ..services.corporate_actions import (
-                    CorporateActionClient,
-                    CorporateActionEngine,
-                )
-                add_sme_suffix = SettingsService(
-                    self.config
-                ).preferences.get_sme_add_suffix()
-                client = CorporateActionClient(
-                    timeout=max(
-                        30, self.config.download_settings.timeout_seconds
-                    )
-                )
-                actions = await client.fetch(
-                    self.exchange,
-                    self.segment,
-                    min(processed_days),
-                    max(processed_days),
-                    add_sme_suffix=add_sme_suffix,
-                )
-                engine = CorporateActionEngine(self.config.base_data_path)
-                summary = await self._run_pipeline_stage(
-                    "persist", engine.apply, actions
-                )
-                self.logger.info(f"Corporate-action summary: {summary}")
-                for target_date in processed_days:
-                    self._mark_pipeline(
-                        target_date,
-                        "actions",
-                        "complete",
-                        applied=summary.get("applied", 0),
-                        manual_review=summary.get("manual_review", 0),
-                    )
-                if summary.get("manual_review"):
-                    self._report_notice(
-                        f"{summary['manual_review']} corporate action(s) require "
-                        "manual review; symbol files were left unchanged"
-                    )
-            except Exception as error:
-                for target_date in processed_days:
-                    self._mark_pipeline(
-                        target_date, "actions", "failed", error=str(error)
-                    )
-                self._report_notice(
-                    f"Corporate-action update could not be completed: {error}"
-                )
         self.last_segment_result = self._pipeline().segment_result(
             self.exchange, self.segment, days
         )

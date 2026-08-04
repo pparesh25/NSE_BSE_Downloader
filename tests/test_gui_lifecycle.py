@@ -46,10 +46,11 @@ class _SlowDownloader:
             self.finalized = True
 
 
-def test_download_worker_cancels_async_tasks_cooperatively():
+def test_download_worker_cancels_async_tasks_cooperatively(tmp_path):
     _application()
     config = SimpleNamespace(
-        download_settings=SimpleNamespace(timeout_seconds=5)
+        download_settings=SimpleNamespace(timeout_seconds=5),
+        base_data_path=tmp_path,
     )
     worker = DownloadWorker(config, [])
     slow = _SlowDownloader(config)
@@ -66,10 +67,11 @@ def test_download_worker_cancels_async_tasks_cooperatively():
     assert worker.final_outcome == GUIOutcome.CANCELLED
 
 
-def test_running_qthread_stops_cooperatively_in_gui_event_loop():
+def test_running_qthread_stops_cooperatively_in_gui_event_loop(tmp_path):
     _application()
     config = SimpleNamespace(
-        download_settings=SimpleNamespace(timeout_seconds=5)
+        download_settings=SimpleNamespace(timeout_seconds=5),
+        base_data_path=tmp_path,
     )
     worker = DownloadWorker(config, [])
     slow = _SlowDownloader(config)
@@ -79,8 +81,14 @@ def test_running_qthread_stops_cooperatively_in_gui_event_loop():
     worker.overall_outcome.connect(outcomes.append)
     worker.finished.connect(event_loop.quit)
 
+    def stop_after_task_started():
+        if slow.started.is_set():
+            worker.request_stop()
+        else:
+            QTimer.singleShot(10, stop_after_task_started)
+
     worker.start()
-    QTimer.singleShot(100, worker.request_stop)
+    QTimer.singleShot(0, stop_after_task_started)
     QTimer.singleShot(3000, event_loop.quit)
     event_loop.exec()
     if worker.isRunning():
@@ -90,6 +98,59 @@ def test_running_qthread_stops_cooperatively_in_gui_event_loop():
     assert not worker.isRunning()
     assert slow.finalized
     assert outcomes == [GUIOutcome.CANCELLED.value]
+
+
+def test_pending_staged_finalization_is_not_reported_as_download_error():
+    _application()
+    day = date(2026, 7, 31)
+    config = SimpleNamespace(
+        download_settings=SimpleNamespace(timeout_seconds=5)
+    )
+    partial = SegmentResult(
+        "NSE",
+        "SME",
+        (DateResult(
+            day,
+            "partial",
+            completed_stages=("downloaded", "validated", "daily"),
+        ),),
+    )
+
+    class _PreparedDownloader:
+        combined_required = False
+        no_work = False
+
+        def __init__(self):
+            self.config = config
+            self.last_segment_result = partial
+
+        def get_date_range(self, start, end):
+            return day, day
+
+        def get_working_days(self, start, end, include_weekends):
+            return [day]
+
+        def _with_pending_delivery_days(self, days):
+            return days
+
+        def _with_incomplete_pipeline_days(self, days):
+            return days
+
+        async def _download_implementation(self, days):
+            return True
+
+    worker = DownloadWorker(config, [])
+    messages = []
+    worker.status_updated.connect(
+        lambda segment, message: messages.append(message)
+    )
+    assert asyncio.run(
+        worker._download_exchange_data("NSE_SME", _PreparedDownloader())
+    )
+    assert messages[-1].startswith(
+        "Daily files ready; waiting for staged finalization"
+    )
+    assert "with errors" not in messages[-1]
 
 
 def test_worker_classifies_pending_warning_and_repair_required():
@@ -234,9 +295,7 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     assert window.end_date_edit.width() >= 145
     assert window.donate_button.isVisibleTo(window)
     assert window.update_check_timer.isActive()
-    assert window.legacy_output_checkbox.text() == (
-        "7-column compatibility output"
-    )
+    assert not hasattr(window, "legacy_output_checkbox")
     donate_right = window.donate_button.mapTo(
         scroll_area.viewport(), window.donate_button.rect().bottomRight()
     ).x()

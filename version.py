@@ -6,7 +6,7 @@ Contains application version and build information.
 
 __version__ = "1.1.0"
 __build_date__ = "2026-08-04"
-__build_number__ = 26
+__build_number__ = 27
 
 # Release automation must replace both values together.  The desktop updater
 # remains notification-only while either field is blank, rather than executing
@@ -36,7 +36,7 @@ VERSION_HISTORY = {
             "Nuitka-safe resource paths, stable app identity and guarded packaging dry run",
             "Responsive default GUI layout with readable macOS source-process identity",
             "Python 3.10/3.13 CI quality gates with enforced 70 percent coverage",
-            "Legacy 7-column compatibility option"
+            "Staged-only per-date publication with stable canonical output columns"
         ],
         "bug_fixes": [
             "Fixed NSE SME filename switch from two-digit to four-digit year",

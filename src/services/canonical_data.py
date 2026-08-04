@@ -694,11 +694,19 @@ def normalize_bse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-def public_equity(equity: pd.DataFrame, legacy_seven_columns: bool = False) -> pd.DataFrame:
-    columns = EQUITY_DAILY_COLUMNS[:7] if legacy_seven_columns else EQUITY_DAILY_COLUMNS
-    return equity.loc[:, columns].copy()
+def public_equity(equity: pd.DataFrame) -> pd.DataFrame:
+    """Return the stable extended equity/SME output contract."""
+
+    return equity.loc[:, EQUITY_DAILY_COLUMNS].copy()
 
 
-def public_fo(fo: pd.DataFrame, legacy_seven_columns: bool = False) -> pd.DataFrame:
-    columns = FO_DAILY_COLUMNS[:7] if legacy_seven_columns else FO_DAILY_COLUMNS
-    return fo.loc[:, columns].copy()
+def public_fo(
+    fo: pd.DataFrame, *, include_open_interest: bool = True
+) -> pd.DataFrame:
+    """Return stable FO columns, blanking optional OI values when disabled."""
+
+    result = fo.loc[:, FO_DAILY_COLUMNS].copy()
+    if not include_open_interest:
+        for column in ("OPEN_INTEREST", "CHANGE_IN_OI"):
+            result[column] = pd.Series("", index=result.index, dtype="string")
+    return result

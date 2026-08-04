@@ -143,13 +143,16 @@ def test_cross_component_duplicate_is_preserved_and_reported(tmp_path):
     assert result.duplicate_keys == 1
 
 
-def test_legacy_seven_column_components_remain_seven_columns(tmp_path):
+def test_old_seven_column_component_is_upgraded_read_only(tmp_path):
     builder = CombinedFileBuilder(_Config(tmp_path))
-    builder.save_component(
-        "NSE", "EQ", DAY, _equity("ABC").iloc[:, :7]
-    )
+    old_component = builder.component_path("NSE", "EQ", DAY)
+    old_component.parent.mkdir(parents=True)
+    old_bytes = _equity("ABC").iloc[:, :7].to_csv(index=False).encode()
+    old_component.write_bytes(old_bytes)
     builder.save_component("NSE", "INDEX", DAY, _index("NIFTY 50"))
     result = builder.reconcile("NSE", DAY, ("INDEX",))
-    output = pd.read_csv(result.output_path, header=None)
-    assert len(output.columns) == 7
+    output = pd.read_csv(result.output_path, header=None, keep_default_na=False)
+    assert len(output.columns) == len(EQUITY_DAILY_COLUMNS)
     assert output.iloc[:, 0].tolist() == ["ABC", "NIFTY 50"]
+    assert output.iloc[:, 7:].eq("").all().all()
+    assert old_component.read_bytes() == old_bytes

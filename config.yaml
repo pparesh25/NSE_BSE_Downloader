@@ -45,14 +45,11 @@ download_settings:
 
 # Download options for data processing
 download_options:
-  # Phase 7 rollout default. Set to legacy for immediate compatibility fallback.
-  pipeline_engine: staged
   # Extended canonical market data
   include_delivery_data: true
   include_fo_open_interest: true
   generate_symbol_files: true
   apply_corporate_actions: true
-  legacy_seven_column_output: false
 
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names

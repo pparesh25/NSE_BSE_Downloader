@@ -311,8 +311,8 @@ Code behavior બદલ્યા વગર timings/event-loop lag/attempt events
 - Network bytes/time સામે prepare, state, component, symbol અને action time અલગ માપવું.
 - Deterministic fault server/fixtures: timeout, slow chunks, reset, HTML 200, empty ZIP,
   CRC failure, 403, 404, 429 `Retry-After`, 500 અને cancel.
-- Feature flag: `pipeline_engine: legacy|staged`; staged is the post-acceptance
-  default and legacy remains the transition-release fallback.
+- Historical rollout feature flag: `pipeline_engine: legacy|staged`. Phase 7.6
+  acceptance completed and the runtime flag was removed before the v1.1 merge.
 
 Gate: metrics behavior/outputs ન બદલે; baseline report reproducible હોય.
 
@@ -340,9 +340,9 @@ event-loop lag target benchmarkમાં p95 100 msથી નીચે રહે
 
 - `DateJoinCoordinator`, `PreparedSegment`, dependency graph.
 - Same-process memory join, persisted checkpoint fallback.
-- NSE/BSE one unified path; all option/legacy-column matrices.
-- Legacy gather-after-all reconciliation feature flag પાછળ fallback તરીકે થોડા સમય
-  રાખવો.
+- NSE/BSE one unified path and stable canonical-column matrices.
+- Gather-after-all reconciliation was retained only through Phase 7.6 validation and
+  removed before the v1.1 merge.
 
 Gate: slow future dateથી earlier ready date block ન થાય; arrival-order permutation અને
 restart byte-identical SHA આપે; dependency fail થાય તો existing public EQ untouched.
@@ -367,9 +367,9 @@ symbol I/O operations dates પ્રમાણે multiply ન થાય; crash 
 ### Phase 7.6 — GUI, rollout અને soak
 
 - Detailed attempt/stage UI, failed/deferred retry selection, queue/ETA summary.
-- Legacy vs staged A/B benchmark; staged default માત્ર acceptance pass પછી.
+- Historical legacy vs staged A/B benchmark; staged acceptance passed.
 - Both Miniforge env tests, repeated live Select All soak અને calendar/source cutovers.
-- ત્યારબાદ જ legacy engine remove કરવાની અલગ decision.
+- Legacy engine removal was approved and completed before the v1.1 main merge.
 
 Gate: સતત 20 one-day Select All live runsમાં zero silent skips; injected retry tests
 100% deterministic; 100-day run memory configured capમાં; output parity 100%.

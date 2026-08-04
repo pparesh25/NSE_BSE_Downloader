@@ -1,4 +1,4 @@
-"""Reproducible Phase 7.5 legacy-versus-batched history benchmark."""
+"""Reproducible incremental-reference versus batched history benchmark."""
 
 from __future__ import annotations
 
@@ -70,42 +70,42 @@ def _evidence(root: Path) -> dict[str, dict[str, object]]:
 
 def run_case(output: Path, day_count: int) -> dict[str, object]:
     case = output / f"days-{day_count}"
-    legacy_root = case / "legacy"
-    staged_root = case / "staged"
-    legacy = CountingStore(legacy_root)
-    staged = CountingStore(staged_root)
+    reference_root = case / "incremental-reference"
+    batched_root = case / "batched"
+    reference = CountingStore(reference_root)
+    batched = CountingStore(batched_root)
     start = date(2025, 1, 1)
     seed = _rows(start, False)
-    legacy.upsert("NSE", "EQ", start, seed)
-    staged.upsert("NSE", "EQ", start, seed)
-    legacy.read_calls = legacy.write_calls = 0
-    staged.read_calls = staged.write_calls = 0
+    reference.upsert("NSE", "EQ", start, seed)
+    batched.upsert("NSE", "EQ", start, seed)
+    reference.read_calls = reference.write_calls = 0
+    batched.read_calls = batched.write_calls = 0
     items = []
     started = time.perf_counter()
     for offset in range(1, day_count + 1):
         target_date = start + timedelta(days=offset)
         rows = _rows(target_date, offset >= day_count // 2)
-        legacy.upsert("NSE", "EQ", target_date, rows)
+        reference.upsert("NSE", "EQ", target_date, rows)
         items.append(HistoryBatchItem("NSE", "EQ", target_date, rows))
-    legacy_seconds = time.perf_counter() - started
+    reference_seconds = time.perf_counter() - started
     started = time.perf_counter()
-    batch_result = staged.upsert_batch(items)
-    staged_seconds = time.perf_counter() - started
-    legacy_evidence = _evidence(legacy_root)
-    staged_evidence = _evidence(staged_root)
+    batch_result = batched.upsert_batch(items)
+    batched_seconds = time.perf_counter() - started
+    reference_evidence = _evidence(reference_root)
+    batched_evidence = _evidence(batched_root)
     return {
         "days": day_count,
-        "symbols": len(staged_evidence),
-        "legacy_seconds": legacy_seconds,
-        "staged_seconds": staged_seconds,
-        "legacy_history_reads": legacy.read_calls,
-        "legacy_history_writes": legacy.write_calls,
-        "staged_history_reads": staged.read_calls,
-        "staged_history_writes": staged.write_calls,
+        "symbols": len(batched_evidence),
+        "reference_seconds": reference_seconds,
+        "batched_seconds": batched_seconds,
+        "reference_history_reads": reference.read_calls,
+        "reference_history_writes": reference.write_calls,
+        "batched_history_reads": batched.read_calls,
+        "batched_history_writes": batched.write_calls,
         "batch_reported_reads": batch_result.history_reads,
         "batch_reported_writes": batch_result.history_writes,
-        "parity": legacy_evidence == staged_evidence,
-        "outputs": staged_evidence,
+        "parity": reference_evidence == batched_evidence,
+        "outputs": batched_evidence,
     }
 
 

@@ -17,7 +17,7 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Symbol-wise text histories such as `NSE/SYMBOLS/reliance.txt`.
 - Split, consolidation and equity-bonus adjustments on pre-ex-date symbol OHLC.
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
-- Optional legacy seven-column output and deterministic SME/Index combination.
+- Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
 - IST-aware trading dates and a 24-hour cached official NSE holiday calendar.
@@ -65,7 +65,7 @@ fresh-user verification checklist.
 
 1. Select the exchange segments.
 2. Leave **Date Range** in automatic mode, or select a custom start/end date.
-3. Choose delivery, FO open-interest, symbol-history and compatibility options.
+3. Choose delivery, FO open-interest and symbol-history options.
 4. Collapse panels you do not need, or use **View → Expand/Collapse All**.
 5. Click **Start Download**.
 
@@ -96,7 +96,10 @@ Index files keep seven columns:
 SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME
 ```
 
-The **Legacy 7-column output** option omits delivery/OI fields for older consumers. NSE delivery is matched by `SYMBOL + SERIES`; BSE delivery is matched by security code.
+Equity, SME and FO files always retain their stable nine-column shape. If delivery
+or FO open interest is disabled or unavailable, the corresponding optional fields
+are blank rather than removed. NSE delivery is matched by `SYMBOL + SERIES`; BSE
+delivery is matched by security code.
 
 When the append options are enabled, the app always assembles combined cash
 files in a fixed order, independent of concurrent download completion order:
@@ -196,7 +199,6 @@ download_options:
   include_fo_open_interest: true
   generate_symbol_files: true
   apply_corporate_actions: true
-  legacy_seven_column_output: false
 ```
 
 If a delivery report is late or temporarily unavailable, the price bhavcopy is still saved. The date is recorded under `.state` and retried on the next run.
@@ -216,8 +218,8 @@ project:
 The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI,
 pending state, symbol reruns/renames, corporate-action idempotency and GUI date
 range/collapse behavior. They also cover every NSE/BSE component arrival order,
-restart rebuilds, disabled/failed dependencies, legacy 7-column combination and
-deferred publication. The state-integrity matrix injects interrupted ledger
+restart rebuilds, disabled/failed dependencies, old component in-memory upgrade and
+staged publication. The state-integrity matrix injects interrupted ledger
 commits, failed history publication, corrupt JSON/CSV state, unexpected history
 revisions and rebuilds from checksummed raw snapshots. Lifecycle coverage also
 checks cooperative cancellation/window close, settings precedence, skipped
@@ -244,7 +246,8 @@ strict project mypy configuration currently passes all 39 source files.
 - Unified date-aware old/current download sources.
 - Added NSE/BSE delivery fields and NSE FO OI fields.
 - Added symbol-wise histories with audited corporate-action adjustment.
-- Added pending delivery retry, atomic writes and legacy output compatibility.
+- Added pending delivery retry, atomic writes and stable nine-column EQ/SME/FO
+  output contracts.
 - Added fail-closed state quarantine, crash-recoverable corporate-action
   transactions and raw-snapshot repair commands.
 - Replaced arrival-order append logic with deterministic, restart-safe combined

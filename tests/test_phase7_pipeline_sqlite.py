@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, timedelta
 import json
 from pathlib import Path
@@ -52,7 +53,7 @@ def test_legacy_json_import_is_exact_read_only_and_wal_enabled(tmp_path):
     assert manifest.manifest_data() == expected
     assert legacy_path.read_bytes() == original
     assert manifest.legacy_backup_path.read_bytes() == original
-    with sqlite3.connect(manifest.database_path) as connection:
+    with closing(sqlite3.connect(manifest.database_path)) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
         imported = connection.execute(
             "SELECT value FROM metadata WHERE key='legacy_json_imported'"
@@ -63,18 +64,6 @@ def test_legacy_json_import_is_exact_read_only_and_wal_enabled(tmp_path):
     manifest.mark("NSE", "EQ", day, "validated", "complete")
     assert legacy_path.read_bytes() == original
     assert manifest.date_result("NSE", "EQ", day).status == "success"
-
-
-def test_explicit_legacy_export_provides_rollback_snapshot(tmp_path):
-    day = date(2026, 7, 30)
-    legacy_path, _ = _write_legacy_manifest(tmp_path, day)
-    manifest = PipelineManifest(tmp_path)
-    manifest.mark("NSE", "EQ", day, "validated", "complete")
-
-    assert manifest.export_legacy_snapshot() == legacy_path
-    exported = json.loads(legacy_path.read_text(encoding="utf-8"))
-    assert exported == manifest.manifest_data()
-    assert exported["dates"][f"NSE_EQ:{day}"]["complete"] is True
 
 
 def test_stage_batch_is_atomic_across_dates(tmp_path):
@@ -110,7 +99,7 @@ def test_incomplete_dates_use_index_and_survive_restart(tmp_path):
         for day in days[:100]
     ))
 
-    with sqlite3.connect(manifest.database_path) as connection:
+    with closing(sqlite3.connect(manifest.database_path)) as connection:
         plan = connection.execute(
             """
             EXPLAIN QUERY PLAN
@@ -163,7 +152,7 @@ def test_corrupt_database_is_preserved_and_legacy_can_recover(tmp_path):
     day = date(2026, 7, 30)
     legacy_path, expected = _write_legacy_manifest(tmp_path, day)
     manifest = PipelineManifest(tmp_path)
-    with sqlite3.connect(manifest.database_path) as connection:
+    with closing(sqlite3.connect(manifest.database_path)) as connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     manifest.database_path.with_name(
         manifest.database_path.name + "-wal"

@@ -88,7 +88,7 @@ def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     assert bse._extract_date_from_filename("invalid.csv") is None
 
 
-def test_fo_adapter_retains_open_interest_and_legacy_switch():
+def test_fo_adapter_retains_stable_columns_when_open_interest_is_disabled():
     day = date(2024, 7, 8)
     raw = (
         "FinInstrmTp,TckrSymb,XpryDt,TradDt,OpnPric,HghPric,LwPric,"
@@ -97,7 +97,6 @@ def test_fo_adapter_retains_open_interest_and_legacy_switch():
     ).encode()
     downloader = _bare(
         NSEFODownloader,
-        legacy_seven_column_output=False,
         include_fo_open_interest=True,
     )
     result = downloader.process_downloaded_data(raw, day)
@@ -112,7 +111,10 @@ def test_fo_adapter_retains_open_interest_and_legacy_switch():
     assert "BhavCopy_NSE_FO_0_0_0_20240708" in downloader.build_url(day)
 
     downloader.settings = _Options(include_fo_open_interest=False)
-    assert len(downloader.process_downloaded_data(raw, day).columns) == 7
+    without_oi = downloader.process_downloaded_data(raw, day)
+    assert list(without_oi.columns) == FO_DAILY_COLUMNS
+    assert without_oi["OPEN_INTEREST"].eq("").all()
+    assert without_oi["CHANGE_IN_OI"].eq("").all()
 
 
 def test_sme_adapter_switches_filename_era_and_applies_suffix(

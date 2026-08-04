@@ -54,19 +54,19 @@ def _symbol_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-def test_new_single_date_batch_fast_path_matches_legacy_bytes(tmp_path):
+def test_new_single_date_batch_fast_path_matches_incremental_bytes(tmp_path):
     day = date(2025, 1, 2)
-    legacy_root = tmp_path / "legacy-single"
+    reference_root = tmp_path / "incremental-single"
     batch_root = tmp_path / "batch-single"
     rows = _rows(day)
 
-    SymbolHistoryStore(legacy_root).upsert("NSE", "EQ", day, rows)
+    SymbolHistoryStore(reference_root).upsert("NSE", "EQ", day, rows)
     result = SymbolHistoryStore(batch_root).upsert_batch([
         HistoryBatchItem("NSE", "EQ", day, rows)
     ])
 
     assert result.history_writes == 3
-    assert _symbol_bytes(batch_root) == _symbol_bytes(legacy_root)
+    assert _symbol_bytes(batch_root) == _symbol_bytes(reference_root)
 
 
 def test_new_single_date_batch_fast_path_keeps_numeric_validation(tmp_path):
@@ -84,43 +84,43 @@ def test_new_single_date_batch_fast_path_keeps_numeric_validation(tmp_path):
 def test_multi_day_batch_is_byte_equivalent_with_constant_symbol_io(
     tmp_path, monkeypatch, day_count
 ):
-    legacy_root = tmp_path / "legacy"
+    reference_root = tmp_path / "incremental-reference"
     batch_root = tmp_path / "batch"
     start = date(2025, 1, 1)
-    legacy = SymbolHistoryStore(legacy_root)
+    reference = SymbolHistoryStore(reference_root)
     batched = SymbolHistoryStore(batch_root)
-    legacy.upsert("NSE", "EQ", start, _rows(start))
+    reference.upsert("NSE", "EQ", start, _rows(start))
     batched.upsert("NSE", "EQ", start, _rows(start))
 
-    legacy_reads = 0
-    legacy_writes = 0
-    original_read = legacy._read_history
-    original_write = legacy._write_history
+    reference_reads = 0
+    reference_writes = 0
+    original_read = reference._read_history
+    original_write = reference._write_history
 
     def counted_read(path):
-        nonlocal legacy_reads
-        legacy_reads += 1
+        nonlocal reference_reads
+        reference_reads += 1
         return original_read(path)
 
     def counted_write(path, frame):
-        nonlocal legacy_writes
-        legacy_writes += 1
+        nonlocal reference_writes
+        reference_writes += 1
         return original_write(path, frame)
 
-    monkeypatch.setattr(legacy, "_read_history", counted_read)
-    monkeypatch.setattr(legacy, "_write_history", counted_write)
+    monkeypatch.setattr(reference, "_read_history", counted_read)
+    monkeypatch.setattr(reference, "_write_history", counted_write)
     items = []
     for offset in range(1, day_count + 1):
         day = start + timedelta(days=offset)
         rows = _rows(day, renamed=offset >= day_count // 2)
-        legacy.upsert("NSE", "EQ", day, rows)
+        reference.upsert("NSE", "EQ", day, rows)
         items.append(HistoryBatchItem("NSE", "EQ", day, rows))
 
     result = batched.upsert_batch(items)
 
-    assert _symbol_bytes(batch_root) == _symbol_bytes(legacy_root)
-    assert legacy_reads >= day_count * 3
-    assert legacy_writes >= day_count * 3
+    assert _symbol_bytes(batch_root) == _symbol_bytes(reference_root)
+    assert reference_reads >= day_count * 3
+    assert reference_writes >= day_count * 3
     assert result.history_reads <= 4
     assert result.history_writes == 3
     assert not (batch_root / "NSE" / "SYMBOLS" / "aaa.txt").exists()
@@ -348,3 +348,59 @@ def test_staged_action_windows_fetch_concurrently_with_timing_telemetry(
     assert len(fetch_events) == 3
     assert all(event.fields["outcome"] == "success" for event in fetch_events)
     assert len(apply_events) == 2
+
+
+def test_staged_action_timeout_retries_once_and_reports_success(
+    tmp_path, monkeypatch
+):
+    day = date(2025, 1, 2)
+    telemetry = PipelineTelemetry()
+    config = SimpleNamespace(
+        base_data_path=tmp_path,
+        download_settings=SimpleNamespace(timeout_seconds=5),
+        stage_executors={},
+        pipeline_telemetry=telemetry,
+    )
+    coordinator = HistoryBatchCoordinator(config, telemetry=telemetry)
+    coordinator.pipeline.begin("BSE", "EQ", day, ("actions",))
+    coordinator.register_action_window(
+        "BSE", "EQ", (day,), add_sme_suffix=False, timeout=5
+    )
+    config.history_batch_coordinator = coordinator
+    calls = 0
+
+    async def flaky_fetch(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError
+        return []
+
+    monkeypatch.setattr(CorporateActionClient, "fetch", flaky_fetch)
+    monkeypatch.setattr(
+        CorporateActionEngine,
+        "apply",
+        lambda *_args, **_kwargs: {
+            "applied": 0,
+            "skipped": 0,
+            "manual_review": 0,
+        },
+    )
+
+    asyncio.run(DownloadWorker(config, [])._finalize_staged_histories())
+
+    assert calls == 2
+    retries = [
+        event for event in telemetry.events
+        if event.kind == "corporate_action_retry_scheduled"
+    ]
+    finished = [
+        event for event in telemetry.events
+        if event.kind == "corporate_action_fetch_finished"
+    ]
+    assert len(retries) == 1
+    assert retries[0].fields["error_type"] == "TimeoutError"
+    assert len(finished) == 1
+    assert finished[0].fields["outcome"] == "success"
+    assert finished[0].fields["attempts"] == 2
+    assert coordinator.pipeline.date_result("BSE", "EQ", day).status == "success"

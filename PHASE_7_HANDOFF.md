@@ -31,8 +31,8 @@ The user approved the architecture plan. Start with **Phase 7.0 only**:
   Select All;
 - capture output SHA, row count and column-order parity;
 - add `pipeline_engine: legacy|staged` feature-flag groundwork, initially with
-  `legacy` as the default; after Phase 7.6 acceptance, `staged` became the default
-  while `legacy` remains the transition-release fallback;
+  `legacy` as the default; after Phase 7.6 acceptance, `staged` became the default,
+  and the fallback was removed before the unreleased v1.1 branch merged to main;
 - produce a baseline report before implementing Phase 7.1 shared transport.
 
 Do not jump directly to per-date join, SQLite migration or batched symbol histories.

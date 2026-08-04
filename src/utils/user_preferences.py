@@ -54,7 +54,6 @@ class UserPreferences:
                 "include_fo_open_interest": True,
                 "generate_symbol_files": True,
                 "apply_corporate_actions": True,
-                "legacy_seven_column_output": False,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,
@@ -354,9 +353,6 @@ class UserPreferences:
             "include_fo_open_interest": options.get("include_fo_open_interest", True),
             "generate_symbol_files": options.get("generate_symbol_files", True),
             "apply_corporate_actions": options.get("apply_corporate_actions", True),
-            "legacy_seven_column_output": options.get(
-                "legacy_seven_column_output", False
-            ),
         }
 
     def set_data_options(self, options: Dict[str, bool]) -> None:

@@ -147,7 +147,7 @@ def test_status_presenter_exposes_attempt_retry_queue_and_stage_outcome():
     ]
 
 
-def test_pipeline_engine_defaults_to_staged_and_accepts_legacy(tmp_path):
+def test_obsolete_pipeline_engine_setting_is_ignored(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("""
 data_paths:
@@ -156,19 +156,12 @@ download_settings: {{}}
 download_options: {{}}
 exchange_config: {{}}
 """.format(base=tmp_path / "data"))
-    assert Config(str(config_path)).pipeline_engine == "staged"
-
     config_path.write_text(
         config_path.read_text().replace(
             "download_options: {}",
             "download_options:\n  pipeline_engine: legacy",
         )
     )
-    assert Config(str(config_path)).pipeline_engine == "legacy"
-
-    config_path.write_text(
-        config_path.read_text().replace(
-            "pipeline_engine: legacy", "pipeline_engine: invalid"
-        )
-    )
-    assert Config(str(config_path)).pipeline_engine == "staged"
+    config = Config(str(config_path))
+    assert config.get_download_options()["pipeline_engine"] == "legacy"
+    assert not hasattr(config, "pipeline_engine")

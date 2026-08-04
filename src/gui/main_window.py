@@ -13,6 +13,7 @@ from threading import Event
 from typing import Any, Dict, List, Optional
 import logging
 
+from aiohttp import ClientError
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
@@ -370,8 +371,8 @@ class DownloadWorker(QThread):
             )
             return False
 
-        # Share acquisition transport and host policy across all selected
-        # segments for this worker run.  Date processing remains legacy.
+        # Share acquisition transport, bounded stage executors and staged
+        # publication coordinators across all selected segments in this run.
         transport_pool = TransportPool(self.config)
         self.config.transport_pool = transport_pool
         self.config.pipeline_telemetry = PipelineTelemetry()
@@ -379,27 +380,22 @@ class DownloadWorker(QThread):
             self._handle_pipeline_event
         )
         settings = self.config.download_settings
-        staged_engine = getattr(self.config, "pipeline_engine", "legacy") == "staged"
-        if staged_engine:
-            dependencies = {
-                exchange: CombinedFileBuilder.dependencies_from_options(
-                    exchange, self.append_options, self.selected_exchanges
-                )
-                for exchange in ("NSE", "BSE")
-            }
-            self.config.date_join_coordinator = DateJoinCoordinator(
-                self.config,
-                dependencies,
-                max_cache_dates=getattr(settings, "prepared_cache_dates", 4),
-                telemetry=self.config.pipeline_telemetry,
+        dependencies = {
+            exchange: CombinedFileBuilder.dependencies_from_options(
+                exchange, self.append_options, self.selected_exchanges
             )
-            self.config.history_batch_coordinator = HistoryBatchCoordinator(
-                self.config,
-                telemetry=self.config.pipeline_telemetry,
-            )
-        else:
-            self.config.date_join_coordinator = None
-            self.config.history_batch_coordinator = None
+            for exchange in ("NSE", "BSE")
+        }
+        self.config.date_join_coordinator = DateJoinCoordinator(
+            self.config,
+            dependencies,
+            max_cache_dates=getattr(settings, "prepared_cache_dates", 4),
+            telemetry=self.config.pipeline_telemetry,
+        )
+        self.config.history_batch_coordinator = HistoryBatchCoordinator(
+            self.config,
+            telemetry=self.config.pipeline_telemetry,
+        )
         self.config.stage_executors = {
             "prepare": BoundedStageExecutor(
                 name="prepare",
@@ -420,7 +416,7 @@ class DownloadWorker(QThread):
             results = await asyncio.gather(
                 *self._tasks.values(), return_exceptions=True
             )
-            if staged_engine and not self.is_cancel_requested():
+            if not self.is_cancel_requested():
                 try:
                     await self._finalize_staged_histories()
                 except Exception as error:
@@ -455,11 +451,8 @@ class DownloadWorker(QThread):
         settled = dict(zip(self._tasks, results))
 
         if not self.is_cancel_requested():
-            if staged_engine:
-                self._finalize_staged_outputs()
-                self._refresh_staged_task_results(settled)
-            else:
-                self._reconcile_combined_outputs(settled)
+            self._finalize_staged_outputs()
+            self._refresh_staged_task_results(settled)
         self.config.date_join_coordinator = None
         self.config.history_batch_coordinator = None
 
@@ -533,33 +526,69 @@ class DownloadWorker(QThread):
         async def fetch_window(window):
             client = CorporateActionClient(timeout=window.timeout)
             started = time.monotonic_ns()
-            try:
-                actions = await client.fetch(
-                    window.exchange,
-                    window.segment,
-                    min(window.dates),
-                    max(window.dates),
-                    add_sme_suffix=window.add_sme_suffix,
-                )
-            except Exception as error:
-                if telemetry is not None:
-                    telemetry.record(
-                        "corporate_action_fetch_finished",
-                        exchange_segment=(
-                            f"{window.exchange}_{window.segment}"
-                        ),
-                        outcome="error",
-                        error_type=type(error).__name__,
-                        duration_ms=(
-                            time.monotonic_ns() - started
-                        ) / 1_000_000,
+            for attempt in (1, 2):
+                try:
+                    actions = await client.fetch(
+                        window.exchange,
+                        window.segment,
+                        min(window.dates),
+                        max(window.dates),
+                        add_sme_suffix=window.add_sme_suffix,
                     )
-                return error
+                except (asyncio.TimeoutError, ClientError) as error:
+                    if attempt == 1:
+                        if telemetry is not None:
+                            telemetry.record(
+                                "corporate_action_retry_scheduled",
+                                exchange_segment=(
+                                    f"{window.exchange}_{window.segment}"
+                                ),
+                                attempt=attempt,
+                                error_type=type(error).__name__,
+                                delay_seconds=0.5,
+                            )
+                        await asyncio.sleep(0.5)
+                        continue
+                    detail = str(error).strip() or type(error).__name__
+                    terminal_error = RuntimeError(detail)
+                    if telemetry is not None:
+                        telemetry.record(
+                            "corporate_action_fetch_finished",
+                            exchange_segment=(
+                                f"{window.exchange}_{window.segment}"
+                            ),
+                            outcome="error",
+                            attempts=attempt,
+                            error_type=type(error).__name__,
+                            duration_ms=(
+                                time.monotonic_ns() - started
+                            ) / 1_000_000,
+                        )
+                    return terminal_error
+                except Exception as error:
+                    detail = str(error).strip() or type(error).__name__
+                    terminal_error = RuntimeError(detail)
+                    if telemetry is not None:
+                        telemetry.record(
+                            "corporate_action_fetch_finished",
+                            exchange_segment=(
+                                f"{window.exchange}_{window.segment}"
+                            ),
+                            outcome="error",
+                            attempts=attempt,
+                            error_type=type(error).__name__,
+                            duration_ms=(
+                                time.monotonic_ns() - started
+                            ) / 1_000_000,
+                        )
+                    return terminal_error
+                break
             if telemetry is not None:
                 telemetry.record(
                     "corporate_action_fetch_finished",
                     exchange_segment=f"{window.exchange}_{window.segment}",
                     outcome="success",
+                    attempts=attempt,
                     actions=len(actions),
                     duration_ms=(
                         time.monotonic_ns() - started
@@ -788,87 +817,6 @@ class DownloadWorker(QThread):
             return GUIOutcome.PARTIAL
         return GUIOutcome.FAILED
 
-    def _reconcile_combined_outputs(self, settled: Dict[str, object]) -> None:
-        """Build EQ outputs after all selected segment tasks have settled."""
-
-        builder = CombinedFileBuilder(self.config)
-        selected = set(self.downloaders)
-        for exchange in ("NSE", "BSE"):
-            eq_name = f"{exchange}_EQ"
-            if eq_name not in selected:
-                continue
-            eq_task_result = settled.get(eq_name)
-            if isinstance(eq_task_result, BaseException) or not eq_task_result:
-                continue
-            eq_downloader = self.downloaders[eq_name]
-            eq_result = getattr(eq_downloader, "last_segment_result", None)
-            if eq_result is None:
-                continue
-            dependencies = builder.dependencies_from_options(
-                exchange, self.append_options, selected
-            )
-            for item in eq_result.dates:
-                if "daily" not in item.completed_stages:
-                    continue
-                unavailable = []
-                for segment in dependencies:
-                    name = f"{exchange}_{segment}"
-                    dependency_task = settled.get(name)
-                    dependency_downloader = self.downloaders.get(name)
-                    if (
-                        isinstance(dependency_task, BaseException)
-                        or dependency_task is False
-                    ):
-                        unavailable.append(name)
-                        continue
-                    dependency_result = getattr(
-                        dependency_downloader, "last_segment_result", None
-                    )
-                    matching = (
-                        next((
-                            value for value in dependency_result.dates
-                            if value.target_date == item.target_date
-                        ), None)
-                        if dependency_result is not None else None
-                    )
-                    if matching is not None and matching.status != "success":
-                        unavailable.append(name)
-                    elif matching is None and not builder.component_exists(
-                        exchange, segment, item.target_date
-                    ):
-                        unavailable.append(name)
-
-                if unavailable:
-                    build_result = builder.record_failure(
-                        exchange,
-                        item.target_date,
-                        dependencies,
-                        "Required segment did not complete: "
-                        + ", ".join(unavailable),
-                    )
-                else:
-                    build_result = builder.reconcile(
-                        exchange, item.target_date, dependencies
-                    )
-                if build_result.ok:
-                    self.status_updated.emit(
-                        eq_name,
-                        f"Combined reconciliation {build_result.status}: "
-                        f"{build_result.rows} rows from "
-                        f"{', '.join(build_result.components)}",
-                    )
-                else:
-                    self.error_occurred.emit(
-                        eq_name,
-                        f"Combined reconciliation failed for "
-                        f"{item.target_date}: {build_result.error}",
-                    )
-            eq_downloader.last_segment_result = builder.pipeline.segment_result(
-                exchange,
-                "EQ",
-                [item.target_date for item in eq_result.dates],
-            )
-
     async def _download_exchange_data(self, exchange: str, downloader) -> bool:
         """Download data for a specific exchange"""
         try:
@@ -932,13 +880,16 @@ class DownloadWorker(QThread):
 
             result = getattr(downloader, "last_segment_result", None)
             detail = f" ({result.summary()})" if result is not None else ""
-            waiting_for_combined = bool(
-                success and getattr(downloader, "combined_required", False)
+            waiting_for_finalization = bool(
+                success
+                and result is not None
+                and not result.ok
+                and all(not item.failed_stages for item in result.dates)
             )
-            if waiting_for_combined:
+            if waiting_for_finalization:
                 self.status_updated.emit(
                     exchange,
-                    f"Segment data ready; waiting for combined reconciliation{detail}",
+                    f"Daily files ready; waiting for staged finalization{detail}",
                 )
             elif success and (result is None or result.ok):
                 self.status_updated.emit(
@@ -949,7 +900,7 @@ class DownloadWorker(QThread):
                     exchange, f"Download completed with errors{detail}"
                 )
 
-            if waiting_for_combined:
+            if waiting_for_finalization:
                 return success
             return success and (result is None or result.ok)
 
@@ -994,7 +945,6 @@ class MainWindow(QMainWindow):
         self.fo_oi_checkbox: QCheckBox
         self.symbol_files_checkbox: QCheckBox
         self.corporate_actions_checkbox: QCheckBox
-        self.legacy_output_checkbox: QCheckBox
         self.custom_date_checkbox: QCheckBox
         self.start_date_edit: QDateEdit
         self.end_date_edit: QDateEdit
@@ -1477,19 +1427,6 @@ class MainWindow(QMainWindow):
             self.on_data_option_changed
         )
         extended_grid.addWidget(self.corporate_actions_checkbox, 1, 1)
-
-        self.legacy_output_checkbox = QCheckBox(
-            "7-column compatibility output"
-        )
-        self.legacy_output_checkbox.setToolTip(
-            "For older software only: daily EQ/SME files omit delivery fields; "
-            "FO files omit open-interest fields. Symbol histories are unchanged."
-        )
-        self.legacy_output_checkbox.setChecked(
-            data_options["legacy_seven_column_output"]
-        )
-        self.legacy_output_checkbox.stateChanged.connect(self.on_data_option_changed)
-        extended_grid.addWidget(self.legacy_output_checkbox, 2, 0)
 
         layout.addLayout(extended_grid)
 
@@ -2066,7 +2003,6 @@ class MainWindow(QMainWindow):
                 "include_fo_open_interest": self.fo_oi_checkbox.isChecked(),
                 "generate_symbol_files": self.symbol_files_checkbox.isChecked(),
                 "apply_corporate_actions": self.corporate_actions_checkbox.isChecked(),
-                "legacy_seven_column_output": self.legacy_output_checkbox.isChecked(),
             }
             self.user_prefs.set_data_options(options)
             self.corporate_actions_checkbox.setEnabled(

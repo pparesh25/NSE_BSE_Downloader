@@ -30,10 +30,9 @@ APPEND_OPTIONS = {
 }
 
 
-def _isolated_config(source: Path, root: Path, engine: str) -> Config:
+def _isolated_config(source: Path, root: Path) -> Config:
     data = yaml.safe_load(source.read_text(encoding="utf-8"))
     data["data_paths"]["base_folder"] = str(root)
-    data.setdefault("download_options", {})["pipeline_engine"] = engine
     config_path = root.parent / f"{root.name}-config.yaml"
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return Config(str(config_path))
@@ -76,7 +75,12 @@ def _telemetry_summary(root: Path) -> dict[str, object]:
         "attempts": sum(
             event["kind"] == "download_attempt_started" for event in events
         ),
-        "retries": sum(event["kind"] == "retry_scheduled" for event in events),
+        "retries": sum(
+            event["kind"] in {
+                "retry_scheduled", "corporate_action_retry_scheduled",
+            }
+            for event in events
+        ),
         "event_loop_lag_p95_ms": _percentile_95(lag),
         "history_batch_ms": sum(history),
         "action_fetch_critical_ms": max(action_fetch, default=0.0),
@@ -100,11 +104,10 @@ async def _run_once(
     config_path: Path,
     output: Path,
     target_date: date,
-    engine: str,
     run_number: int,
 ) -> dict[str, Any]:
     root = output / f"run-{run_number:02d}"
-    config = _isolated_config(config_path, root, engine)
+    config = _isolated_config(config_path, root)
     worker = DownloadWorker(
         config,
         list(SEGMENTS),
@@ -145,7 +148,7 @@ async def _run_once(
         }
     return {
         "run": run_number,
-        "engine": engine,
+        "pipeline": "staged",
         "date": target_date.isoformat(),
         "wall_seconds": elapsed,
         "returned_success": returned_success,
@@ -167,7 +170,6 @@ async def _run(args: argparse.Namespace, output: Path) -> Path:
             args.config.resolve(),
             output,
             args.date,
-            args.engine,
             run_number,
         )
         results.append(result)
@@ -187,7 +189,7 @@ async def _run(args: argparse.Namespace, output: Path) -> Path:
     ]
     report = {
         "date": args.date.isoformat(),
-        "engine": args.engine,
+        "pipeline": "staged",
         "runs": results,
         "acceptance": {
             "run_count": len(results),
@@ -217,7 +219,6 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--date", type=date.fromisoformat, required=True)
     parser.add_argument("--runs", type=int, default=20)
-    parser.add_argument("--engine", choices=("legacy", "staged"), default="staged")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.runs < 1:

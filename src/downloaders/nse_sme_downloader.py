@@ -137,8 +137,7 @@ class NSESMEDownloader(BaseDownloader):
                 )
                 internal = merge_delivery(internal, delivery_df, "NSE")
                 self._internal_equity_data = internal
-                legacy = self.get_download_option("legacy_seven_column_output", False)
-                output = public_equity(internal, legacy_seven_columns=legacy)
+                output = public_equity(internal)
                 output = self.memory_optimizer.optimize_dataframe(output)
                 self.logger.info(
                     f"Transformed NSE SME data: {len(output)} rows, "

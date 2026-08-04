@@ -155,7 +155,6 @@ download_options:
   include_fo_open_interest: true
   generate_symbol_files: true
   apply_corporate_actions: true
-  legacy_seven_column_output: false
 ```
 
 GUI statusમાં દરેક date માટે આ સ્થિતિ દર્શાવવી:
@@ -173,7 +172,8 @@ Date, Options, Progress તથા Status માટે remembered collapsible sec
 ## Backward compatibility અને update notification
 
 - આ output schema change હોવાથી version `1.1.0` રાખવું.
-- એક transition release માટે `legacy_seven_column_output` વિકલ્પ રાખવો.
+- નવી EQ/SME/FO files માટે stable 9-column contract રાખવો; disabled optional values
+  blank રહેશે, columns દૂર નહીં થાય.
 - Existing user files overwrite કરતાં પહેલાં schema/version ઓળખવી.
 - Appની હાલની update notificationમાં આ મુદ્દા સ્પષ્ટ બતાવવા:
   - NSE/BSE delivery quantity અને percentage
@@ -181,7 +181,7 @@ Date, Options, Progress તથા Status માટે remembered collapsible sec
   - Date-aware old/new URL support
   - Symbol-wise adjusted history files
   - Corporate-action audit અને rebuild support
-  - Legacy 7-column compatibility option
+  - Staged-only per-date publication અને stable output columns
 
 ## અમલીકરણના તબક્કા
 

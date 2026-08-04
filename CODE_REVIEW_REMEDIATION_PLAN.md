@@ -61,7 +61,8 @@ pathsને પ્રમાણિત કરતી નથી.
   `MemoryAppendManager` દૂર કરીને persisted named-column components અને fixed
   `EQ → SME → INDEX` / `EQ → INDEX` reconciliation અમલમાં છે. Enabled dependency
   fail થાય તો જૂની public EQ file untouched રહે છે; restart/CLI rebuild સમાન SHA
-  આપે છે અને legacy 7-column contract પણ જળવાય છે.
+  આપે છે. New EQ/SME output stable 9-column contract વાપરે છે; જૂના persisted
+  7-column components read-only in-memory upgradeથી resume થઈ શકે છે.
 - Latest 2026-07-31 live all-segment reconciliation pass: NSE combined `3311`
   (`2720 + 445 + 146`) અને BSE combined `4337` (`4261 + 76`) rows; બંનેમાં
   component sum, blank Index delivery fields અને restart SHA verify થયા.

@@ -146,8 +146,20 @@ class CombinedFileBuilder:
                 f"Unable to read component {path}: {error}"
             ) from error
         self._validate_component_frame(
-            exchange, segment, target_date, frame
+            exchange,
+            segment,
+            target_date,
+            frame,
+            allow_seven_column_equity=True,
         )
+        if (
+            segment.upper() != "INDEX"
+            and list(frame.columns) == EQUITY_DAILY_COLUMNS[:7]
+        ):
+            # Older staged checkpoints are accepted read-only and upgraded in
+            # memory. New component writes must always use the stable extended
+            # contract, and the source checkpoint is never rewritten here.
+            frame = frame.reindex(columns=EQUITY_DAILY_COLUMNS, fill_value="")
         return frame
 
     @staticmethod
@@ -175,6 +187,8 @@ class CombinedFileBuilder:
         segment: str,
         target_date: date,
         frame: pd.DataFrame,
+        *,
+        allow_seven_column_equity: bool = False,
     ) -> None:
         exchange = exchange.upper()
         segment = segment.upper()
@@ -188,11 +202,11 @@ class CombinedFileBuilder:
                 f"{exchange}_{segment} component has no rows"
             )
         columns = list(frame.columns)
-        allowed = (
-            [INDEX_DAILY_COLUMNS]
-            if segment == "INDEX"
-            else [EQUITY_DAILY_COLUMNS[:7], EQUITY_DAILY_COLUMNS]
-        )
+        allowed = [INDEX_DAILY_COLUMNS] if segment == "INDEX" else [
+            EQUITY_DAILY_COLUMNS
+        ]
+        if allow_seven_column_equity and segment != "INDEX":
+            allowed.append(EQUITY_DAILY_COLUMNS[:7])
         if columns not in allowed:
             raise CombinedBuildError(
                 f"Unexpected {exchange}_{segment} component columns: {columns}"

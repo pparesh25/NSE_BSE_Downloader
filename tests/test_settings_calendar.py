@@ -22,7 +22,6 @@ class _SettingsConfig:
     def get_download_options():
         return {
             "include_delivery_data": False,
-            "legacy_seven_column_output": True,
             "index_append_to_eq": True,
         }
 
@@ -43,15 +42,18 @@ def test_settings_precedence_and_invalid_user_values_are_bounded(
         "download_options": {
             "timeout_seconds": -50,
             "include_delivery_data": "yes",
-            "legacy_seven_column_output": "invalid",
+            "legacy_seven_column_output": True,
         },
         "unknown_section": {"unsafe": True},
     }), encoding="utf-8")
     saved = SettingsService(config).preferences
     assert saved.get_timeout_seconds() == 1
     assert saved.get_data_options()["include_delivery_data"] is True
-    assert saved.get_data_options()["legacy_seven_column_output"] is True
+    assert "legacy_seven_column_output" not in saved.get_data_options()
     assert "unknown_section" not in saved.preferences
+    saved.save_preferences()
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert "legacy_seven_column_output" not in persisted["download_options"]
 
 
 def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(

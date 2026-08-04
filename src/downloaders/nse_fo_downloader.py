@@ -68,14 +68,11 @@ class NSEFODownloader(BaseDownloader):
                 normalized = normalize_nse_fo(
                     df, file_date, era=source.era
                 )
-                legacy = (
-                    self.get_download_option("legacy_seven_column_output", False)
-                    or not self.get_download_option(
-                        "include_fo_open_interest", True
-                    )
-                )
                 result = public_fo(
-                    normalized, legacy_seven_columns=legacy
+                    normalized,
+                    include_open_interest=self.get_download_option(
+                        "include_fo_open_interest", True
+                    ),
                 )
                 return self.memory_optimizer.optimize_dataframe(result)
         except Exception as error:

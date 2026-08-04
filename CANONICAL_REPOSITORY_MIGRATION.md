@@ -1,7 +1,7 @@
 # Canonical repository migration record
 
 Date started: 2026-08-05 (Asia/Kolkata)
-Status: Migration branch under validation; release notification not published
+Status: Local migration validation passed; release notification not published
 
 ## Objective
 
@@ -75,6 +75,35 @@ The existing v1.0.1 release and its assets remain untouched.
 6. Review every hard-coded repository URL and release metadata field.
 7. Push only the migration branch and open a draft pull request against canonical
    `main`.
+
+## Validation evidence: 2026-08-05
+
+- Focused updater, version bridge, v1.0.1 preference, and legacy daily-file suite:
+  28 tests passed in both `opentrader313` and `mark_screener`.
+- Full suite: 174 tests passed in `opentrader313` and 174 tests passed in
+  `mark_screener`.
+- Ruff: passed.
+- mypy: passed for all configured production modules.
+- Coverage: 73.87%, above the required 70% gate.
+- Staged benchmark: all 1, 20, and 101-day single-segment and Select-All cases had
+  exact golden SHA/row/column parity; the prepared-frame cache stayed within its
+  four-date cap.
+- History benchmark: 20 and 100-day output parity passed. Batched history work used
+  four reads and three writes, compared with 61/61 and 301/301 incremental
+  reads/writes respectively.
+- Packaging command validation: Darwin, Windows, and Linux passed in dry-run mode;
+  no Nuitka compilation was started.
+- Repository URL audit: active updater, HTTP user agent, README, and updater security
+  tests target `pparesh25/NSE_BSE_Downloader`. The PySide6 URL remains only in a
+  historical Phase 7 handoff record.
+- All automated tests and benchmarks used temporary roots under `/tmp`; no real user
+  data was modified.
+- Additional user-reported evidence: a six-month all-segment download completed
+  without errors and produced symbol-wise histories before this migration began.
+
+The local code-validation gates are complete. Actual release builds, platform smoke
+tests, signing/notarization decisions, release-asset checksums, and final update
+metadata remain release blockers.
 
 ## Release blockers
 

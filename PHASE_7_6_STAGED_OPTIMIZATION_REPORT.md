@@ -2,7 +2,7 @@
 
 Date: 2026-08-04 (Asia/Kolkata)
 Branch: `codex/release-hardening`
-Pipeline engine default: `legacy`
+Pipeline engine default at measurement time: `legacy`
 
 ## Scope and safety
 
@@ -105,16 +105,28 @@ staged median remained **28.8% faster**.
   action-window execution and typed timing telemetry.
 - `git diff --check`: pass.
 
-One earlier primary invocation reported all 169 tests passed but aborted during Qt
-process shutdown with a non-reproducible `QThread` warning. The immediate full rerun
-and compatibility run both exited cleanly; no worker remained active in the optimized
-live runs.
+During default rollout verification, the earlier intermittent Qt shutdown warning was
+traced to a static delayed update-check timer that could start its `QThread` after a
+window had already closed. The timer is now window-owned and cancelled during accepted
+close/close-after-worker teardown. Three consecutive primary full-suite runs exited
+cleanly with 169/169 tests; no worker remained active in optimized live runs.
 
 ## Rollout decision point
 
-The optimized staged engine now satisfies correctness, reliability, responsiveness,
-bounded-cache and material live-performance gates. This report does not change the
-configuration default: `pipeline_engine: legacy` remains active until explicit rollout
-approval. The recommended next decision is to promote staged to the default for one
-transition release while retaining the legacy feature-flag fallback and monitoring
-telemetry; legacy removal should remain a later, separate decision.
+The optimized staged engine satisfies correctness, reliability, responsiveness,
+bounded-cache and material live-performance gates. Rollout approval was subsequently
+given: `staged` is now the default for one transition release while the explicit
+`pipeline_engine: legacy` feature-flag fallback and monitoring telemetry remain.
+Legacy removal remains a later, separate decision.
+
+Normal configuration:
+
+```yaml
+pipeline_engine: staged
+```
+
+Immediate compatibility rollback, without removing staged code or changing data:
+
+```yaml
+pipeline_engine: legacy
+```

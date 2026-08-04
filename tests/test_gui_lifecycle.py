@@ -233,6 +233,7 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     assert window.start_date_edit.width() >= 145
     assert window.end_date_edit.width() >= 145
     assert window.donate_button.isVisibleTo(window)
+    assert window.update_check_timer.isActive()
     donate_right = window.donate_button.mapTo(
         scroll_area.viewport(), window.donate_button.rect().bottomRight()
     ).x()
@@ -243,3 +244,4 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     assert end_date_right <= scroll_area.viewport().width()
 
     window.close()
+    assert not window.update_check_timer.isActive()

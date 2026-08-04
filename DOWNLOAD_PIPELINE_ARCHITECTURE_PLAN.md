@@ -311,7 +311,8 @@ Code behavior બદલ્યા વગર timings/event-loop lag/attempt events
 - Network bytes/time સામે prepare, state, component, symbol અને action time અલગ માપવું.
 - Deterministic fault server/fixtures: timeout, slow chunks, reset, HTML 200, empty ZIP,
   CRC failure, 403, 404, 429 `Retry-After`, 500 અને cancel.
-- Feature flag: `pipeline_engine: legacy|staged`; default legacy.
+- Feature flag: `pipeline_engine: legacy|staged`; staged is the post-acceptance
+  default and legacy remains the transition-release fallback.
 
 Gate: metrics behavior/outputs ન બદલે; baseline report reproducible હોય.
 

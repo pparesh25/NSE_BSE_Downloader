@@ -37,7 +37,7 @@ download_settings:
   timeout_seconds: 5  # Wait for server response (user configurable)
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
-  # Phase 7.2 bounded stage defaults; date scheduling remains legacy.
+  # Phase 7 bounded stage defaults; date selection/scheduling is unchanged.
   prepare_workers: 2
   persistence_workers: 1
   stage_queue_size: 2
@@ -45,8 +45,8 @@ download_settings:
 
 # Download options for data processing
 download_options:
-  # Phase 7 groundwork; staged is not active until a reviewed migration.
-  pipeline_engine: legacy
+  # Phase 7 rollout default. Set to legacy for immediate compatibility fallback.
+  pipeline_engine: staged
   # Extended canonical market data
   include_delivery_data: true
   include_fo_open_interest: true

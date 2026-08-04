@@ -147,17 +147,28 @@ def test_status_presenter_exposes_attempt_retry_queue_and_stage_outcome():
     ]
 
 
-def test_pipeline_engine_defaults_to_legacy_and_accepts_staged(tmp_path):
+def test_pipeline_engine_defaults_to_staged_and_accepts_legacy(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("""
 data_paths:
   base_folder: "{base}"
 download_settings: {{}}
-download_options:
-  pipeline_engine: staged
+download_options: {{}}
 exchange_config: {{}}
 """.format(base=tmp_path / "data"))
     assert Config(str(config_path)).pipeline_engine == "staged"
 
-    config_path.write_text(config_path.read_text().replace("pipeline_engine: staged", "pipeline_engine: invalid"))
+    config_path.write_text(
+        config_path.read_text().replace(
+            "download_options: {}",
+            "download_options:\n  pipeline_engine: legacy",
+        )
+    )
     assert Config(str(config_path)).pipeline_engine == "legacy"
+
+    config_path.write_text(
+        config_path.read_text().replace(
+            "pipeline_engine: legacy", "pipeline_engine: invalid"
+        )
+    )
+    assert Config(str(config_path)).pipeline_engine == "staged"

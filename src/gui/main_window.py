@@ -1047,8 +1047,12 @@ class MainWindow(QMainWindow):
         # Update dynamic options based on initial selection
         self.update_dynamic_options()
 
-        # Check for updates after UI is loaded (delayed start)
-        QTimer.singleShot(3000, self.check_for_updates)  # Check after 3 seconds
+        # Keep delayed update startup owned by the window so an early close
+        # can cancel it instead of starting a thread after teardown begins.
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.setSingleShot(True)
+        self.update_check_timer.timeout.connect(self.check_for_updates)
+        self.update_check_timer.start(3000)
 
         # Set up status update timer
         self.status_timer = QTimer()
@@ -2093,6 +2097,8 @@ class MainWindow(QMainWindow):
                 if reply == QMessageBox.StandardButton.No:
                     event.ignore()
                     return
+
+            self.update_check_timer.stop()
 
             if download_running or update_running:
                 self._close_after_workers = True

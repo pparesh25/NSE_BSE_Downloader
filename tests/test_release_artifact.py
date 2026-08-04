@@ -78,8 +78,8 @@ def test_release_zip_has_one_root_metadata_modes_and_checksum(
         assert stat.S_IMODE(mode) == 0o755
 
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-    assert checksum_path.read_text(encoding="ascii") == (
-        f"{digest}  {archive_path.name}\n"
+    assert checksum_path.read_bytes() == (
+        f"{digest}  {archive_path.name}\n".encode("ascii")
     )
 
 

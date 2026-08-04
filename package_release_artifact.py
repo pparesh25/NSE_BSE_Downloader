@@ -247,9 +247,8 @@ def create_release_archive(
             _write_path(archive, path, destination)
 
     digest = _sha256(archive_path)
-    checksum_path.write_text(
-        f"{digest}  {archive_path.name}\n",
-        encoding="ascii",
+    checksum_path.write_bytes(
+        f"{digest}  {archive_path.name}\n".encode("ascii")
     )
     return archive_path, checksum_path
 

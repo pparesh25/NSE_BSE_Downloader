@@ -144,6 +144,18 @@ class BaseDownloader(ABC):
             self.settings = settings
         return settings.get_download_option(name, default)
 
+    async def _run_pipeline_stage(
+        self, stage: str, function: Callable[..., Any], *args: Any
+    ) -> Any:
+        """Run blocking prepare/persistence work off the asyncio loop."""
+        executors = getattr(self.config, "stage_executors", None)
+        executor = executors.get(stage) if executors else None
+        if executor is not None:
+            return await executor.run(function, *args, stage=stage)
+        # Direct service use and older integrations still receive loop
+        # isolation, with no global lifecycle assumption.
+        return await asyncio.to_thread(function, *args)
+
     @abstractmethod
     def build_url(self, target_date: date) -> str:
         """
@@ -623,8 +635,12 @@ class BaseDownloader(ABC):
                             pending=True,
                         )
 
-                processed = self.process_downloaded_data(
-                    price_result.file_data, target_date, delivery_data
+                processed = await self._run_pipeline_stage(
+                    "prepare",
+                    self.process_downloaded_data,
+                    price_result.file_data,
+                    target_date,
+                    delivery_data,
                 )
                 if processed is None:
                     self._mark_pipeline(
@@ -642,7 +658,9 @@ class BaseDownloader(ABC):
                 validated = True
                 if self._is_cancel_requested():
                     raise asyncio.CancelledError
-                self.save_processed_data(processed, target_date)
+                await self._run_pipeline_stage(
+                    "persist", self.save_processed_data, processed, target_date
+                )
                 if delivery_ready and include_delivery:
                     pending_store.discard(self.exchange, self.segment, target_date)
                 success_count += 1
@@ -793,7 +811,9 @@ class BaseDownloader(ABC):
                     source_era=source.era,
                     source_url=source.url,
                 )
-                processed = self.process_downloaded_data(payload, target_date)
+                processed = await self._run_pipeline_stage(
+                    "prepare", self.process_downloaded_data, payload, target_date
+                )
                 if processed is None or processed.empty:
                     raise DataProcessingError("Processor returned no data")
                 self._mark_pipeline(
@@ -802,7 +822,9 @@ class BaseDownloader(ABC):
                 validated = True
                 if self._is_cancel_requested():
                     raise asyncio.CancelledError
-                self.save_processed_data(processed, target_date)
+                await self._run_pipeline_stage(
+                    "persist", self.save_processed_data, processed, target_date
+                )
                 self.completed_files += 1
                 self._update_progress(f"Completed {target_date}")
             except Exception as error:

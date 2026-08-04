@@ -38,6 +38,7 @@ from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.pipeline_telemetry import PipelineTelemetry
 from ..services.settings import SettingsService
 from ..utils.transport_pool import TransportPool
+from ..utils.stage_executor import BoundedStageExecutor
 
 from .collapsible_section import CollapsibleSection
 
@@ -320,6 +321,23 @@ class DownloadWorker(QThread):
         transport_pool = TransportPool(self.config)
         self.config.transport_pool = transport_pool
         self.config.pipeline_telemetry = PipelineTelemetry()
+        settings = self.config.download_settings
+        self.config.stage_executors = {
+            "prepare": BoundedStageExecutor(
+                name="prepare",
+                max_workers=getattr(settings, "prepare_workers", 2),
+                queue_size=getattr(settings, "stage_queue_size", 2),
+                telemetry=self.config.pipeline_telemetry,
+            ),
+            "persist": BoundedStageExecutor(
+                name="persist",
+                max_workers=getattr(settings, "persistence_workers", 1),
+                queue_size=getattr(settings, "stage_queue_size", 2),
+                telemetry=self.config.pipeline_telemetry,
+            ),
+        }
+        for executor in self.config.stage_executors.values():
+            await executor.start()
         await transport_pool.start()
 
         # Wait for all downloads to complete
@@ -328,6 +346,8 @@ class DownloadWorker(QThread):
                 *self._tasks.values(), return_exceptions=True
             )
         finally:
+            for executor in getattr(self.config, "stage_executors", {}).values():
+                await executor.close()
             await transport_pool.close()
             base_data_path = getattr(self.config, "base_data_path", None)
             if base_data_path is not None:

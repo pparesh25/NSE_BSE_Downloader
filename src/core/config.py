@@ -34,6 +34,9 @@ class DownloadSettings:
     connect_timeout_seconds: Optional[float] = None
     read_timeout_seconds: Optional[float] = None
     attempt_timeout_seconds: Optional[float] = None
+    prepare_workers: int = 2
+    persistence_workers: int = 1
+    stage_queue_size: int = 2
 
 
 @dataclass
@@ -163,6 +166,9 @@ class Config:
             connect_timeout_seconds=download_data.get('connect_timeout_seconds'),
             read_timeout_seconds=download_data.get('read_timeout_seconds'),
             attempt_timeout_seconds=download_data.get('attempt_timeout_seconds'),
+            prepare_workers=download_data.get('prepare_workers', 2),
+            persistence_workers=download_data.get('persistence_workers', 1),
+            stage_queue_size=download_data.get('stage_queue_size', 2),
         )
 
         date_data = self._config_data.get('date_settings', {})

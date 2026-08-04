@@ -37,6 +37,10 @@ download_settings:
   timeout_seconds: 5  # Wait for server response (user configurable)
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
+  # Phase 7.2 bounded stage defaults; date scheduling remains legacy.
+  prepare_workers: 2
+  persistence_workers: 1
+  stage_queue_size: 2
 
 # Download options for data processing
 download_options:

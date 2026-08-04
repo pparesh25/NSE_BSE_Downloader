@@ -31,6 +31,9 @@ class DownloadSettings:
     timeout_seconds: int = 30
     chunk_size: int = 8192
     rate_limit_delay: float = 0.5
+    connect_timeout_seconds: Optional[float] = None
+    read_timeout_seconds: Optional[float] = None
+    attempt_timeout_seconds: Optional[float] = None
 
 
 @dataclass
@@ -157,6 +160,9 @@ class Config:
             timeout_seconds=download_data.get('timeout_seconds', 30),
             chunk_size=download_data.get('chunk_size', 8192),
             rate_limit_delay=download_data.get('rate_limit_delay', 0.5),
+            connect_timeout_seconds=download_data.get('connect_timeout_seconds'),
+            read_timeout_seconds=download_data.get('read_timeout_seconds'),
+            attempt_timeout_seconds=download_data.get('attempt_timeout_seconds'),
         )
 
         date_data = self._config_data.get('date_settings', {})

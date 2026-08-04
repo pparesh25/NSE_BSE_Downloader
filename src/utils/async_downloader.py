@@ -21,6 +21,7 @@ import time
 from ..core.config import Config
 from ..core.exceptions import NetworkError
 from ..services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
+from .transport_pool import TransportPool
 
 
 @dataclass
@@ -46,6 +47,7 @@ class DownloadResult:
     download_time: float = 0.0
     status_code: Optional[int] = None
     retry_after: Optional[float] = None
+    outcome: str = "success"
 
     def __str__(self) -> str:
         status = "SUCCESS" if self.success else "FAILED"
@@ -97,20 +99,33 @@ class AsyncDownloadManager:
         }
         self.telemetry = getattr(config, "pipeline_telemetry", None) or PipelineTelemetry()
         self._lag_monitor = EventLoopLagMonitor(self.telemetry)
+        self.transport_pool: Optional[TransportPool] = getattr(
+            config, "transport_pool", None
+        )
+        self._owns_transport_pool = self.transport_pool is None
+        if self.transport_pool is None:
+            self.transport_pool = TransportPool(config)
 
     async def __aenter__(self):
         """Async context manager entry"""
-        await self._create_session()
+        if self._owns_transport_pool:
+            await self.transport_pool.start()
+        self.session = self.transport_pool.session
         await self._lag_monitor.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
         await self._lag_monitor.stop()
-        await self._close_session()
+        if self._owns_transport_pool:
+            await self.transport_pool.close()
 
     async def _create_session(self) -> None:
         """Create aiohttp session with appropriate settings"""
+        if self.transport_pool is not None:
+            await self.transport_pool.start()
+            self.session = self.transport_pool.session
+            return
         timeout = aiohttp.ClientTimeout(total=self.download_settings.timeout_seconds)
 
         # Enhanced headers optimized for NSE/BSE servers
@@ -171,6 +186,9 @@ class AsyncDownloadManager:
 
     async def _close_session(self) -> None:
         """Close aiohttp session"""
+        if self.transport_pool is not None and not self._owns_transport_pool:
+            self.session = self.transport_pool.session
+            return
         if self.session:
             await self.session.close()
             self.session = None
@@ -260,6 +278,22 @@ class AsyncDownloadManager:
         # Use user-configured timeout for all servers consistently
         return self.download_settings.timeout_seconds
 
+    def _get_timeout_budget(self) -> aiohttp.ClientTimeout:
+        """Return split Phase 7.1 budgets with legacy-compatible defaults."""
+        total = float(
+            getattr(self.download_settings, "attempt_timeout_seconds", None)
+            or self.download_settings.timeout_seconds
+        )
+        connect = float(
+            getattr(self.download_settings, "connect_timeout_seconds", None)
+            or total
+        )
+        read = float(
+            getattr(self.download_settings, "read_timeout_seconds", None)
+            or total
+        )
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
+
     def _get_retry_attempts(self, task: DownloadTask) -> int:
         """
         Get consistent retry attempts for all servers
@@ -327,6 +361,14 @@ class AsyncDownloadManager:
                 "technical_details": error_message
             }
 
+        if any(term in error_lower for term in ("html", "empty zip", "crc", "truncated", "mime")):
+            return {
+                "type": "retryable_payload",
+                "user_message": f"Transient report payload for {task.date_str}: {error_message}",
+                "should_retry": True,
+                "technical_details": error_message,
+            }
+
         # Certificate failures are security failures, not transient downloads.
         if any(term in error_lower for term in ["ssl", "certificate", "cert"]):
             return {
@@ -385,7 +427,7 @@ class AsyncDownloadManager:
             return {
                 "type": "access_denied",
                 "user_message": f"Access denied for {task.date_str} - server may be blocking requests",
-                "should_retry": False,
+                "should_retry": True,
                 "technical_details": error_message
             }
 
@@ -430,7 +472,17 @@ class AsyncDownloadManager:
                         max_attempts=max_attempts,
                     )
                     try:
-                        result = await self._attempt_download(task)
+                        try:
+                            async with self.transport_pool.slot(task.url):
+                                result = await self._attempt_download(task)
+                        except Exception:
+                            self.transport_pool.record(task.url, success=False)
+                            raise
+                        self.transport_pool.record(
+                            task.url,
+                            success=result.success,
+                            status_code=result.status_code,
+                        )
                         self.telemetry.record(
                             "download_attempt_finished",
                             date=task.date_str,
@@ -456,7 +508,8 @@ class AsyncDownloadManager:
                                 result.status_code,
                             )
 
-                            if error_info["should_retry"] and attempt < max_attempts - 1:
+                            retry_limit = 2 if error_info["type"] == "access_denied" else max_attempts
+                            if error_info["should_retry"] and attempt < min(max_attempts, retry_limit) - 1:
                                 wait_time = self._get_retry_delay(
                                     task, attempt, result.retry_after
                                 )
@@ -526,7 +579,8 @@ class AsyncDownloadManager:
                         last_error = f"Download error: {e}"
                         error_info = self._classify_error(str(e), task)
 
-                        if error_info["should_retry"] and attempt < max_attempts - 1:
+                        retry_limit = 2 if error_info["type"] == "access_denied" else max_attempts
+                        if error_info["should_retry"] and attempt < min(max_attempts, retry_limit) - 1:
                             wait_time = self._get_retry_delay(task, attempt)
                             self.telemetry.record(
                                 "retry_scheduled",
@@ -553,7 +607,8 @@ class AsyncDownloadManager:
                     task=task,
                     success=False,
                     error_message=final_error_info["user_message"],
-                    download_time=time.time() - start_time
+                    download_time=time.time() - start_time,
+                    outcome=final_error_info["type"],
                 )
 
 
@@ -593,7 +648,7 @@ class AsyncDownloadManager:
                 self.logger.info(f"  Timeout: {timeout_value}s")
                 self.logger.info("  SSL Verification: Enabled")
 
-            request_timeout = aiohttp.ClientTimeout(total=timeout_value)
+            request_timeout = self._get_timeout_budget()
             async with self.session.get(
                 task.url, timeout=request_timeout
             ) as response:
@@ -619,6 +674,7 @@ class AsyncDownloadManager:
                         status_code=response.status,
                         retry_after=retry_after,
                         download_time=time.time() - start_time,
+                        outcome=("retryable_transport" if response.status in {408, 425, 429} or response.status >= 500 else "access_blocked" if response.status in {401, 403} else "terminal_not_available" if response.status == 404 else "validation_failed"),
                     )
 
                 # Download to memory

@@ -35,7 +35,9 @@ from .donate_dialog import DonateDialog
 from ..core.base_downloader import BaseDownloader, ProgressCallback
 from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.pipeline_telemetry import PipelineTelemetry
 from ..services.settings import SettingsService
+from ..utils.transport_pool import TransportPool
 
 from .collapsible_section import CollapsibleSection
 
@@ -313,10 +315,26 @@ class DownloadWorker(QThread):
             )
             return False
 
+        # Share acquisition transport and host policy across all selected
+        # segments for this worker run.  Date processing remains legacy.
+        transport_pool = TransportPool(self.config)
+        self.config.transport_pool = transport_pool
+        self.config.pipeline_telemetry = PipelineTelemetry()
+        await transport_pool.start()
+
         # Wait for all downloads to complete
-        results = await asyncio.gather(
-            *self._tasks.values(), return_exceptions=True
-        )
+        try:
+            results = await asyncio.gather(
+                *self._tasks.values(), return_exceptions=True
+            )
+        finally:
+            await transport_pool.close()
+            base_data_path = getattr(self.config, "base_data_path", None)
+            if base_data_path is not None:
+                telemetry_path = (
+                    base_data_path / ".state" / "transport_events.jsonl"
+                )
+                self.config.pipeline_telemetry.export_jsonl(telemetry_path)
         settled = dict(zip(self._tasks, results))
 
         if not self.is_cancel_requested():

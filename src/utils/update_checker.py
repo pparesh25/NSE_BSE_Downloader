@@ -193,6 +193,17 @@ class UpdateChecker:
             self.logger.warning(f"Could not parse versions: {latest} vs {current}")
             return False
 
+    @property
+    def release_page_url(self) -> str:
+        """Where a user is sent when no verified package suits their platform.
+
+        Derived from the class-level repository rather than stored per instance,
+        so parsing still works on an instance built without ``__init__``.
+        "latest" avoids assuming how a release tag is spelled.
+        """
+
+        return f"https://github.com/{self.GITHUB_REPOSITORY}/releases/latest"
+
     def _artifact_for_this_platform(self, content: str) -> Tuple[str, str]:
         """Return the ``(url, sha256)`` published for the running platform.
 
@@ -329,6 +340,9 @@ class UpdateChecker:
                 "release_date": build_date,
                 "download_url": update_url or None,
                 "sha256": update_sha256 or None,
+                # Always offered, so a notification-only release still gives the
+                # user somewhere to go instead of a disabled button.
+                "release_page_url": self.release_page_url,
                 "artifact_verified": artifact_verified,
                 "artifact_error": None if artifact_verified else artifact_error,
                 "changelog": version_history if version_history else {

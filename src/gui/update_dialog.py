@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QGroupBox, QScrollArea, QWidget, QProgressBar,
     QMessageBox, QFileDialog, QLineEdit
 )
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtGui import QFont, QDesktopServices
 
 from ..utils.update_checker import UpdateChecker
 from ..utils.user_preferences import UserPreferences
@@ -335,13 +335,14 @@ class UpdateDialog(QDialog):
         """)
         self.download_btn.clicked.connect(self.download_update)
         if not self.update_info.get("artifact_verified", False):
-            self.download_btn.setEnabled(False)
-            self.download_btn.setText("Verified Package Unavailable")
+            # A release can be announced without a verified in-app package for
+            # this platform.  Send the user to the release page rather than
+            # leaving a disabled button and no way to obtain the update.
+            self.download_btn.setText("🌐 Open Release Page")
+            self.download_btn.clicked.disconnect(self.download_update)
+            self.download_btn.clicked.connect(self.open_release_page)
             self.download_btn.setToolTip(
-                self.update_info.get(
-                    "artifact_error",
-                    "Download this version from the official GitHub release page",
-                )
+                "Download this version from the official GitHub release page"
             )
         button_layout.addWidget(self.download_btn)
 
@@ -382,6 +383,23 @@ class UpdateDialog(QDialog):
         button_layout.addWidget(self.skip_btn)
 
         layout.addWidget(button_widget)
+
+    def open_release_page(self):
+        """Open the official release page for a notification-only update."""
+
+        url = self.update_info.get("release_page_url")
+        if not url:
+            QMessageBox.information(
+                self,
+                "Release Page",
+                "Visit the project's GitHub releases page to download this "
+                "version.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.information(
+                self, "Release Page", f"Open this address to download:\n\n{url}"
+            )
 
     def download_update(self):
         """Start update download process"""
@@ -447,9 +465,9 @@ class UpdateDialog(QDialog):
             QMessageBox.critical(self, "Download Failed", f"Failed to download update:\n{result}")
 
     def _download_worker_stopped(self) -> None:
-        self.download_btn.setEnabled(
-            self.update_info.get("artifact_verified", False)
-        )
+        # The button is meaningful in both modes now -- it either downloads a
+        # verified package or opens the release page -- so it is always restored.
+        self.download_btn.setEnabled(True)
         self.remind_btn.setEnabled(True)
         self.skip_btn.setEnabled(True)
         if self._close_after_download:

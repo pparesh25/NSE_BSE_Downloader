@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from src.core.base_downloader import BaseDownloader, ProgressCallback
 from src.gui.collapsible_section import CollapsibleSection
 from src.gui.main_window import DownloadWorker
+from src.gui import update_dialog as update_dialog_module
 from src.gui.update_dialog import UpdateDialog
 from src.services.canonical_data import EQUITY_DAILY_COLUMNS, INDEX_DAILY_COLUMNS
 from src.services.date_join_coordinator import DateJoinCoordinator
@@ -287,7 +288,7 @@ def test_date_and_section_preferences_survive_reload(tmp_path, monkeypatch):
     assert not reloaded.get_section_states()["options"]
 
 
-def test_update_dialog_disables_unverified_package_download():
+def test_update_dialog_offers_release_page_without_verified_package(monkeypatch):
     _application()
     checker = UpdateChecker(current_version="1.1.0")
     dialog = UpdateDialog(
@@ -295,13 +296,44 @@ def test_update_dialog_disables_unverified_package_download():
             "latest_version": "1.2.0",
             "artifact_verified": False,
             "artifact_error": "Verified metadata missing",
+            "release_page_url": checker.release_page_url,
         },
         update_checker=checker,
     )
 
-    assert not dialog.download_btn.isEnabled()
-    assert dialog.download_btn.text() == "Verified Package Unavailable"
-    assert dialog.download_btn.toolTip() == "Verified metadata missing"
+    # A notification-only release must still lead somewhere, so the button stays
+    # usable and opens the official release page instead of downloading.
+    assert dialog.download_btn.isEnabled()
+    assert dialog.download_btn.text() == "🌐 Open Release Page"
+
+    opened = []
+    monkeypatch.setattr(
+        update_dialog_module.QDesktopServices,
+        "openUrl",
+        lambda url: opened.append(url.toString()) or True,
+    )
+    dialog.download_btn.click()
+
+    assert opened == [
+        "https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest"
+    ]
+    dialog.close()
+
+
+def test_update_dialog_downloads_when_package_is_verified():
+    _application()
+    checker = UpdateChecker(current_version="1.1.0")
+    dialog = UpdateDialog(
+        {
+            "latest_version": "1.2.0",
+            "artifact_verified": True,
+            "release_page_url": checker.release_page_url,
+        },
+        update_checker=checker,
+    )
+
+    assert dialog.download_btn.isEnabled()
+    assert dialog.download_btn.text() == "📥 Download Update"
     dialog.close()
 
 

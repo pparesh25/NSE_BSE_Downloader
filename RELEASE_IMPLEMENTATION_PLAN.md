@@ -58,11 +58,16 @@ Do this **first** — it is the cheapest item here and it protects everything af
       features and 13 bug fixes
 - [x] Six tests added in `tests/test_update_security.py`
 
-Remaining decision:
+**Decision taken 2026-08-06: v1.1.0 ships with an empty `__update_artifacts__` map —
+notification-only.** The mechanism is implemented and tested; entries are populated in
+1.1.1, after the release process has been exercised once. Do not re-open this without a
+reason to.
 
-- [ ] Ship 1.1.0 with an empty map (notification-only), or populate it at release time?
-      **Recommendation: ship empty.** The mechanism is in place and tested; populating
-      it can wait until the release process has been exercised once, in 1.1.1.
+Consequence handled: notification-only makes the update dialog the *only* route to a
+download, so the dialog no longer shows a disabled "Verified Package Unavailable"
+button. It now offers an enabled "Open Release Page" button
+(`src/gui/update_dialog.py:337-347`, `open_release_page()`), with the URL supplied by
+`UpdateChecker.release_page_url` so the repository is not hardcoded in the GUI.
 
 ### 1.2b Release builds tied to a version, not to every commit — effort S — **done**
 

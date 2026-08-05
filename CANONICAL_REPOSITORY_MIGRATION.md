@@ -113,8 +113,13 @@ for publication.
 ## Release blockers
 
 - Produce and test the intended platform release assets.
-- Decide whether the transition release remains notification-only or introduces
-  platform-specific verified update metadata.
+- ~~Decide whether the transition release remains notification-only or introduces
+  platform-specific verified update metadata.~~ **Closed 2026-08-06: the transition
+  release is notification-only.** `__update_artifacts__` replaces the former single
+  `__update_url__`/`__update_sha256__` pair and ships empty, so no platform is offered
+  an in-app package. Verified per-platform metadata is populated in 1.1.1, once the
+  release process has been exercised once. The update dialog now sends users to the
+  official release page rather than disabling its only action.
 - Record SHA-256 for every published asset.
 - Complete applicable signing and notarization gates.
 - Update the v1.1 release date/build metadata only when the release date is known.

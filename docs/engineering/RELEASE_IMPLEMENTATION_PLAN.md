@@ -113,8 +113,9 @@ reputation.
       More info→Run anyway steps, and routes Intel Macs to the source install
 - [x] `trusted-release-candidate.yml` left in place and unconfigured — it is the
       finished signed path, waiting only on credentials. Do not delete it.
-- [ ] Repeat both first-launch steps in the v1.1.0 release notes. Users read release
-      notes, not the repository.
+- [x] Both first-launch steps are in the drafted release notes
+      ([RELEASE_NOTES_1.1.0.md](RELEASE_NOTES_1.1.0.md)). Users read release notes, not
+      the repository.
 
 ### 1.5 Repository housekeeping — effort S — **done 2026-08-06**
 

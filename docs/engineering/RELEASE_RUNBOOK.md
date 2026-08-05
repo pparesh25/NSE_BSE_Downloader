@@ -129,7 +129,7 @@ Each job also runs `--smoke-gui` inside `package_release_artifact.py`, which sta
 real packaged GUI offscreen with a temporary home and data root, then closes it. A build
 that cannot start is rejected before it is uploaded.
 
-### Step 1 — Rehearse without a tag
+### Step 1 — Rehearse without a tag — **done 2026-08-06, all green**
 
 Do this first. It exercises the whole build with nothing published and no tag to delete:
 
@@ -143,6 +143,35 @@ gh run list --repo pparesh25/NSE_BSE_Downloader --workflow "Release Artifact Bui
 
 Wait for all three jobs to go green. If anything fails, fix it now — a tag makes the
 failure public.
+
+#### Rehearsal result — run 31054912467
+
+27 minutes 15 seconds wall clock. All three jobs succeeded.
+
+| Artifact | Size | Contents |
+|---|---|---|
+| `NSE_BSE_Downloader-1.1.0-darwin-arm64.zip` | 61 MB | `NSE BSE Data Downloader.app` (834 files) + `BUILD-METADATA.json` |
+| `NSE_BSE_Downloader-1.1.0-windows-x64.zip` | 46 MB | `NSE_BSE_Downloader.exe` + `BUILD-METADATA.json` |
+| `NSE_BSE_Downloader-1.1.0-linux-x64.zip` | 80 MB | `NSE_BSE_Downloader` + `BUILD-METADATA.json` |
+
+Verified after downloading, not merely assumed from a green tick:
+
+- `shasum -a 256 -c` on all three sidecars: **OK**. Sidecar format is
+  `<64 hex>  <filename>`, which `shasum -c` reads directly.
+- `BUILD-METADATA.json` records `"trust_status": "unsigned"` and
+  `"git_commit": "0126ac0…"`, matching the branch head. The `SOURCE_COMMIT`
+  fallback to `github.sha` therefore works on `workflow_dispatch`, where
+  `github.event.pull_request.head.sha` is absent.
+- Each archive has a single top-level directory named after the archive.
+- The packaged macOS app was extracted and launched with `--smoke-gui` under a
+  temporary `HOME`: **exit 0**.
+- `codesign -dv` reports `Signature=adhoc`, `TeamIdentifier=not set`;
+  `spctl --assess --type execute` reports **rejected**. This independently
+  reproduces the Gatekeeper behaviour documented in `RELEASE_TRUST_ASSETS.md`, and
+  is exactly what `UPGRADE.md` prepares users for.
+
+Artifacts expire 2026-08-19. They are release *candidates*, not the release: the
+published assets must be rebuilt from the tagged commit in step 3.
 
 ### Step 2 — Set the release date
 

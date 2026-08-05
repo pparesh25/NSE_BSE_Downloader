@@ -1,5 +1,12 @@
 # NSE/BSE Data Downloader v1.1.0 (PySide6)
 
+> ### Upgrading from v1.0.1? Read **[UPGRADE.md](UPGRADE.md)** first.
+> v1.1.0 replaced PyQt6 with PySide6 and requires Python 3.10 or newer. Copying these
+> files over an existing v1.0.1 install **without** running
+> `pip install -r requirements.txt` will stop the app from starting. Prebuilt
+> applications that need no setup are on the
+> [releases page](https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest).
+
 A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)

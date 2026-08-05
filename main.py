@@ -17,17 +17,33 @@ import sys
 import argparse
 from pathlib import Path
 
-from src.core.config import Config
-from src.gui.main_window import MainWindow
-from runtime_paths import default_config_path, resource_path
-from runtime_identity import configure_process_identity
-from version import get_version
-from app_metadata import (
-    APP_NAME,
-    ORGANIZATION_DOMAIN,
-    ORGANIZATION_NAME,
-    PRODUCT_NAME,
-)
+MINIMUM_PYTHON = (3, 10)
+
+
+def _require_supported_python() -> None:
+    """Stop with a readable message instead of an error from a later import.
+
+    Users upgrading from v1.0.1 may still be on the Python 3.8 that release
+    supported.  Every ``src`` module uses syntax that only parses on 3.10 or
+    newer, so this has to run before the first project import.
+    """
+
+    if sys.version_info >= MINIMUM_PYTHON:
+        return
+    running = ".".join(str(part) for part in sys.version_info[:3])
+    required = ".".join(str(part) for part in MINIMUM_PYTHON)
+    print(
+        "Error: this application needs Python {0} or newer, but it is running "
+        "on Python {1}.".format(required, running)
+    )
+    print("Install a newer Python from https://www.python.org/downloads/ and")
+    print("run the application with it, then reinstall the dependencies:")
+    print("    pip install -r requirements.txt")
+    print("See UPGRADE.md for the full upgrade instructions.")
+    raise SystemExit(1)
+
+
+_require_supported_python()
 
 try:
     from PySide6.QtGui import QIcon
@@ -36,6 +52,26 @@ try:
 except ImportError:
     GUI_AVAILABLE = False
     print("Warning: PySide6 not available. GUI mode disabled.")
+    print("Install the application dependencies with:")
+    print("    pip install -r requirements.txt")
+    print(
+        "Version 1.1.0 replaced PyQt6 with PySide6, so an installation carried "
+        "over from v1.0.1 needs this step.  See UPGRADE.md."
+    )
+
+# Deliberately below the interpreter check: these modules use syntax that only
+# parses on Python 3.10 or newer, so importing them first would replace the
+# guard's readable message with a SyntaxError traceback.
+from src.core.config import Config  # noqa: E402
+from runtime_paths import default_config_path, resource_path  # noqa: E402
+from runtime_identity import configure_process_identity  # noqa: E402
+from version import get_version  # noqa: E402
+from app_metadata import (  # noqa: E402
+    APP_NAME,
+    ORGANIZATION_DOMAIN,
+    ORGANIZATION_NAME,
+    PRODUCT_NAME,
+)
 
 
 def setup_argument_parser():
@@ -158,8 +194,14 @@ def run_gui_mode(config_path: str, *, smoke_test: bool = False):
     """Run the application in GUI mode"""
     if not GUI_AVAILABLE:
         print("Error: PySide6 is not installed. Cannot run GUI mode.")
-        print("Install PySide6 with: pip install PySide6")
+        print("Install the application dependencies with:")
+        print("    pip install -r requirements.txt")
         return 1
+
+    # Imported here rather than at module scope so that the repair commands and
+    # the messages above still work on an installation whose dependencies have
+    # not been updated yet.
+    from src.gui.main_window import MainWindow
 
     # Enable High DPI support
     import os

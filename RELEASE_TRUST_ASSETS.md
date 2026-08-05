@@ -107,10 +107,16 @@ credentials:
 The trusted workflow validates every required value before building and fails
 closed when a credential or timestamp endpoint is absent.
 
-The packaging compiler helpers are exact-pinned in `requirements-build.txt`,
-and the tested Qt runtime is exact-pinned in `requirements.txt`. This prevents
-a previously installed compiler release candidate or an unvalidated Qt minor
-release from producing a different binary than a clean CI runner.
+The packaging compiler helpers and the tested Qt runtime are both exact-pinned
+in `requirements-build.txt`. This prevents a previously installed compiler
+release candidate or an unvalidated Qt minor release from producing a different
+binary than a clean CI runner.
+
+`requirements.txt` deliberately keeps a Qt *range* instead, because an exact pin
+there would make source installation impossible on operating systems that have
+no wheel for the newest Qt minor. Every release build installs both files
+together, so pip resolves the intersection to the single validated version and
+the reproducibility guarantee above is unchanged.
 
 ## Clean-machine acceptance gate
 

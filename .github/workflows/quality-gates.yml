@@ -1,7 +1,12 @@
 name: Quality Gates
 
+# Pull requests are the gate for every change.  Pushes are additionally checked only on
+# long-lived branches, so a pull request does not run the whole suite twice for one
+# commit and pushes to pre-port archive branches never schedule work.
 "on":
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -90,6 +95,7 @@ jobs:
           runtime_paths.py
           runtime_identity.py
           build_nuitka_cross_platform.py
+          package_release_artifact.py
 
       - name: Validate Linux Nuitka command without building
         run: python build_nuitka_cross_platform.py --target linux

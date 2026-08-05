@@ -121,7 +121,11 @@ for publication.
   release process has been exercised once. The update dialog now sends users to the
   official release page rather than disabling its only action.
 - Record SHA-256 for every published asset.
-- Complete applicable signing and notarization gates.
+- ~~Complete applicable signing and notarization gates.~~ **Closed 2026-08-06: v1.1.0
+  ships unsigned.** No signing or notarization gate applies to this release. The
+  `.zip.sha256` sidecars remain the integrity mechanism, and `UPGRADE.md` plus the
+  release notes carry the macOS and Windows first-launch steps. Reasoning and the
+  revisit condition are in `RELEASE_TRUST_ASSETS.md` §Signing decision.
 - Update the v1.1 release date/build metadata only when the release date is known.
 - Keep the pull request unmerged and the release unpublished until all blockers are
   closed.

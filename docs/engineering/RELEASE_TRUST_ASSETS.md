@@ -1,12 +1,58 @@
 # Release Trust and Assets
 
+## Signing decision for v1.1.0
+
+**Decided 2026-08-06: v1.1.0 ships unsigned.** Recorded here so it is not
+re-argued each release.
+
+Evidence at the time of the decision:
+
+- `RELEASE_BUILD_EVIDENCE.md` records that Nuitka applied an ad-hoc signature and
+  `codesign --verify --deep --strict` passed, but the build host held **zero**
+  valid Developer ID identities and **Gatekeeper rejected** the bundle.
+- `gh api .../environments/release-signing/secrets` returns
+  `{"total_count": 0}`. None of the eight required secrets exist.
+- `Trusted Release Candidate` is `workflow_dispatch`-only, so it never runs by
+  itself and cannot turn `main` red while it stays unconfigured.
+
+Cost of the alternative, for a free GPL-3.0 tool with a small user base:
+
+| | macOS | Windows |
+|---|---|---|
+| Certificate | Apple Developer Program, $99/year | OV code-signing, roughly $200-400/year |
+| Removes | The Gatekeeper block | The SmartScreen warning, but only after the certificate accumulates reputation |
+
+Windows is the weaker case: a new OV certificate still triggers SmartScreen until
+it builds reputation, so the money does not buy an immediately clean install.
+
+What users experience instead, both documented in `UPGRADE.md` and repeated in
+the release notes:
+
+- **macOS** — "cannot be opened because it is from an unidentified developer."
+  Right-click (or Control-click) the app, choose **Open**, then **Open** again.
+  Once only.
+- **Windows** — "Windows protected your PC." Click **More info** →
+  **Run anyway**.
+- **Linux** — nothing unusual.
+
+Integrity is still verifiable: every published asset ships a `.zip.sha256`
+sidecar in `shasum -c` format.
+
+**Revisit when** users actually report being blocked, or the user base grows
+enough that first-launch friction costs more than the certificates. Do not delete
+`.github/workflows/trusted-release-candidate.yml` in the meantime — it is the
+finished implementation, waiting only on credentials.
+
 ## Status
 
 The application now has project-owned cross-platform icon assets and two
 separate release pipelines:
 
-- `Release Artifact Builds` runs on pull requests and produces unsigned,
-  reproducible test candidates on macOS ARM64, Windows x64, and Linux x64.
+- `Release Artifact Builds` produces unsigned, reproducible candidates on macOS
+  ARM64, Windows x64, and Linux x64. It runs on `v*.*.*` tag pushes and on
+  demand; a full three-platform compile takes about 27 minutes, so it is tied to
+  a version rather than to every commit. `Quality Gates` validates the packaging
+  command for all three targets on every change instead.
 - `Trusted Release Candidate` is manual-only, requires an exact 40-character
   source commit, and uses the protected `release-signing` environment. It does
   not create a GitHub Release, tag, or updater notification.
@@ -14,6 +60,10 @@ separate release pipelines:
 The trusted workflow is intentionally credential-gated. It cannot produce a
 trusted candidate until the owner supplies Apple and/or Windows signing
 credentials through GitHub environment secrets.
+
+Neither workflow publishes a GitHub Release. Both end at
+`actions/upload-artifact` with 14-day retention, so creating the Release and
+uploading assets is a manual step today. See `RELEASE_RUNBOOK.md` §1.3.
 
 ## Application icon
 

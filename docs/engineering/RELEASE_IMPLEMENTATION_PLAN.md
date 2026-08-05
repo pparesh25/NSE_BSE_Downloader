@@ -98,25 +98,23 @@ pull-request commit touching `src/**`. Measured duration: about 27 minutes per r
 - [ ] Create tag `v1.1.0` and a GitHub Release with all assets plus `.sha256` sidecars
 - [ ] Download every asset from the published Release on a clean machine and run it
 
-### 1.4 macOS signing decision — effort S (decide) / L (implement)
+### 1.4 Signing decision — **decided 2026-08-06: ship unsigned**
 
-`RELEASE_BUILD_EVIDENCE.md:58-61`: zero Developer ID identities, Gatekeeper rejected the
-ad-hoc signature. `release-signing` environment has 0 secrets.
+Full reasoning, cost comparison and the revisit condition are recorded in
+[RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md) §Signing decision. Summary: the
+build host has zero Developer ID identities and Gatekeeper rejected the ad-hoc
+signature; the `release-signing` environment holds 0 of the 8 required secrets; and
+$99–400/year is premature before anyone reports being blocked. Windows is the weaker
+case still, since a new OV certificate keeps triggering SmartScreen until it earns
+reputation.
 
-Pick one and record it:
-
-| Option | Cost | Effort | Result |
-|---|---|---|---|
-| Apple Developer Program + notarization | $99/yr | L | Clean first launch |
-| Ship unsigned, document right-click→Open | free | S | Works; scary first launch |
-| macOS source-only | free | S | Fewer users |
-
-**Recommendation: ship unsigned for 1.1.0.** `UPGRADE.md` already documents the
-right-click→Open step. Revisit if user complaints justify the subscription.
-
-- [ ] Record the decision in `RELEASE_TRUST_ASSETS.md`
-- [ ] If unsigned: confirm the release notes repeat the first-launch instructions
-- [ ] Note that Intel Macs have no build; `UPGRADE.md` already routes them to source
+- [x] Decision recorded in `RELEASE_TRUST_ASSETS.md`
+- [x] `UPGRADE.md` documents the macOS right-click→Open and Windows
+      More info→Run anyway steps, and routes Intel Macs to the source install
+- [x] `trusted-release-candidate.yml` left in place and unconfigured — it is the
+      finished signed path, waiting only on credentials. Do not delete it.
+- [ ] Repeat both first-launch steps in the v1.1.0 release notes. Users read release
+      notes, not the repository.
 
 ### 1.5 Repository housekeeping — effort S — **done 2026-08-06**
 

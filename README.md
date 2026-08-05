@@ -79,9 +79,11 @@ python build_nuitka_cross_platform.py --target-platform=darwin
 Neither command installs Nuitka, deletes output nor starts compilation without
 an explicit `--build`. Runtime config/QR paths work independently of the launch
 directory; user data and preferences remain outside the read-only app bundle.
-See [PACKAGING.md](PACKAGING.md) and
-[RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md) for build evidence,
-credential setup, clean-machine verification, and publication gates.
+See [PACKAGING.md](docs/engineering/PACKAGING.md) and
+[RELEASE_TRUST_ASSETS.md](docs/engineering/RELEASE_TRUST_ASSETS.md) for build
+evidence, credential setup, clean-machine verification, and publication gates.
+Every internal engineering record lives under
+[docs/engineering/](docs/engineering/).
 
 ## Using the app
 

@@ -1,23 +1,16 @@
 name: Release Artifact Builds
 
+# A full three-platform Nuitka compile takes about 27 minutes, so it is tied to a
+# version rather than to every commit.  Quality Gates validates the packaging
+# command for all three targets on each change, which is what catches packaging
+# configuration errors; only a real release needs the compiled artifacts.
+# Use workflow_dispatch to build a candidate from any branch on demand.
 "on":
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/release-artifacts.yml"
-      - "app_metadata.py"
-      - "build_nuitka_cross_platform.py"
-      - "config.yaml"
-      - "main.py"
-      - "package_release_artifact.py"
-      - "RELEASE_TRUST_ASSETS.md"
-      - "requirements.txt"
-      - "requirements-build.txt"
-      - "runtime_identity.py"
-      - "runtime_paths.py"
-      - "version.py"
-      - "src/**"
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 permissions:
   contents: read

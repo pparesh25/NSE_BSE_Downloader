@@ -4,9 +4,11 @@ Update Checker
 Checks for application updates from GitHub repository.
 """
 
+import ast
 import json
 import hashlib
 import logging
+import platform
 import re
 import stat
 import sys
@@ -18,6 +20,31 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from .http_client import fetch_text_sync, download_to_file_sync, HTTPStatusError
+
+
+def release_platform_key(
+    system: Optional[str] = None, machine: Optional[str] = None
+) -> str:
+    """Return the ``<platform>-<architecture>`` key for this machine.
+
+    The names match what ``package_release_artifact.py`` puts in each release
+    archive name, so a published asset and the running application agree on one
+    spelling.
+    """
+
+    name = (system or platform.system()).strip().lower()
+    systems = {"darwin": "darwin", "windows": "windows", "linux": "linux"}
+    architecture = (machine or platform.machine()).strip().lower()
+    architectures = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+    return (
+        f"{systems.get(name, name)}-"
+        f"{architectures.get(architecture, architecture.replace(' ', '-'))}"
+    )
 
 
 class UpdateChecker:
@@ -166,6 +193,53 @@ class UpdateChecker:
             self.logger.warning(f"Could not parse versions: {latest} vs {current}")
             return False
 
+    def _artifact_for_this_platform(self, content: str) -> Tuple[str, str]:
+        """Return the ``(url, sha256)`` published for the running platform.
+
+        Returns a pair of empty strings whenever the mapping is absent,
+        unparseable, or has no entry for this platform, which keeps the caller
+        on the notification-only path.  The published file is remote data, so it
+        is read with ``ast.literal_eval`` and never executed.
+        """
+
+        match = re.search(
+            r"^__update_artifacts__[^=]*=\s*(\{.*?^\})",
+            content,
+            re.DOTALL | re.MULTILINE,
+        )
+        if not match:
+            return "", ""
+
+        try:
+            artifacts = ast.literal_eval(match.group(1))
+        except (ValueError, SyntaxError, MemoryError, RecursionError) as error:
+            self.logger.warning(f"Could not parse __update_artifacts__: {error}")
+            return "", ""
+
+        if not isinstance(artifacts, dict):
+            self.logger.warning("__update_artifacts__ is not a mapping")
+            return "", ""
+
+        key = release_platform_key()
+        entry = artifacts.get(key)
+        if entry is None:
+            self.logger.info(
+                f"No published update artifact for this platform ({key})"
+            )
+            return "", ""
+        if not isinstance(entry, dict):
+            self.logger.warning(f"__update_artifacts__[{key!r}] is not a mapping")
+            return "", ""
+
+        url = entry.get("url")
+        digest = entry.get("sha256")
+        if not isinstance(url, str) or not isinstance(digest, str):
+            self.logger.warning(
+                f"__update_artifacts__[{key!r}] is missing a string url/sha256"
+            )
+            return "", ""
+        return url.strip(), digest.strip()
+
     def _parse_github_version_file(self, content: str) -> Dict:
         """
         Parse GitHub version.py file content to extract version and changelog
@@ -194,18 +268,7 @@ class UpdateChecker:
             version = version_match.group(1)
             self.logger.info(f"🔍 DEBUG: Extracted version: {version}")
 
-            update_url_match = re.search(
-                r'__update_url__\s*=\s*["\']([^"\']*)["\']', content
-            )
-            update_hash_match = re.search(
-                r'__update_sha256__\s*=\s*["\']([^"\']*)["\']', content
-            )
-            update_url = (
-                update_url_match.group(1).strip() if update_url_match else ""
-            )
-            update_sha256 = (
-                update_hash_match.group(1).strip() if update_hash_match else ""
-            )
+            update_url, update_sha256 = self._artifact_for_this_platform(content)
             artifact_verified = False
             artifact_error = "Verified update package metadata is unavailable"
             if update_url and update_sha256:
@@ -300,6 +363,13 @@ class UpdateChecker:
             return False, "Update URL must use HTTPS"
 
         hostname = (parsed.hostname or "").lower()
+        # A dot segment would let "/<repo>/releases/download/v1/../../elsewhere"
+        # satisfy the prefix test below while the server resolves it somewhere
+        # else entirely.  Reject rather than normalize: a released asset URL
+        # never contains one.
+        if any(part in {".", ".."} for part in parsed.path.split("/")):
+            return False, "Update URL must not contain relative path segments"
+
         path = parsed.path.lower()
         repository_path = f"/{self.GITHUB_REPOSITORY.lower()}"
         github_release = (

@@ -8,11 +8,25 @@ __version__ = "1.1.0"
 __build_date__ = "2026-08-04"
 __build_number__ = 27
 
-# Release automation must replace both values together.  The desktop updater
-# remains notification-only while either field is blank, rather than executing
-# code from a mutable branch without an integrity check.
-__update_url__ = ""
-__update_sha256__ = ""
+# Verified update artifacts, keyed by "<platform>-<architecture>" exactly as
+# package_release_artifact.py names each release archive.  Release automation
+# fills one entry per published asset, with the URL and its SHA-256 written
+# together.
+#
+# The updater stays notification-only for any platform with no entry, an empty
+# URL, or an empty digest, rather than executing code without an integrity
+# check.  An empty mapping therefore makes every platform notification-only,
+# which is the intended state until a release is published.
+#
+# Do not rename __version__, __build_date__ or VERSION_HISTORY.  Installed
+# v1.0.1 clients parse those three by regular expression to discover this
+# release, and tests/test_index_and_version.py fails if that contract breaks.
+__update_artifacts__: dict[str, dict[str, str]] = {
+    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.1.0-darwin-arm64.zip",
+    #                  "sha256": "<64 hex characters>"},
+    # "windows-x64": {...},
+    # "linux-x64": {...},
+}
 
 # Version history
 VERSION_HISTORY = {

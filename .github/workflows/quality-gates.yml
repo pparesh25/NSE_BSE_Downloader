@@ -97,5 +97,12 @@ jobs:
           build_nuitka_cross_platform.py
           package_release_artifact.py
 
-      - name: Validate Linux Nuitka command without building
-        run: python build_nuitka_cross_platform.py --target linux
+      # Compiled artifacts are built only for a release tag, so this dry run is
+      # what keeps packaging configuration errors from reaching that point.  It
+      # covers every shipped target and starts no build.
+      - name: Validate Nuitka commands for every target without building
+        run: |
+          for target in linux windows darwin; do
+            echo "--- $target ---"
+            python build_nuitka_cross_platform.py --target "$target"
+          done

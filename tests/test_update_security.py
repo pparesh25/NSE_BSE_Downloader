@@ -4,7 +4,8 @@ from pathlib import Path
 import stat
 import zipfile
 
-from src.utils.update_checker import UpdateChecker
+from src.utils import update_checker as update_checker_module
+from src.utils.update_checker import UpdateChecker, release_platform_key
 
 
 def _zip_bytes(path: Path) -> bytes:
@@ -198,3 +199,111 @@ def test_update_extraction_restores_only_archived_executable_bits(tmp_path):
     assert os.access(extracted_root / "NSE_BSE_Downloader", os.X_OK)
     assert regular_mode & 0o111 == 0
     assert regular_mode & 0o022 == 0
+
+
+def _version_file(artifacts: str) -> str:
+    return (
+        '__version__ = "1.2.0"\n'
+        '__build_date__ = "2026-08-06"\n'
+        f"__update_artifacts__ = {artifacts}\n"
+        'VERSION_HISTORY = {"1.2.0": {"features": ["x"], "bug_fixes": ["y"]}}\n'
+    )
+
+
+def test_platform_key_matches_release_archive_names():
+    # These are the exact suffixes package_release_artifact.py builds into each
+    # archive name, so a published asset and the running client agree.
+    assert release_platform_key("Darwin", "arm64") == "darwin-arm64"
+    assert release_platform_key("Windows", "AMD64") == "windows-x64"
+    assert release_platform_key("Linux", "x86_64") == "linux-x64"
+    assert release_platform_key("Darwin", "aarch64") == "darwin-arm64"
+
+
+def test_artifact_selected_for_running_platform(monkeypatch):
+    checker = UpdateChecker(current_version="1.1.0")
+    monkeypatch.setattr(
+        update_checker_module, "release_platform_key", lambda: "linux-x64"
+    )
+    content = _version_file(
+        '{\n'
+        '    "darwin-arm64": {"url": "https://github.com/pparesh25/'
+        'NSE_BSE_Downloader/releases/download/v1.2.0/mac.zip",\n'
+        '                     "sha256": "' + "a" * 64 + '"},\n'
+        '    "linux-x64": {"url": "https://github.com/pparesh25/'
+        'NSE_BSE_Downloader/releases/download/v1.2.0/linux.zip",\n'
+        '                  "sha256": "' + "b" * 64 + '"},\n'
+        '}'
+    )
+
+    result = checker._parse_github_version_file(content)
+
+    assert result["artifact_verified"] is True
+    assert checker.download_url.endswith("linux.zip")
+    assert checker.expected_sha256 == "b" * 64
+
+
+def test_platform_without_published_artifact_stays_notification_only(monkeypatch):
+    checker = UpdateChecker(current_version="1.1.0")
+    monkeypatch.setattr(
+        update_checker_module, "release_platform_key", lambda: "darwin-x64"
+    )
+    content = _version_file(
+        '{"linux-x64": {"url": "https://github.com/pparesh25/NSE_BSE_Downloader'
+        '/releases/download/v1.2.0/linux.zip", "sha256": "' + "b" * 64 + '"}}'
+    )
+
+    result = checker._parse_github_version_file(content)
+
+    assert result["latest_version"] == "1.2.0"
+    assert result["artifact_verified"] is False
+    assert checker.download_url is None
+    assert checker.expected_sha256 is None
+
+
+def test_empty_artifact_mapping_is_notification_only():
+    checker = UpdateChecker(current_version="1.1.0")
+
+    result = checker._parse_github_version_file(_version_file("{}"))
+
+    assert result["latest_version"] == "1.2.0"
+    assert result["artifact_verified"] is False
+    assert checker.download_url is None
+
+
+def test_malformed_artifact_mapping_does_not_execute_or_configure(
+    tmp_path, monkeypatch
+):
+    checker = UpdateChecker(current_version="1.1.0")
+    monkeypatch.setattr(
+        update_checker_module, "release_platform_key", lambda: "linux-x64"
+    )
+    # version.py arrives over the network, so a hostile or corrupted response
+    # must be read as data and never evaluated as code.
+    marker = tmp_path / "executed"
+    content = _version_file(
+        '{"linux-x64": {"url": __import__("pathlib").Path('
+        f"{str(marker)!r}"
+        ').write_text("x"), "sha256": "' + "b" * 64 + '"}}'
+    )
+
+    result = checker._parse_github_version_file(content)
+
+    assert not marker.exists(), "remote metadata must never be executed"
+    assert result["latest_version"] == "1.2.0"
+    assert result["artifact_verified"] is False
+    assert checker.download_url is None
+
+
+def test_artifact_url_rejects_relative_path_segments():
+    checker = UpdateChecker(current_version="1.1.0")
+
+    success, message = checker.configure_update_artifact(
+        "https://github.com/pparesh25/NSE_BSE_Downloader/releases/download/"
+        "v1.2.0/../../../../other/repo/evil.zip",
+        "c" * 64,
+        "1.2.0",
+    )
+
+    assert not success
+    assert "relative path" in message
+    assert checker.download_url is None

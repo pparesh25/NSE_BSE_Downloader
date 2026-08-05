@@ -29,18 +29,26 @@ Status legend: **[ ]** not started · **[~]** partly done · **[x]** done
 
 Everything here must be complete before PR #10 leaves draft.
 
-### 1.1 Branch protection on `main` — effort S
+### 1.1 Branch protection on `main` — effort S — **done 2026-08-06**
 
-`branches/main/protection` currently returns 404 and `rulesets` returns `[]`. After the
-merge, `main/version.py` *is* the update channel for every installed client. One
-accidental push publishes an update to all of them.
+- [x] Pull request required (0 approvals — there is no second reviewer)
+- [x] `enforce_admins: true`, so the rule applies to the owner too. With it false the
+      protection would be decorative for a solo maintainer
+- [x] Force-push and deletion blocked; `strict: true` so a branch must be current
+- [x] Required checks: `Tests (Python 3.10)`, `Tests (Python 3.13)`,
+      `Ruff, mypy and packaging dry run` — names taken from the live check-runs API
+- [x] Dependabot alerts enabled
 
-- [ ] Require a pull request before merging
-- [ ] Block force-push and branch deletion
-- [ ] Require Quality Gates to pass
-- [ ] Enable Dependabot alerts (`vulnerability-alerts` is currently 404/disabled)
+Verified by attempting a real direct push to `main` with the owner's token:
 
-Do this **first** — it is the cheapest item here and it protects everything after it.
+```
+remote: - Changes must be made through a pull request.
+remote: - 3 of 3 required status checks are expected.
+ ! [remote rejected] HEAD -> main (protected branch hook declined)
+```
+
+To disable temporarily in an emergency, turn off "Do not allow bypassing the above
+settings" in Settings → Branches, or `DELETE .../branches/main/protection`.
 
 ### 1.2 Update-artifact schema — effort M — **done**
 
@@ -110,15 +118,34 @@ right-click→Open step. Revisit if user complaints justify the subscription.
 - [ ] If unsigned: confirm the release notes repeat the first-launch instructions
 - [ ] Note that Intel Macs have no build; `UPGRADE.md` already routes them to source
 
-### 1.5 Repository housekeeping — effort S
+### 1.5 Repository housekeeping — effort S — **done 2026-08-06**
 
-- [ ] Delete or reset the stale `development` branch (`b637dc6`, 2025-08-07, PyQt6 era).
-      Its `version.py` would regress the update endpoint if it were ever merged.
-- [ ] Decide the fate of `Market Holidays` at the repo root — only old v1.0.1 clients
-      read it. Keep it until v1.0.1 usage drops; do not delete it in this release.
-- [ ] Fix the README's hardcoded local path
-      (`/Users/paresh/miniforge3/envs/opentrader313/bin/python`) — it should be
-      `python` in public documentation.
+- [x] `development` **archived, not deleted**. It was not fully merged: two commits
+      (`b637dc6`, `a2458bf`) were unique to it, adding `DEVELOPMENT_WORKFLOW.md` and
+      setting `__version__ = "1.0.2-dev"`. That version string is the hazard — the
+      v1.0.1 client parses versions with `int(part)`, so `"2-dev"` raises `ValueError`
+      and the notification silently stops for everyone. Preserved as
+      `archive/development-v1.0.2-dev` at the same SHA, following the existing
+      `archive/pyqt6-v1.0.1` convention, then the misleading `development` name was
+      removed.
+- [x] Hardcoded `/Users/paresh/miniforge3/...` paths replaced with `python` in
+      `README.md` (build and test sections) and `PACKAGING.md`.
+- [x] `Market Holidays` kept at the repo root. Only v1.0.1 clients read it; removing it
+      would break them for no benefit. Revisit when v1.0.1 usage drops.
+
+Open decision, deliberately not taken unilaterally:
+
+- [ ] Twelve internal engineering records still carry `/Users/paresh` paths as build
+      evidence (`PHASE_7_*`, `RELEASE_BUILD_EVIDENCE.md`, `CODE_REVIEW_REMEDIATION_PLAN.md`,
+      `BSE_SME_STARTUP_SUFFIX_FINDINGS.md`, `STAGED_ONLY_REMOVAL_REPORT.md`,
+      `PENDING_TASKS.md`, and this plan). They become public repository-root content on
+      merge. Three are largely in Gujarati, against the English-only convention in
+      `PENDING_TASKS.md` §Working convention. Options: leave as is (they are honest
+      historical evidence and the convention exempts unrevised historical documents);
+      move them under `docs/engineering/` so the root is clean for users; or translate
+      the three. Recommendation: **move to `docs/engineering/`**, translate nothing —
+      it is a pure `git mv`, keeps every record, and stops the root from reading like a
+      workspace.
 
 ---
 

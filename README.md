@@ -72,7 +72,7 @@ The default local commands only validate resources/dependencies and print the
 build command:
 
 ```bash
-/Users/paresh/miniforge3/envs/opentrader313/bin/python build_nuitka_cross_platform.py --target-platform=darwin
+python build_nuitka_cross_platform.py --target-platform=darwin
 ./build_nuitka_macos.sh
 ```
 
@@ -229,13 +229,14 @@ Custom date mode intentionally allows existing historical dates to be downloaded
 
 ## Testing
 
-The release suite is validated in both Miniforge environments used for this
-project:
+Run the suite on both supported Python versions:
 
 ```bash
-/Users/paresh/miniforge3/envs/mark_screener/bin/python -m pytest -q
-/Users/paresh/miniforge3/envs/opentrader313/bin/python -m pytest -q
+python -m pytest -q
 ```
+
+The maintainer validates each release on Python 3.10 and 3.13 before publishing;
+GitHub Actions runs the same suite on both.
 
 The tests cover URL cutovers, legacy/current schemas, delivery keys, FO OI,
 pending state, symbol reruns/renames, corporate-action idempotency and GUI date

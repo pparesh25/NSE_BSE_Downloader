@@ -38,12 +38,15 @@ and runs Ruff, mypy and the Linux packaging dry run.
 
 ## Build environment preparation
 
-When an actual build is approved later, use the dedicated environment:
+When an actual build is approved later, use a dedicated packaging environment:
 
 ```bash
-/Users/paresh/miniforge3/envs/opentrader313/bin/python -m pip install \
-  -r requirements.txt -r requirements-build.txt
+python -m pip install -r requirements.txt -r requirements-build.txt
 ```
+
+Keep it separate from a development environment. `requirements-build.txt` pins the
+exact validated Qt runtime and Nuitka version so that a build is reproducible, and
+those pins should not constrain day-to-day work.
 
 The future macOS commands are:
 

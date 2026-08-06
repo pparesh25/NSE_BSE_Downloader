@@ -1,6 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from src.core.data_manager import DataManager
@@ -29,7 +28,6 @@ class _SettingsConfig:
 def test_settings_precedence_and_invalid_user_values_are_bounded(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config = _SettingsConfig()
     fresh = SettingsService(config)
     assert fresh.get_download_option("include_delivery_data") is False
@@ -59,7 +57,6 @@ def test_settings_precedence_and_invalid_user_values_are_bounded(
 def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config_dir = tmp_path / ".nse_bse_downloader"
     config_dir.mkdir()
     (config_dir / "user_preferences.json").write_text(json.dumps({
@@ -87,7 +84,6 @@ def test_legacy_narrow_window_preferences_migrate_to_responsive_layout(
 def test_v1_0_1_user_preferences_upgrade_without_losing_user_choices(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config_dir = tmp_path / ".nse_bse_downloader"
     config_dir.mkdir()
     preference_path = config_dir / "user_preferences.json"

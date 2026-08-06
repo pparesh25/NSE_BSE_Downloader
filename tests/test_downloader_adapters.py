@@ -1,7 +1,6 @@
 import asyncio
 from datetime import date
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -42,7 +41,6 @@ def _bare(downloader_class, **options):
 def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     nse_day = date(2024, 7, 8)
     nse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
@@ -120,7 +118,6 @@ def test_fo_adapter_retains_stable_columns_when_open_interest_is_disabled():
 def test_sme_adapter_switches_filename_era_and_applies_suffix(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     day = date(2025, 10, 13)
     raw = (
         "MARKET,SERIES,SYMBOL,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,"
@@ -207,7 +204,6 @@ def test_bse_index_never_requests_dates_before_first_public_report():
 def test_adapter_processing_errors_include_segment_context(
     tmp_path, monkeypatch, downloader_class, message
 ):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     downloader = _bare(downloader_class)
     if downloader_class is BSEEQDownloader:
         downloader.mutual_fund_symbols = []

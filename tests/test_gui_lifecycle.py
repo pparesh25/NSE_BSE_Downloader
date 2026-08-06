@@ -1,7 +1,6 @@
 import asyncio
 from datetime import date
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -252,7 +251,6 @@ def test_window_close_requests_safe_stop_without_terminating(
     tmp_path, monkeypatch
 ):
     _application()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(
         QMessageBox,
         "question",
@@ -278,7 +276,6 @@ def test_window_close_requests_safe_stop_without_terminating(
 
 def test_window_close_stops_owned_timers(tmp_path, monkeypatch):
     _application()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config = Config("config.yaml")
     config.base_data_path = tmp_path / "data"
     window = MainWindow(config)
@@ -299,7 +296,6 @@ def test_default_window_keeps_dates_and_donate_action_visible(
     tmp_path, monkeypatch
 ):
     app = _application()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     config = Config("config.yaml")
     config.base_data_path = tmp_path / "data"
     window = MainWindow(config)

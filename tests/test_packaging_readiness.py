@@ -47,7 +47,6 @@ def test_config_default_uses_bundle_root_outside_app_working_directory(
         encoding="utf-8",
     )
     monkeypatch.setattr(runtime_paths, "application_root", lambda: bundle)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.chdir(tmp_path)
 
     config = Config()
@@ -66,7 +65,6 @@ def test_resource_path_rejects_escape():
 
 def test_update_checker_uses_compiled_version_module(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     checker = UpdateChecker()
     assert checker.get_current_version() == get_version()
 

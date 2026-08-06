@@ -31,25 +31,48 @@ port is what made them visible.
 **Do this before anything else.** Every phase below is verified by running the suite,
 so the suite must be safe first.
 
-### 0.1 Test isolation — effort S — **blocker for all other work**
+### 0.1 Test isolation — effort S — **done 2026-08-06**
 
-Verified 2026-08-06: `tests/conftest.py` does not exist, and `~/NSE_BSE_Data` holds
-332 MB of the owner's real market data.
+The exposure was real, not theoretical. `Config.__init__` resolves `~/NSE_BSE_Data`
+with `Path.expanduser()` and then **mkdirs it** (`config.py:143,146`), and three test
+modules construct a `Config` from the shipped `config.yaml`:
+`test_gui_lifecycle.py:261,282,303`, `test_packaging_readiness.py:53`, and
+`test_main_entrypoint.py:63-68` via `run_rebuild_mode`.
 
-The review's finding is that patching `Path.home` does not stop `expanduser()`, so a
-test can resolve the real data root. (Checked today: nothing under `~/NSE_BSE_Data`
-has been modified in the last 24 hours, so no damage has occurred — but the guard is
-absent, which means safety currently rests on luck.)
+The review's diagnosis was confirmed exactly. `test_gui_lifecycle.py` patched
+`Path.home` and *then* built `Config("config.yaml")` — but `Path.expanduser()` never
+consults `Path.home`; it reads the `HOME` environment variable through
+`os.path.expanduser`, so the real path was resolved regardless. Redirecting the
+environment variable covers both call styles at once.
 
-- [ ] Add `tests/conftest.py` with an autouse fixture setting `HOME` **and**
-      `USERPROFILE` to `tmp_path`
-- [ ] Add a second autouse guard that resolves the configured base data path and
-      **fails the test** if it is not inside `tmp_path`
-- [ ] Remove the now-redundant `Path.home` patches at
-      `tests/test_gui_lifecycle.py:255,283`
+- [x] `tests/conftest.py` with an autouse fixture setting `HOME` and `USERPROFILE` to
+      `tmp_path`, asserting that **both** `Path('~').expanduser()` and `Path.home()`
+      resolve inside it
+- [x] Per-test guard that stats the real data root and fails the individual test that
+      touches it, naming the test
+- [x] Session guard that fingerprints the whole tree, catching a write nested deeper
+      than the root's own mtime would show. Split this way because the deep walk costs
+      ~20 ms against 10,870 files — negligible once, but it would have doubled the
+      suite runtime at 196 tests
+- [x] Removed 13 now-redundant `Path.home` patches across five modules, and the
+      imports they left unused
 
-**Acceptance:** deliberately break the guard (point a test at `~/NSE_BSE_Data`) and
-confirm the suite fails rather than writes. Then confirm 196 tests still pass.
+**Verified, not assumed.** A deliberate probe test that writes into `~/NSE_BSE_Data`
+was added and run twice — once with the old per-test patches still present, once after
+removing them. Both times the guard failed the test and named it:
+
+```
+Failed: tests/…::test_probe_writes_to_real_root modified the real data root
+/Users/paresh/NSE_BSE_Data. Tests must never write outside tmp_path.
+```
+
+The probe also printed its resolved home as
+`…/pytest-of-paresh/pytest-3763/…/home`, confirming the redirect works. The probe and
+its artefact were removed; `~/NSE_BSE_Data/.state`, `/BSE` and `/NSE` remain untouched
+at their original timestamps.
+
+**No false positives:** 196 tests pass on Python 3.10 and 3.13, coverage 73.67%, Ruff
+and mypy clean.
 
 ---
 

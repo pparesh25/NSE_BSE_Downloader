@@ -271,7 +271,6 @@ def test_worker_staged_failure_preserves_previous_combined_file(tmp_path):
 
 
 def test_date_and_section_preferences_survive_reload(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     start = date(2024, 7, 5)
     end = date(2024, 7, 8)
 
@@ -339,7 +338,6 @@ def test_update_dialog_downloads_when_package_is_verified():
 
 def test_update_dialog_persists_skipped_version(tmp_path, monkeypatch):
     _application()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     dialog = UpdateDialog(
         {"latest_version": "1.2.0", "artifact_verified": False},
         update_checker=UpdateChecker(current_version="1.1.0"),

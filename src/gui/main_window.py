@@ -8,6 +8,7 @@ and background download management.
 import asyncio
 from datetime import date
 from enum import Enum
+from pathlib import Path
 import time
 from threading import Event
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,10 @@ from ..services.pipeline_telemetry import (
     PipelineTelemetry,
 )
 from ..services.settings import SettingsService
+from ..services.state_retention import (
+    policies_from_settings,
+    prune_state_directories,
+)
 from ..utils.transport_pool import TransportPool
 from ..utils.stage_executor import BoundedStageExecutor
 
@@ -308,6 +313,52 @@ class DownloadWorker(QThread):
                 update.exchange_segment, update.message
             )
 
+    def _prune_state_directories(self) -> None:
+        """Keep the diagnostic copies under ``.state`` bounded.
+
+        Runs once per run, after every download has released its files.  This
+        is housekeeping and must never change what the run reports, so a
+        failure is logged and dropped rather than raised.
+        """
+
+        base_data_path = getattr(self.config, "base_data_path", None)
+        if base_data_path is None:
+            return
+        try:
+            outcomes = prune_state_directories(
+                Path(base_data_path) / ".state",
+                policies_from_settings(
+                    getattr(self.config, "retention_settings", None)
+                ),
+            )
+        except Exception as error:
+            self.logger.warning("State retention sweep failed: %s", error)
+            return
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+        for outcome in outcomes:
+            if telemetry is not None:
+                telemetry.record(
+                    "state_retention",
+                    directory=outcome.directory,
+                    removed_files=outcome.removed_files,
+                    removed_bytes=outcome.removed_bytes,
+                    kept_files=outcome.kept_files,
+                    errors=outcome.errors,
+                )
+            if outcome.removed_files:
+                self.logger.info(
+                    "Retention removed %s files (%.1f MiB) from .state/%s",
+                    outcome.removed_files,
+                    outcome.removed_bytes / (1024 * 1024),
+                    outcome.directory,
+                )
+            if outcome.errors:
+                self.logger.warning(
+                    "Retention could not remove %s files from .state/%s",
+                    outcome.errors,
+                    outcome.directory,
+                )
+
     def run(self):
         """Run downloads in background thread"""
         loop: Optional[asyncio.AbstractEventLoop] = None
@@ -431,6 +482,9 @@ class DownloadWorker(QThread):
             for executor in getattr(self.config, "stage_executors", {}).values():
                 await executor.close()
             await transport_pool.close()
+            # Before the telemetry export below, so the sweep's own events are
+            # part of the file this run leaves behind.
+            self._prune_state_directories()
             base_data_path = getattr(self.config, "base_data_path", None)
             if base_data_path is not None:
                 try:

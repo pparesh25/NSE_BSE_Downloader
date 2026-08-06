@@ -170,6 +170,13 @@ repair-required error instead of treating corrupt state as empty. Corporate
 actions use a prepared/committed journal, so an interruption between history
 replacement and ledger commit is recovered without applying the factor twice.
 
+Symbol files are written directly, without a second copy. `.state/raw` is the
+recoverable source: it is checksummed, keyed by date, and is what the rebuild
+commands below read. The diagnostic trees beside it — `.state/quarantine` and
+`.state/raw_revisions` — are pruned after each run under `state_retention` in
+`config.yaml`, so a multi-year backfill cannot fill the disk with copies.
+`.state/raw` itself is never pruned.
+
 Raw snapshots include checksum metadata; replaced revisions are retained under
 `.state/raw_revisions`. They can be used for explicit repairs:
 

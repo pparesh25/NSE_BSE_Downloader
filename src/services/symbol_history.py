@@ -351,22 +351,20 @@ class SymbolHistoryStore:
                 raise ValueError(f"history contains invalid {column} values")
 
     def _write_history(self, path: Path, frame: pd.DataFrame) -> None:
+        # Deliberately no ``.state/backups/history`` copy.  Until v1.1.0 every
+        # symbol write also copied the file it was about to replace, which
+        # doubled this stage's write volume for a tree nothing ever read.  It
+        # was not a restore point either: a batch rewrites each touched symbol
+        # once per bucket, so the copy held whatever the previous bucket wrote,
+        # not the state before the run.  The recoverable source of truth is
+        # ``.state/raw`` -- checksummed, per date, and what ``--rebuild-*``
+        # actually reads.
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".txt.tmp")
         normalized = self._deduplicate(frame)
         self._validate_history(normalized)
         try:
             normalized.to_csv(temporary, index=False)
-            if path.exists():
-                try:
-                    relative = path.relative_to(self.base_path)
-                except ValueError:
-                    relative = Path(path.name)
-                backup = self.state_path / "backups" / "history" / relative
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                backup_temporary = backup.with_name(backup.name + ".tmp")
-                shutil.copy2(path, backup_temporary)
-                backup_temporary.replace(backup)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)

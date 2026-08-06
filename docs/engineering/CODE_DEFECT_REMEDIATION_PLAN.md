@@ -503,14 +503,99 @@ full, and `_write_history` copies a backup on every write (2.2), so the write vo
 above is roughly double what it needs to be. 2.2 halves it; Phase 5 removes the
 rewrite-per-bucket cost entirely.
 
-### 2.2 Drop the per-write symbol backup — effort S
+*(2.2 is now done and the halving was measured — see below. The rewrite-per-bucket
+cost remains, and is Phase 5's.)*
 
-`symbol_history.py:277-286` writes a full backup copy on **every** symbol write.
-Grepping for readers of that tree finds exactly one hit: the writer. It is never read.
-This doubles history-stage write I/O for no benefit.
+### 2.2 Drop the per-write symbol backup — effort S — **done 2026-08-06**
 
-- [ ] Remove it, or make it opt-in
-- [ ] Add retention for `.state/raw_revisions` and `.state/quarantine`
+`symbol_history.py:353-372` (the review's `277-286`, moved by 2.1) wrote a full backup
+copy on **every** symbol write. Grepping for readers of that tree finds exactly one
+hit: the writer. It is never read.
+
+- [x] Removed, not made opt-in
+- [x] Retention for `.state/quarantine`, `.state/raw_revisions` and the legacy
+      `.state/backups` tree an older build left behind
+
+#### Removed rather than made opt-in
+
+The plan allowed either. Three properties settle it, and the third is the one that
+changes the answer:
+
+1. Nothing reads it. The only hit is the writer, so there is no restore path — a user
+   would have to copy files back by hand.
+2. It is one generation deep.
+3. **After 2.1 it is not even a pre-run snapshot.** A batch rewrites each touched
+   symbol once per *bucket*, so at the end of a 500-date backfill the copy holds
+   whatever the previous bucket wrote — an arbitrary mid-run point. Restoring from it
+   would produce a file that is neither the state before the run nor after it.
+
+An opt-in flag would therefore have shipped a knob that turns on a second copy nothing
+can restore from. The recoverable source of truth is `.state/raw`: checksummed, keyed
+by date, and what `--rebuild-symbol/-exchange/-all` actually read. A test pins that a
+rebuild still works after a sweep.
+
+#### Measured, not projected
+
+Every byte the history stage writes, counted by wrapping `to_csv` and `shutil.copy2`
+around the real `upsert_batch` path against a temporary root:
+
+| Case | Before | After |
+|---|---|---|
+| Steady state: 500-date history on disk, one new date, 300 symbols | 13.56 MiB | **6.81 MiB** |
+| Cold backfill: 200 dates × 300 symbols, `history_batch_dates: 50` | 15.41 MiB | **11.29 MiB** |
+
+The steady-state row is the exact halving 2.1 predicted: the copy is the same size as
+the file replacing it, so it is 50.0% of the stage's write bytes. The cold-backfill row
+is 27%, and the difference is not noise — the copy holds the *previous*, shorter
+history, so a from-scratch run backs up less than it writes. The steady state is the
+one that runs every day for years.
+
+(The residual 0.03 MiB after the change is `VersionedJSONStore` writing a `.bak` of
+`symbol_registry.json` once per batch, which is a different mechanism and is read on
+recovery.)
+
+#### Retention
+
+Three trees under `.state` exist only for after-the-fact diagnosis and are read by
+nothing: `quarantine`, `raw_revisions`, and `backups`. `state_retention.py` prunes
+them once per run, from `state_retention` in `config.yaml`:
+
+| Tree | Kept |
+|---|---|
+| `quarantine` | 30 days, newest 100 **per category** |
+| `raw_revisions` | 90 days, newest 5 **per exchange/segment/date** |
+| `backups` | nothing — the tree an older build left behind is drained |
+
+The count budgets are per group rather than global, so a burst of quarantined BSE
+source reports cannot evict the history corruption record that explains a failed run.
+A negative value disables a rule, so `legacy_backup_days: -1` keeps the old tree.
+
+`.state/raw` is deliberately not on the list, and `backups` is drained rather than
+aged because nothing writes it any more — leaving it would strand a stale copy that
+looks restorable and is not.
+
+#### Verified
+
+`test_symbol_writes_no_longer_copy_a_backup` fails against the previous code with
+`assert not (tmp_path/.state/backups).exists()`, so it is a mirror of the defect rather
+than a test that would have passed anyway.
+
+Most of the retention suite pins what the sweep must **not** do, because it deletes
+files inside the user's data root: `.state/raw`, the live state documents and
+`components/` survive a sweep; a symlink is neither followed nor removed (the file it
+points at outside the tree is untouched); an undeletable file is reported as an error
+rather than raised; a policy that raises is contained to its own tree; and a retention
+failure cannot fail a run. `test_shipped_config_yaml_reaches_the_retention_policies`
+follows a value from `config.yaml` to the policy — 2.1 shipped an inert key once, and
+that is the shape of test that would have caught it.
+
+256 tests pass on Python 3.13, coverage 75.3% (`state_retention.py` at 100%), Ruff and
+mypy clean, `--smoke-gui` exits 0. Python 3.10 is not installed on this machine; mypy
+is pinned to 3.10 and passes, and CI covers the runtime.
+
+**On upgrade:** the first run after this build deletes `.state/backups`. On this
+machine that tree is 130 files / 1.4 MB; the release plan measured 8,250 files / 36 MB
+on a fuller one. No file in it is referenced by anything.
 
 ### 2.3 Historical holiday calendar — effort M
 
@@ -710,7 +795,8 @@ Phase 0  test isolation          ← done; everything else is verified by runnin
 Phase 1  backfill blockers       ← done; 1.1, 1.2, 1.3
    ↓
 Phase 2  make it finish          ← 2.1 done — the memory ceiling is gone;
-                                   2.2, 2.3, 2.4 still open
+                                   2.2 done — write volume halved, .state bounded;
+                                   2.3, 2.4 still open
    ↓
 Phase 3  stop writing wrong data ← correctness; some items need a rebuild prompt
    ↓
@@ -730,5 +816,9 @@ database the application promises. Phases 3–5 can ship in 1.1.1 and later.
 
 **That condition is now met** (2026-08-06): 1.1, 1.2, 1.3 and 2.1 are all done, and 2.1
 went past "bounded" to flat. Resuming the release is a separate decision and this note
-does not make it — 2.2, 2.3 and 2.4 are still open, and none of them blocks a backfill
-from finishing. What each still costs a long run is recorded in its own section.
+does not make it — 2.3 and 2.4 are still open, and neither blocks a backfill from
+finishing. What each still costs a long run is recorded in its own section.
+
+2.2 is also done, which matters to the release for a second reason: the first run
+after upgrading deletes `.state/backups`, so that behaviour belongs in the release
+notes rather than arriving unannounced.

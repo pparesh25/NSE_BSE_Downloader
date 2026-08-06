@@ -74,6 +74,22 @@ download_options:
   index_append_to_eq: true    # Append NSE Index data to NSE EQ files
   bse_index_append_to_eq: true # Append BSE Index data to BSE EQ files
 
+# Retention for the diagnostic copies under `<data folder>/.state`.  These
+# trees are kept so a human can inspect what went wrong after a failed run;
+# nothing in the application reads them back, and they grow without limit
+# during a multi-year backfill.  `.state/raw` -- the checksummed snapshots the
+# `--rebuild-*` commands read -- is never pruned.  A negative value disables
+# the rule it belongs to.
+state_retention:
+  quarantine_days: 30            # per category, e.g. source_reports, history
+  quarantine_max_files: 100      # newest kept per category
+  raw_revision_days: 90          # superseded raw snapshots
+  raw_revision_max_per_date: 5   # newest kept per exchange/segment/date
+  # `.state/backups/history` held a copy of every symbol file, written before
+  # every write and read by nothing.  v1.1.0 stopped writing it; 0 clears out
+  # what an earlier version left behind.  Raise it to keep that tree instead.
+  legacy_backup_days: 0
+
 # Date settings
 date_settings:
   base_start_date: "2025-07-15"  # Default start date for first run

@@ -234,11 +234,14 @@ one for existing users.
 
 - [ ] Build histories from existing daily files instead of requiring a re-download
 
-### 4.5 Retention — effort S
+### 4.5 Retention — effort S — **done 2026-08-06**
 
 `.state/backups` was measured at 8,250 files / 36 MB with no pruning.
 
-- [ ] Add a retention policy for `.state/backups`, `.state/raw_revisions`, quarantine
+- [x] Add a retention policy for `.state/backups`, `.state/raw_revisions`, quarantine
+
+Done as part of [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md)
+§2.2, which also stopped writing `.state/backups` in the first place.
 
 ---
 

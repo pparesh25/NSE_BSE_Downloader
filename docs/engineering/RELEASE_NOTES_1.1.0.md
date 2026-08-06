@@ -76,6 +76,11 @@ Three things to know:
    upgrade. Re-download a date range to populate history for past dates.
 3. **Your settings carry over.** A few v1.0.1 settings that no longer control anything
    are dropped. Worth a glance at the Settings panel once.
+4. **The app tidies up after itself.** Inside the hidden `.state` folder it keeps a few
+   copies for diagnosing failed downloads. After each run it removes the ones older
+   than a month, and clears the unused `.state/backups` folder an earlier build left
+   behind. Your market data files and the checksummed snapshots the repair commands
+   use are never touched. Limits are under `state_retention` in `config.yaml`.
 
 **Before your first big download:** four extra per-date steps are on by default, so
 downloads are slower per date than v1.0.1. If you enable a segment you have never used

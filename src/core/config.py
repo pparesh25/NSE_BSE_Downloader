@@ -42,6 +42,24 @@ class DownloadSettings:
 
 
 @dataclass
+class RetentionSettings:
+    """How long the diagnostic copies under ``.state`` are kept.
+
+    These trees are written for after-the-fact diagnosis and read by nothing,
+    so they are the one part of the data root that may be pruned.  A negative
+    value disables the corresponding rule.  ``legacy_backup_days`` defaults to
+    0 because nothing writes ``.state/backups`` any more; raise it to keep the
+    tree an older version left behind.
+    """
+
+    quarantine_days: int = 30
+    quarantine_max_files: int = 100
+    raw_revision_days: int = 90
+    raw_revision_max_per_date: int = 5
+    legacy_backup_days: int = 0
+
+
+@dataclass
 class DateSettings:
     """Date-related configuration"""
     base_start_date: str = "2025-01-01"
@@ -80,6 +98,7 @@ class Config:
         self._config_data: Dict[str, Any] = {}
         self._exchange_configs: Dict[str, Dict[str, ExchangeConfig]] = {}
         self._download_settings = DownloadSettings()
+        self._retention_settings = RetentionSettings()
         self._date_settings = DateSettings()
         self._gui_settings = GUISettings()
         # Run-scoped Phase 7 services are populated by DownloadWorker.  They
@@ -183,6 +202,30 @@ class Config:
             history_batch_dates=download_data.get('history_batch_dates', 50),
         )
 
+        # Absent section keeps the shipped defaults: an older config.yaml must
+        # still load, and retention is housekeeping rather than a required
+        # part of the download contract.
+        retention_data = self._config_data.get('state_retention', {}) or {}
+        defaults = RetentionSettings()
+        self._retention_settings = RetentionSettings(
+            quarantine_days=retention_data.get(
+                'quarantine_days', defaults.quarantine_days
+            ),
+            quarantine_max_files=retention_data.get(
+                'quarantine_max_files', defaults.quarantine_max_files
+            ),
+            raw_revision_days=retention_data.get(
+                'raw_revision_days', defaults.raw_revision_days
+            ),
+            raw_revision_max_per_date=retention_data.get(
+                'raw_revision_max_per_date',
+                defaults.raw_revision_max_per_date,
+            ),
+            legacy_backup_days=retention_data.get(
+                'legacy_backup_days', defaults.legacy_backup_days
+            ),
+        )
+
         date_data = self._config_data.get('date_settings', {})
         self._date_settings = DateSettings(
             base_start_date=date_data.get('base_start_date', '2025-01-01'),
@@ -205,6 +248,11 @@ class Config:
     def download_settings(self) -> DownloadSettings:
         """Get download settings"""
         return self._download_settings
+
+    @property
+    def retention_settings(self) -> RetentionSettings:
+        """Get ``.state`` retention settings"""
+        return self._retention_settings
 
     @property
     def date_settings(self) -> DateSettings:

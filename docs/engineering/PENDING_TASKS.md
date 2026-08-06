@@ -1,7 +1,7 @@
 # Pending engineering tasks
 
-Last reviewed: 2026-08-04 (Asia/Kolkata)
-Repository branch at review: `main`
+Last reviewed: 2026-08-06 (Asia/Kolkata)
+Repository branch at review: `codex/pyside6-port-v1.1.0`
 
 ## Working convention
 
@@ -13,6 +13,53 @@ user-facing application text is outside this engineering-record convention.
 This file is the central index for approved but incomplete engineering work. Detailed
 research and evidence files remain authoritative references, but every deferred topic
 must also be recorded here so it is not lost between phases.
+
+## 0. v1.1.0 release publication — paused 2026-08-06
+
+Status: Deliberately paused. Code-level defect remediation takes priority.
+
+Detailed record: [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md),
+[RELEASE_IMPLEMENTATION_PLAN.md](RELEASE_IMPLEMENTATION_PLAN.md)
+
+### Already closed
+
+Branch protection on `main` with `enforce_admins` (verified by a rejected push);
+per-platform `__update_artifacts__` schema; release builds tied to `v*.*.*` tags
+instead of every commit; notification-only decision; unsigned-release decision;
+repository housekeeping; and a full three-platform rehearsal build (run 31054912467,
+all green, checksums verified, packaged macOS app launched).
+
+### Remaining, in order
+
+1. Set the real release date in `version.py` — `__build_date__` and the
+   `VERSION_HISTORY` `release_date`. Do not touch `__version__`, the history key, or
+   the shape of that dictionary; installed v1.0.1 clients parse all three by regular
+   expression.
+2. Tag `v1.1.0` and let the tag push build the artifacts.
+3. Download every asset and verify each `.zip.sha256` with `shasum -a 256 -c`.
+4. Create the GitHub Release with all six files, using
+   [RELEASE_NOTES_1.1.0.md](RELEASE_NOTES_1.1.0.md).
+5. Rebuild `RELEASE_BUILD_EVIDENCE.md` at the tagged commit. It is still pinned to
+   `9dba2ac`, which is superseded; an integrity record that does not describe the
+   shipped artifact is worse than none.
+6. Download from the published Release page and run on a clean machine.
+7. Merge PR #10 with a merge commit. **This is the point of no return** — the moment
+   `main/version.py` reads `1.1.0`, every running v1.0.1 client announces it within
+   three seconds of its next launch.
+
+### Known gap in the tooling
+
+Neither workflow publishes a GitHub Release; both end at `actions/upload-artifact`
+with 14-day retention. Steps 3–4 are therefore manual. Worth automating before the
+second release, not before the first.
+
+### Why this is paused
+
+The release would ship the defects catalogued in
+[CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md), two of which
+block the owner's own stated goal of building a multi-year daily and symbol-wise
+database. Publishing first would mean notifying every existing user to upgrade to a
+build that cannot complete a historical backfill.
 
 ## 1. BSE SME/Startup classification and symbol naming
 

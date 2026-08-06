@@ -10,9 +10,10 @@ import hashlib
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable, Dict, Any, Set, Tuple
 
 import pandas as pd
 
@@ -22,6 +23,46 @@ from .exceptions import DataProcessingError, FileOperationError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.pipeline_state import PipelineManifest, SegmentResult
 from ..services.settings import SettingsService
+
+
+#: How long after a date the exchange's silence stops meaning "not yet".
+#: Reports are published the same evening, so three days is generous; the cost
+#: of being early is that a late report is retired as absent, and the cost of
+#: being late is one extra 404 on the next run.
+ABSENT_REPORT_SETTLE_DAYS = 3
+
+
+@dataclass
+class AbsentReportLedger:
+    """Dates the exchange answered 404 for, and the evidence to believe it.
+
+    A holiday before 2013 cannot be skipped in advance -- the official API
+    serves no calendar that far back -- so the exchange's own 404 is the only
+    evidence the date was not traded.  Left as a failure it stays at
+    ``complete=0`` and is re-downloaded on every future run forever.
+
+    But a 404 alone proves nothing: a wrong URL era would 404 every date in its
+    window, and silently retiring those is precisely how a source defect hides.
+    So a candidate is settled only when the same segment successfully
+    downloaded some other date in the same year during this run.  A broken era
+    downloads nothing, retires nothing, and stays loud.
+    """
+
+    candidates: Dict[date, str] = field(default_factory=dict)
+    downloaded_years: Set[int] = field(default_factory=set)
+
+    def note_absent(self, target_date: date, reason: str) -> None:
+        self.candidates[target_date] = reason
+
+    def note_downloaded(self, target_date: date) -> None:
+        self.downloaded_years.add(target_date.year)
+
+    def settled(self) -> List[Tuple[date, str]]:
+        return sorted(
+            (target_date, reason)
+            for target_date, reason in self.candidates.items()
+            if target_date.year in self.downloaded_years
+        )
 
 
 class ProgressCallback:
@@ -378,6 +419,48 @@ class BaseDownloader(ABC):
                 status=status,
             )
 
+    def _is_absent_report(self, result: Any, target_date: date) -> bool:
+        """Whether the exchange answered "this report does not exist"."""
+
+        from ..utils.date_utils import DateUtils
+
+        if getattr(result, "outcome", None) != "file_not_found":
+            return False
+        age = (DateUtils.today_ist() - target_date).days
+        return age >= ABSENT_REPORT_SETTLE_DAYS
+
+    def _settle_absent_reports(self, ledger: AbsentReportLedger) -> List[date]:
+        """Retire dates the exchange never published so they stop returning.
+
+        Unsettled candidates keep their failed stage, so a date the run could
+        not explain is still queued for repair rather than quietly dropped.
+        """
+
+        settled = ledger.settled()
+        for target_date, reason in settled:
+            self._pipeline().skip_date(
+                self.exchange, self.segment, target_date, reason
+            )
+        if settled:
+            dates = ", ".join(
+                target_date.isoformat() for target_date, _ in settled[:5]
+            )
+            if len(settled) > 5:
+                dates += f", and {len(settled) - 5} more"
+            self._report_notice(
+                f"{self.exchange_segment}: the exchange published no report "
+                f"for {len(settled)} date(s), which will not be retried: "
+                f"{dates}"
+            )
+        unsettled = len(ledger.candidates) - len(settled)
+        if unsettled:
+            self._report_error(
+                f"{self.exchange_segment}: {unsettled} date(s) returned "
+                "'not found' and no other date in that year downloaded, so "
+                "the source itself may be wrong; they remain queued for repair"
+            )
+        return [target_date for target_date, _ in settled]
+
     def _quarantine_download_payload(
         self, payload: Optional[bytes], target_date: date, label: str
     ) -> Optional[Path]:
@@ -606,6 +689,7 @@ class BaseDownloader(ABC):
         include_delivery = self.get_download_option("include_delivery_data", True)
         success_count = 0
         processed_days: List[date] = []
+        absent = AbsentReportLedger()
 
         for target_date in days:
             if self._is_cancel_requested():
@@ -658,16 +742,23 @@ class BaseDownloader(ABC):
                         price_result.error_message if price_result
                         else "No download result returned"
                     )
-                    self._report_error(
-                        f"{self.exchange_segment} price report failed for "
-                        f"{target_date}: {error}"
-                    )
+                    if self._is_absent_report(price_result, target_date):
+                        absent.note_absent(
+                            target_date,
+                            "The exchange published no report for this date",
+                        )
+                    else:
+                        self._report_error(
+                            f"{self.exchange_segment} price report failed for "
+                            f"{target_date}: {error}"
+                        )
                     self._mark_pipeline(
                         target_date, "downloaded", "failed", error=error
                     )
                     continue
 
                 source = price_source(self.exchange, self.segment, target_date)
+                absent.note_downloaded(target_date)
                 self._mark_pipeline(
                     target_date,
                     "downloaded",
@@ -763,6 +854,7 @@ class BaseDownloader(ABC):
                         pass
                 self._report_error(f"Error processing {target_date}: {error}")
 
+        self._settle_absent_reports(absent)
         self.logger.info(f"Successfully processed {success_count}/{len(days)} files")
         should_apply_actions = (
             processed_days
@@ -806,6 +898,7 @@ class BaseDownloader(ABC):
 
         days = self._with_incomplete_pipeline_days(working_days)
         self.total_files = len(days)
+        absent = AbsentReportLedger()
         for target_date in days:
             if self._is_cancel_requested():
                 raise asyncio.CancelledError
@@ -844,13 +937,20 @@ class BaseDownloader(ABC):
                     self._mark_pipeline(
                         target_date, "downloaded", "failed", error=error
                     )
-                    self._report_error(
-                        f"{self.exchange_segment} report failed for "
-                        f"{target_date}: {error}"
-                    )
+                    if self._is_absent_report(result, target_date):
+                        absent.note_absent(
+                            target_date,
+                            "The exchange published no report for this date",
+                        )
+                    else:
+                        self._report_error(
+                            f"{self.exchange_segment} report failed for "
+                            f"{target_date}: {error}"
+                        )
                     continue
 
                 payload = result.file_data
+                absent.note_downloaded(target_date)
                 self._mark_pipeline(
                     target_date,
                     "downloaded",
@@ -895,6 +995,7 @@ class BaseDownloader(ABC):
                         pass
                 self._report_error(f"Error processing {target_date}: {error}")
 
+        self._settle_absent_reports(absent)
         self.last_segment_result = self._pipeline().segment_result(
             self.exchange, self.segment, days
         )

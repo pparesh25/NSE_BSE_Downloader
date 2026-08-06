@@ -220,7 +220,13 @@ disabled from **Settings**; a skipped version can be reset there, while
 
 Market-date decisions use Asia/Kolkata time. Trading holidays are read from
 NSE's official capital-market calendar by year, cached for 24 hours, and
-refreshed automatically. If refresh fails, the last valid cache is retained.
+refreshed automatically. If refresh fails, the last valid cache is retained,
+and below that a calendar for 2013–2026 is bundled with the application, so a
+blocked or unreachable holiday API cannot make a holiday look like a trading
+day. NSE serves no calendar before 2013; for those years a report the exchange
+never published is recognised from its own response and is not retried, unless
+no other date in that year downloaded — in which case the source itself is
+suspect and the dates stay queued.
 
 New v1.1 options:
 

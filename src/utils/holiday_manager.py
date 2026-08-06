@@ -7,11 +7,20 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, List, Optional, Set, Tuple
 
+from . import holiday_calendar
 from .http_client import HTTPStatusError, fetch_text_sync
 
 
 class HolidayManager:
-    """Fetch and cache capital-market trading holidays by calendar year."""
+    """Fetch and cache capital-market trading holidays by calendar year.
+
+    Three layers answer one question, in order of authority: the official API,
+    the on-disk cache it fills, and the calendar bundled with the application.
+    The bundled layer exists because the first two can both be unavailable --
+    NSE blocks unfamiliar clients regularly -- and the old behaviour in that
+    case was to answer "this year has no holidays", which is indistinguishable
+    from a real answer and turns every holiday into a permanently failed date.
+    """
 
     SOURCE_TEMPLATE = (
         "https://www.nseindia.com/api/holiday-master"
@@ -49,6 +58,7 @@ class HolidayManager:
         self._cache_loaded_at: Optional[datetime] = None
         self._refresh_attempted_at: Optional[datetime] = None
         self._attempted_years: Set[int] = set()
+        self._last_refresh_ok = True
 
     def _now(self) -> datetime:
         current = (
@@ -91,6 +101,13 @@ class HolidayManager:
                 parsed = datetime.strptime(str(raw_date), "%d-%b-%Y").date()
                 if parsed.year == year:
                     holidays.add(parsed)
+            if not holidays:
+                # No NSE year has ever had zero capital-market holidays, so an
+                # empty calendar means the API has no data for this year -- as
+                # it does for every year before 2013.  Returning an empty set
+                # here would record that as a successful refresh and answer
+                # "not a holiday" for every date in the year.
+                raise ValueError("holiday response has an empty CM calendar")
             self.logger.info(
                 "Fetched %s official NSE holidays for %s",
                 len(holidays),
@@ -276,6 +293,27 @@ class HolidayManager:
                     "Using cached holidays because one or more refreshes failed"
                 )
 
+        # Bundled calendar last, and only for years neither the API nor the
+        # cache answered.  It is applied after the save above so the cache file
+        # only ever claims years that were actually fetched.
+        for year in sorted(requested_years.difference(covered)):
+            bundled = holiday_calendar.holidays_for_year(year)
+            if bundled is None:
+                self.logger.warning(
+                    "No trading calendar available for %s; holidays in that "
+                    "year cannot be skipped in advance",
+                    year,
+                )
+                continue
+            combined.update(bundled)
+            covered.add(year)
+            self.logger.info(
+                "Using the bundled trading calendar for %s (%s holidays)",
+                year,
+                len(bundled),
+            )
+
+        self._last_refresh_ok = all_refreshed
         self._holidays_cache = combined
         self._cache_years = covered
         self._cache_loaded = True
@@ -285,9 +323,25 @@ class HolidayManager:
     def is_holiday(self, check_date: date) -> bool:
         return check_date in self.get_holidays(required_year=check_date.year)
 
+    def has_calendar(self, year: int) -> bool:
+        """Whether ``year``'s calendar is known rather than assumed empty.
+
+        False means holidays in that year cannot be skipped in advance, so the
+        exchange's own 404 is the only evidence a date was not traded.
+        """
+
+        self.get_holidays(required_year=year)
+        return year in self._cache_years
+
     def get_holiday_count(self) -> int:
         return len(self.get_holidays())
 
     def refresh_holidays(self) -> bool:
-        holidays = self.get_holidays(force_refresh=True)
-        return bool(holidays)
+        """Whether the live refresh succeeded, not whether any holiday is known.
+
+        The bundled calendar means holidays are always known, so answering
+        ``bool(holidays)`` here could no longer report a failed refresh.
+        """
+
+        self.get_holidays(force_refresh=True)
+        return self._last_refresh_ok

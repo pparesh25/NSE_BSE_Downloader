@@ -238,7 +238,9 @@ download_options:
   apply_corporate_actions: true
 ```
 
-If a delivery report is late or temporarily unavailable, the price bhavcopy is still saved. The date is recorded under `.state` and retried on the next run.
+If a delivery report is late or temporarily unavailable, the price bhavcopy is still saved. The date is recorded under `.state` and retried on the next run — but not forever: a report that has not appeared after 30 days is treated as absent rather than late, and the date stops being re-queued.
+
+NSE published no separate delivery report before 2019-09-30 and BSE none before 2006-01-02, while both price archives go back much further. For dates below those, the delivery stage is marked disabled rather than requested, so a historical backfill completes instead of waiting for a report that has never existed.
 
 Custom date mode intentionally allows existing historical dates to be downloaded again. Daily and symbol files are updated atomically rather than duplicated. The selected dates and each panel's expanded/collapsed state are remembered for the next launch.
 

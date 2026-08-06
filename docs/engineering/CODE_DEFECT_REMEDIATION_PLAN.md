@@ -734,13 +734,96 @@ picker still offers dates no segment can serve. That is 4.2's per-segment floor.
 was run against the pre-2.3 code and fails there with `assert 'failed' == 'skipped'`, so
 it mirrors the defect rather than passing anyway.
 
-### 2.4 Bound the delivery-retry queue — effort M
+### 2.4 Bound the delivery-retry queue — effort M — **done 2026-08-06**
 
 Dates whose delivery report will never exist are re-downloaded forever.
 
-- [ ] Cap and expire pending-delivery retries (`delivery_state.py:50-82`)
-- [ ] Add an era branch (or `None`) for NSE delivery so an absent source marks the
+- [x] Cap and expire pending-delivery retries (`delivery_state.py:50-82`)
+- [x] Add an era branch (or `None`) for NSE delivery so an absent source marks the
       stage `disabled` and the segment can report success
+
+#### Both floors pinned, both between consecutive trading days
+
+The plan named NSE. Sampling found BSE has the same shape with a different date:
+
+| Exchange | Report | Last 404 | First 200 |
+|---|---|---|---|
+| NSE | `sec_bhavdata_full_DDMMYYYY.csv` | 2019-09-27 (Fri) | **2019-09-30 (Mon)** |
+| BSE | `SCBSEALL{ddmm}.zip` | every trading day of Dec 2005 | **2006-01-02** |
+
+Both boundaries are exact: 2019-09-28/29 were the weekend, and the BSE archive starts
+with its `/gross/{year}/` directory. Every sampled month from 2005 to 2019-09 is absent
+for NSE, and 2006 through 2024 is present for BSE.
+
+The price archives go back much further — NSE equity to 1996 — so the gap is not a
+rounding error. It is **nine years** of NSE dates whose delivery report cannot exist.
+
+#### The loop had two mouths, and closing one only moves it
+
+`PendingDeliveryStore` had no bound of any kind: `add` accumulated and `discard` only
+ever ran on success. But the pipeline manifest holds the same date a second time — a
+failed `delivery` stage leaves `complete=0`, so `incomplete_dates` re-queues it as well.
+Dropping the pending entry alone would have left the manifest queue running, and
+disabling the stage alone would have left the pending queue running.
+
+So `_retire_absent_delivery` releases both together, before the day list is built, and
+the date leaves both queues in the same run.
+
+#### What each part does
+
+- `DELIVERY_FIRST_AVAILABLE` in `source_resolver.py`, with `delivery_available()`
+  alongside the `is_available()` that 1.1 added for segments.
+- `_pipeline_requirements(target_date)` is now date-aware: below the floor `delivery`
+  goes into *disabled* rather than *required*, so `begin()` records it that way on every
+  run and no separate call is needed to keep it disabled.
+- The download loop no longer requests a delivery report it knows does not exist.
+- `PendingDeliveryStore` is version 2, keyed by date to `{first_seen, attempts}`, and
+  `expire()` retires an entry that is below the floor, older than
+  `MAX_PENDING_DELIVERY_DAYS` (30), or past `MAX_DELIVERY_ATTEMPTS` (20). The age bound
+  is the real one; the attempt bound only matters to someone who runs the application
+  many times a day, where a month of waiting would be absurd.
+- The version 1 migration sets `first_seen` to the **trading date**, not today, so an
+  entry carried over from an older build retires on the first run instead of receiving a
+  fresh 30-day lease.
+
+#### The segment could not report success even once every stage was settled
+
+`_core_pipeline_ok` read *segment-level* requirements and asked whether `delivery` was in
+each date's completed stages. A stage the date itself disabled is never "complete", so a
+date whose delivery is retired would have held the whole segment below success — the
+exact thing the plan's second bullet asks for. `DateResult` now carries
+`disabled_stages`, `_core_pipeline_ok` subtracts them, and it reads per-date
+requirements rather than one segment-wide set.
+
+#### Verified against the exchange
+
+NSE EQ, 2010-01-25 to 2010-01-27, real network, temporary data root:
+
+```
+segment core-ok = True
+  2010-01-25 Mon  done=(daily, downloaded, validated)  disabled=(combined, delivery)
+  2010-01-26 Tue  skipped   The exchange published no report for this date   [2.3]
+  2010-01-27 Wed  done=(daily, downloaded, validated)  disabled=(combined, delivery)
+  pending_delivery = no file
+```
+
+The same run before this change left both trading days waiting on a delivery report that
+has never existed, and wrote them into `pending_delivery.json` to be asked for again on
+every future run. Now the file is never created: the dates below the floor are not
+requested at all.
+
+Thirteen tests, of which eight fail against the pre-2.4 code when the floor and the
+expiry are reverted, so they mirror the defect. The two that matter most are
+`test_an_expired_pending_date_is_released_by_both_queues` — which drives the sweep with
+*no* dates selected, so only the retirement can clear it — and
+`test_a_date_above_the_floor_still_requests_and_queues_delivery`, because bounding a
+retry queue must not quietly disable the late-report handling the queue exists for.
+
+283 tests pass on Python 3.13, coverage 76.0%, Ruff and mypy clean, `--smoke-gui`
+exits 0.
+
+**On upgrade:** `pending_delivery.json` migrates from version 1 to 2 on first read. On
+this machine it is version 1 and empty, so nothing is retired.
 
 ---
 
@@ -923,10 +1006,10 @@ Phase 0  test isolation          ← done; everything else is verified by runnin
    ↓
 Phase 1  backfill blockers       ← done; 1.1, 1.2, 1.3
    ↓
-Phase 2  make it finish          ← 2.1 done — the memory ceiling is gone;
-                                   2.2 done — write volume halved, .state bounded;
-                                   2.3 done — holidays known offline, 404s retire;
-                                   2.4 still open
+Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write volume
+                                   halved and .state bounded; 2.3 holidays known
+                                   offline and absent reports retire; 2.4 delivery
+                                   retries bounded
    ↓
 Phase 3  stop writing wrong data ← correctness; some items need a rebuild prompt
    ↓
@@ -944,10 +1027,14 @@ The release (PENDING_TASKS §0) resumes when **Phase 1 is complete and Phase 2.1
 least bounded**. That is the point at which a user who upgrades can actually build the
 database the application promises. Phases 3–5 can ship in 1.1.1 and later.
 
-**That condition is now met** (2026-08-06): 1.1, 1.2, 1.3 and 2.1 are all done, and 2.1
-went past "bounded" to flat. Resuming the release is a separate decision and this note
-does not make it — 2.4 is still open, and it does not block a backfill from finishing.
-What it still costs a long run is recorded in its own section.
+**That condition is now met, and then some** (2026-08-06): Phases 1 and 2 are complete.
+1.1, 1.2 and 1.3 unblock the backfill; 2.1 went past "bounded" to flat; and 2.2, 2.3 and
+2.4 remove the three ways a long run used to leave permanent work behind — a doubled
+write volume, holidays that failed forever, and delivery reports retried forever.
+
+Resuming the release is a separate decision and this note does not make it. Phases 3–5
+are still open and can ship in 1.1.1 and later; the release notes now also need to
+mention that the first run clears `.state/backups` (2.2).
 
 2.2 is also done, which matters to the release for a second reason: the first run
 after upgrading deletes `.state/backups`, so that behaviour belongs in the release

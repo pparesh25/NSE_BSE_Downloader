@@ -46,6 +46,37 @@ def is_available(exchange: str, segment: str, target_date: date) -> bool:
     return floor is None or target_date >= floor
 
 
+#: Earliest date each exchange published its *separate* delivery report.  The
+#: price bhavcopy goes back much further, so a historical backfill would
+#: otherwise queue a delivery download that can never succeed, hold the date
+#: below complete forever, and retry it on every run.
+#:
+#: Pinned by request against the archives on 2026-08-06, in both cases between
+#: consecutive trading days:
+#:
+#: * NSE ``sec_bhavdata_full``: 2019-09-27 (Fri) answers 404 and 2019-09-30
+#:   (Mon) answers 200.  Every sampled month from 2005 to 2019-09 is absent.
+#: * BSE ``SCBSEALL``: every trading day of December 2005 answers 404 and
+#:   2006-01-02 answers 200, which matches the ``/gross/{year}/`` path layout.
+DELIVERY_FIRST_AVAILABLE = {
+    "NSE": date(2019, 9, 30),
+    "BSE": date(2006, 1, 2),
+}
+
+
+def delivery_first_available(exchange: str) -> Optional[date]:
+    """Return the first date a separate delivery report exists, if bounded."""
+
+    return DELIVERY_FIRST_AVAILABLE.get(exchange.upper())
+
+
+def delivery_available(exchange: str, target_date: date) -> bool:
+    """Whether a separate delivery report exists for ``target_date`` at all."""
+
+    floor = delivery_first_available(exchange)
+    return floor is None or target_date >= floor
+
+
 @dataclass(frozen=True)
 class SourceSpec:
     """One downloadable report and the schema era it belongs to."""

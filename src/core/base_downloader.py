@@ -305,8 +305,18 @@ class BaseDownloader(ABC):
         suffix = self.exchange_config.file_suffix
         return f"{date_str}{suffix}.{extension}"
 
-    def _pipeline_requirements(self) -> tuple[list[str], list[str]]:
-        """Return required and disabled stages for the current user options."""
+    def _pipeline_requirements(
+        self, target_date: Optional[date] = None
+    ) -> tuple[list[str], list[str]]:
+        """Return required and disabled stages for the current user options.
+
+        With a date, the answer is also specific to what the exchange actually
+        published then: NSE has no separate delivery report before 2019-09-30
+        and BSE none before 2006-01-02, and requiring a stage whose source has
+        never existed leaves the date below complete for good.
+        """
+
+        from ..services.source_resolver import delivery_available
 
         required = ["downloaded", "validated", "daily"]
         disabled = []
@@ -317,7 +327,10 @@ class BaseDownloader(ABC):
         else:
             disabled.append("combined")
         if self.segment in ("EQ", "SME"):
-            if self.get_download_option("include_delivery_data", True):
+            if self.get_download_option("include_delivery_data", True) and (
+                target_date is None
+                or delivery_available(self.exchange, target_date)
+            ):
                 required.append("delivery")
             else:
                 disabled.append("delivery")
@@ -336,16 +349,21 @@ class BaseDownloader(ABC):
     def _core_pipeline_ok(self, result: SegmentResult) -> bool:
         """Return true when every pre-reconciliation enabled stage is complete."""
 
-        required, _ = self._pipeline_requirements()
         deferred = {"combined"}
         if getattr(self.config, "history_batch_coordinator", None) is not None:
             deferred.update({"symbols", "actions"})
-        core_required = set(required).difference(deferred)
         if not result.dates:
             return False
         for item in result.dates:
             if item.status == "skipped":
                 continue
+            required, _ = self._pipeline_requirements(item.target_date)
+            # A stage disabled on the date itself -- a delivery report retired
+            # as absent -- can never complete, so requiring it here would hold
+            # the segment below success for good.
+            core_required = set(required).difference(
+                deferred
+            ).difference(item.disabled_stages)
             if not core_required.issubset(item.completed_stages):
                 return False
             if set(item.failed_stages).difference(deferred):
@@ -375,7 +393,7 @@ class BaseDownloader(ABC):
         return builder
 
     def _begin_pipeline_date(self, target_date: date) -> None:
-        required, disabled = self._pipeline_requirements()
+        required, disabled = self._pipeline_requirements(target_date)
         pipeline = self._pipeline()
         pipeline.begin(
             self.exchange,
@@ -664,6 +682,47 @@ class BaseDownloader(ABC):
         )
         return sorted(set(working_days).union(pending))
 
+    def _retire_absent_delivery(self, pending_store: Any) -> List[date]:
+        """Stop asking for delivery reports that are absent, not late.
+
+        Both queues have to release the date together: the pending store so it
+        is not re-queued, and the ``delivery`` stage so ``incomplete_dates``
+        stops returning it.  Dropping it from only one moves the loop rather
+        than ending it.
+        """
+
+        from ..services.source_resolver import delivery_first_available
+        from ..utils.date_utils import DateUtils
+
+        retired = pending_store.expire(
+            self.exchange,
+            self.segment,
+            today=DateUtils.today_ist(),
+            first_available=delivery_first_available(self.exchange),
+        )
+        released: List[date] = []
+        for target_date, reason in retired:
+            try:
+                self._pipeline().disable_stage(
+                    self.exchange, self.segment, target_date, "delivery"
+                )
+                # disable_stage drops the requirement; this records why.
+                self._mark_pipeline(
+                    target_date, "delivery", "disabled", error=reason
+                )
+            except Exception:
+                # The date predates the manifest, or its record is gone.  The
+                # pending entry is still dropped, which is the point.
+                continue
+            released.append(target_date)
+        if retired:
+            reasons = sorted({reason for _, reason in retired})
+            self._report_notice(
+                f"{self.exchange_segment}: stopped retrying the delivery "
+                f"report for {len(retired)} date(s) -- {'; '.join(reasons)}"
+            )
+        return released
+
     def _with_incomplete_pipeline_days(
         self, working_days: List[date]
     ) -> List[date]:
@@ -682,11 +741,17 @@ class BaseDownloader(ABC):
         from ..utils.async_downloader import AsyncDownloadManager, DownloadTask
         from ..utils.date_utils import DateUtils
 
+        from ..services.source_resolver import delivery_available
+
+        pending_store = PendingDeliveryStore(self.config.base_data_path)
+        include_delivery = self.get_download_option("include_delivery_data", True)
+        # Before the day list is built, so a retired date leaves both the
+        # pending queue and the incomplete-date queue in the same run.
+        if include_delivery and self.segment in ("EQ", "SME"):
+            self._retire_absent_delivery(pending_store)
         days = self._with_pending_delivery_days(working_days)
         days = self._with_incomplete_pipeline_days(days)
         self.total_files = len(days)
-        pending_store = PendingDeliveryStore(self.config.base_data_path)
-        include_delivery = self.get_download_option("include_delivery_data", True)
         success_count = 0
         processed_days: List[date] = []
         absent = AbsentReportLedger()
@@ -715,13 +780,19 @@ class BaseDownloader(ABC):
             price_result = None
             delivery_data = None
             validated = False
+            # `_begin_pipeline_date` has already marked the stage disabled for
+            # a date the exchange has no delivery report for; not asking for it
+            # is the other half of that.
+            date_delivery = include_delivery and delivery_available(
+                self.exchange, target_date
+            )
             tasks = [DownloadTask(
                 url=self.build_url(target_date),
                 date_str=target_date.isoformat(),
                 target_date=target_date,
                 exchange_segment=self.exchange_segment,
             )]
-            if include_delivery:
+            if date_delivery:
                 tasks.append(DownloadTask(
                     url=delivery_source(self.exchange, target_date).url,
                     date_str=f"{target_date.isoformat()} delivery",
@@ -768,8 +839,8 @@ class BaseDownloader(ABC):
                     source_url=source.url,
                 )
 
-                delivery_ready = not include_delivery
-                if include_delivery:
+                delivery_ready = not date_delivery
+                if date_delivery:
                     delivery_result = results[1] if len(results) > 1 else None
                     if delivery_result and delivery_result.success:
                         delivery_data = delivery_result.file_data
@@ -781,7 +852,12 @@ class BaseDownloader(ABC):
                             sha256=hashlib.sha256(delivery_data).hexdigest(),
                         )
                     else:
-                        pending_store.add(self.exchange, self.segment, target_date)
+                        pending_store.add(
+                            self.exchange,
+                            self.segment,
+                            target_date,
+                            today=DateUtils.today_ist(),
+                        )
                         detail = (
                             delivery_result.error_message if delivery_result
                             else "No delivery response returned"
@@ -824,7 +900,7 @@ class BaseDownloader(ABC):
                 await self._run_pipeline_stage(
                     "persist", self.save_processed_data, processed, target_date
                 )
-                if delivery_ready and include_delivery:
+                if delivery_ready and date_delivery:
                     pending_store.discard(self.exchange, self.segment, target_date)
                 success_count += 1
                 processed_days.append(target_date)

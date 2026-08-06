@@ -54,7 +54,14 @@ twice. Command-line repair commands rebuild histories from checksummed raw snaps
 
 **Better date control.** Calendar-based custom ranges alongside automatic mode,
 collapsible interface panels, and an IST-aware official NSE holiday calendar refreshed
-daily with fallback to the last good copy.
+daily, falling back to the last good copy and then to a calendar bundled with the
+application, so a blocked holiday API cannot make a holiday look like a trading day.
+
+**Historical downloads finish.** Going back years used to leave permanent leftovers:
+holidays the calendar could not cover, and delivery reports NSE did not publish before
+2019-09-30, were retried on every run forever. A report the exchange never published is
+now recognised and retired, so a run reports errors only when something is actually
+wrong.
 
 **Stop actually stops.** Cancellation waits for the current atomic operation instead of
 killing the worker, so published files stay valid.

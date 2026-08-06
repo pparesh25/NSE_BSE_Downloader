@@ -36,6 +36,11 @@ class DateResult:
     failed_stages: tuple[str, ...] = ()
     error: Optional[str] = None
     output_path: Optional[str] = None
+    #: Stages this date does not require, either because the option is off or
+    #: because the exchange has no such report for it.  A caller checking
+    #: segment-level requirements must subtract these or it will hold a date
+    #: below success for a stage that can never run.
+    disabled_stages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -384,6 +389,10 @@ class PipelineManifest:
             stage for stage, value in record["stages"].items()
             if value.get("status") == "failed"
         )
+        disabled = tuple(
+            stage for stage, value in record["stages"].items()
+            if value.get("status") == "disabled"
+        )
         errors = [
             str(value.get("error"))
             for value in record["stages"].values()
@@ -402,6 +411,7 @@ class PipelineManifest:
             failed_stages=failed,
             error="; ".join(errors) or None,
             output_path=record["stages"].get("daily", {}).get("path"),
+            disabled_stages=disabled,
         )
 
     def segment_result(

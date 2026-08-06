@@ -1375,9 +1375,16 @@ class MainWindow(QMainWindow):
         timeout_label = QLabel("Response Timeout (sec):")
         self.timeout_spinbox = QSpinBox()
         self.timeout_spinbox.setMinimum(1)
-        self.timeout_spinbox.setMaximum(30)
+        # This is the responsiveness dial, not the whole-transfer budget.  The
+        # connect, read and attempt budgets live in config.yaml, so a large
+        # report is no longer bounded by this value.
+        self.timeout_spinbox.setMaximum(120)
         self.timeout_spinbox.setValue(self.user_prefs.get_timeout_seconds())  # Load from preferences
-        self.timeout_spinbox.setToolTip("Server response timeout in seconds (default: 5)")
+        self.timeout_spinbox.setToolTip(
+            "How long to wait for a server to start responding, in seconds "
+            "(default: 5). Large downloads are governed by the separate read "
+            "and attempt budgets in config.yaml."
+        )
         self.timeout_spinbox.valueChanged.connect(self.on_timeout_changed)
 
         basic_row.addWidget(timeout_label)

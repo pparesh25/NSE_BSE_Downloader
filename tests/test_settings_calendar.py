@@ -7,10 +7,11 @@ from src.services.settings import SettingsService
 from src.utils.date_utils import DateUtils
 from src.utils import holiday_manager as holiday_module
 from src.utils.holiday_manager import HolidayManager
+from src.utils.user_preferences import MAX_TIMEOUT_SECONDS
 
 
 class _SettingsConfig:
-    download_settings = SimpleNamespace(timeout_seconds=40)
+    download_settings = SimpleNamespace(timeout_seconds=400)
     gui_settings = SimpleNamespace(
         default_exchanges=["BSE_EQ"],
         window_width=620,
@@ -32,7 +33,8 @@ def test_settings_precedence_and_invalid_user_values_are_bounded(
     fresh = SettingsService(config)
     assert fresh.get_download_option("include_delivery_data") is False
     assert fresh.get_download_option("index_append_to_eq") is True
-    assert fresh.get_download_option("timeout_seconds") == 30
+    # 400 is above the supported ceiling and is clamped, not accepted.
+    assert fresh.get_download_option("timeout_seconds") == MAX_TIMEOUT_SECONDS
     assert fresh.preferences.get_selected_exchanges() == ["BSE_EQ"]
 
     path = tmp_path / ".nse_bse_downloader" / "user_preferences.json"

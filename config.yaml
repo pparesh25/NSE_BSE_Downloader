@@ -35,6 +35,14 @@ download_settings:
   max_concurrent_downloads: 1  # Sequential downloads for stability
   retry_attempts: 3  # Consistent retry attempts for all servers
   timeout_seconds: 5  # Wait for server response (user configurable)
+  # Split budgets.  Without these three keys the value above becomes an aiohttp
+  # *total* timeout covering the connect plus every body read, which a
+  # multi-megabyte UDiFF ZIP cannot finish in 5 seconds.  Keeping them separate
+  # lets `timeout_seconds` stay the responsiveness dial while a slow but healthy
+  # transfer still runs to completion.
+  connect_timeout_seconds: 10   # TCP and TLS handshake only
+  read_timeout_seconds: 60      # allowed gap between two body chunks
+  attempt_timeout_seconds: 300  # one whole attempt, including a large download
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
   # Phase 7 bounded stage defaults; date selection/scheduling is unchanged.

@@ -147,7 +147,7 @@ message names the wrong cause.
 **Acceptance:** a backfill across 2022-12-15 → 2023-01-15 publishes every trading day
 with no quarantine.
 
-### 1.3 Restore the transport retry layer — effort S — **blocker**
+### 1.3 Restore the transport retry layer — effort S — **done 2026-08-06**
 
 Three compounding defects. All three re-verified today.
 
@@ -175,18 +175,33 @@ as transient — so every date rejected during a cooldown re-arms the circuit. W
 `max_concurrent_downloads: 1` the circuit can never close for the rest of the run, and
 the pool is shared run-wide: **one slow date can dead-end all four NSE segments**.
 
-- [ ] Add `connect_timeout_seconds: 10`, `read_timeout_seconds: 60`,
+- [x] Added `connect_timeout_seconds: 10`, `read_timeout_seconds: 60`,
       `attempt_timeout_seconds: 300` to `config.yaml`
-- [ ] Classify transport errors by **exception type**, not by substring matching on
-      the message (`async_downloader.py:317-413`)
-- [ ] Give the breaker a typed `CircuitOpenError`, handled before any string matching
-- [ ] Move `record()` inside the slot context so only real request outcomes feed it
-- [ ] Strip the URL from classifier input
-- [ ] Raise the GUI timeout spinbox cap above 30 (`main_window.py:1377-1378`)
+- [x] `_classify_by_exception()` classifies by **type** before any message
+      inspection, with SSL checked before `ClientConnectorError` because aiohttp's
+      SSL errors subclass it
+- [x] `CircuitOpenError(NetworkError)` is a distinct type, matched first
+- [x] `record()` moved inside the slot context, so a rejection by an already-open
+      circuit no longer feeds the breaker that produced it
+- [x] URLs are stripped from the message before substring matching
+      (`_URL_IN_MESSAGE`), so a date such as `..._20240404_...` is no longer read as
+      HTTP 404
+- [x] GUI timeout ceiling raised from 30 to 120, and `MAX_TIMEOUT_SECONDS` now shares
+      one definition with the preference validator, which still clamped to 30 and
+      would have silently reduced the user's choice
 
-**Acceptance:** a unit test asserting a `ClientConnectorError` for connection-refused
-classifies as retryable network, not SSL; a test asserting a circuit-open rejection
-does not itself re-arm the circuit; a real multi-MB FO download completes.
+**Verified.** Eight tests added to `tests/test_phase7_transport.py`, including a
+`ClientConnectorError` whose message genuinely contains `"ssl"` and a
+`CircuitOpenError` whose URL genuinely contains `404`, so each test would pass
+trivially if the old substring logic were still in place.
+
+The circuit-latch test was checked against the old code by temporarily restoring the
+previous `record()` placement; it failed exactly as intended
+(`AssertionError: rejected dates extended the cooldown; the breaker cannot close`,
+`148620.664 != 148620.663`) and passes after the fix.
+
+204 tests pass on Python 3.10 and 3.13, coverage 73.75%, Ruff and mypy clean,
+`--smoke-gui` exits 0.
 
 ---
 

@@ -81,6 +81,17 @@ class NetworkError(DownloaderError):
         return base_msg
 
 
+class CircuitOpenError(NetworkError):
+    """Raised when a host's circuit breaker is open and rejects a request.
+
+    A distinct type because this is not a request outcome.  Nothing was sent, so
+    it must not count as a failure against the same breaker that produced it --
+    otherwise every rejected date re-arms the cooldown and the circuit can never
+    close.  Callers match on the type rather than the message, which carries the
+    URL and would otherwise be substring-matched for status codes.
+    """
+
+
 class FileOperationError(DownloaderError):
     """Raised when there are file operation errors"""
 

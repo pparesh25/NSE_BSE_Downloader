@@ -13,6 +13,8 @@ import aiohttp
 from io import BytesIO
 import logging
 import random
+import re
+import ssl
 import zipfile
 import zlib
 from datetime import datetime, timezone
@@ -22,7 +24,7 @@ from dataclasses import dataclass
 import time
 
 from ..core.config import Config
-from ..core.exceptions import NetworkError
+from ..core.exceptions import CircuitOpenError, NetworkError
 from ..services.pipeline_telemetry import EventLoopLagMonitor, PipelineTelemetry
 from .transport_pool import TransportPool
 
@@ -292,11 +294,87 @@ class AsyncDownloadManager:
         # selected segment from retrying the exchange at the same instant.
         return min(8.0, float(2 ** attempt)) + random.uniform(0.0, 0.25)
 
+    #: Matches an absolute URL anywhere in an error message.  Messages carry the
+    #: failing URL, and a date inside one ("..._20240404_...") would otherwise be
+    #: substring-matched as an HTTP status by the checks further down.
+    _URL_IN_MESSAGE = re.compile(r"https?://\S+", re.I)
+
+    def _classify_by_exception(
+        self, exception: BaseException, task: DownloadTask
+    ) -> Optional[dict]:
+        """Classify by exception type, which wording cannot defeat.
+
+        Substring matching gets one case badly wrong:
+        ``aiohttp.ClientConnectorError.__str__`` is
+        ``"Cannot connect to host {host}:{port} ssl:{...} [{...}]"``, so a plain
+        connection-refused message contains ``"ssl"`` and was classified as a
+        terminal certificate failure.  The user was told their server was
+        misconfigured when their network had blipped, and the retry that would
+        have succeeded never ran.
+
+        Returns ``None`` when the type is not decisive, leaving the caller to
+        fall back to message inspection.
+        """
+
+        # Order matters: aiohttp's SSL errors subclass ClientConnectorError.
+        if isinstance(exception, CircuitOpenError):
+            return {
+                "type": "circuit_open",
+                "user_message": (
+                    f"Skipped {task.date_str}: too many recent failures for this "
+                    "host, pausing before further requests"
+                ),
+                "should_retry": False,
+                "technical_details": str(exception),
+            }
+
+        if isinstance(exception, (ssl.SSLError, aiohttp.ClientSSLError)):
+            return {
+                "type": "ssl_error",
+                "user_message": (
+                    f"SSL certificate issue for {task.date_str} - server "
+                    "configuration problem"
+                ),
+                "should_retry": False,
+                "technical_details": str(exception),
+            }
+
+        if isinstance(
+            exception, (asyncio.TimeoutError, aiohttp.ServerTimeoutError)
+        ):
+            return {
+                "type": "timeout",
+                "user_message": (
+                    f"Server response timeout for {task.date_str}: {exception}"
+                ),
+                "should_retry": True,
+                "technical_details": str(exception),
+            }
+
+        if isinstance(exception, (
+            aiohttp.ClientConnectorError,
+            aiohttp.ClientOSError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ClientPayloadError,
+            ConnectionError,
+        )):
+            return {
+                "type": "network",
+                "user_message": (
+                    f"Network connectivity issue for {task.date_str} - will retry"
+                ),
+                "should_retry": True,
+                "technical_details": str(exception),
+            }
+
+        return None
+
     def _classify_error(
         self,
         error_message: str,
         task: DownloadTask,
         status_code: Optional[int] = None,
+        exception: Optional[BaseException] = None,
     ) -> dict:
         """
         Classify error for better user feedback
@@ -304,14 +382,23 @@ class AsyncDownloadManager:
         Args:
             error_message: Error message to classify
             task: Download task that failed
+            status_code: HTTP status code, when the server answered
+            exception: The raised exception, when there was one.  Preferred over
+                the message, which is ambiguous.
 
         Returns:
             Dictionary with error classification
         """
+        if exception is not None:
+            classified = self._classify_by_exception(exception, task)
+            if classified is not None:
+                return classified
+
         if not error_message:
             return {"type": "unknown", "user_message": "Unknown error occurred", "should_retry": False}
 
-        error_lower = error_message.lower()
+        # Strip URLs before any substring matching; see _URL_IN_MESSAGE.
+        error_lower = self._URL_IN_MESSAGE.sub(" ", error_message).lower()
 
         # Timeout errors
         if "timeout" in error_lower:
@@ -445,12 +532,18 @@ class AsyncDownloadManager:
                         **identity,
                     )
                     try:
-                        try:
-                            async with self.transport_pool.slot(task.url):
+                        # Only a real request outcome may feed the breaker.  A
+                        # rejection by an already-open circuit sent nothing, so
+                        # recording it would re-arm the cooldown that produced
+                        # it and the circuit could never close.
+                        async with self.transport_pool.slot(task.url):
+                            try:
                                 result = await self._attempt_download(task)
-                        except Exception:
-                            self.transport_pool.record(task.url, success=False)
-                            raise
+                            except Exception:
+                                self.transport_pool.record(
+                                    task.url, success=False
+                                )
+                                raise
                         self.transport_pool.record(
                             task.url,
                             success=result.success,
@@ -557,7 +650,9 @@ class AsyncDownloadManager:
                             **identity,
                         )
                         last_error = f"Download error: {e}"
-                        error_info = self._classify_error(str(e), task)
+                        error_info = self._classify_error(
+                            str(e), task, exception=e
+                        )
 
                         retry_limit = 2 if error_info["type"] == "access_denied" else max_attempts
                         if error_info["should_retry"] and attempt < min(max_attempts, retry_limit) - 1:

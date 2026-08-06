@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from ..core.exceptions import NetworkError
+from ..core.exceptions import CircuitOpenError, NetworkError
 
 
 @dataclass
@@ -106,7 +106,7 @@ class TransportPool:
         policy = self._policy(url)
         now = time.monotonic()
         if policy.circuit_open_until > now:
-            raise NetworkError(
+            raise CircuitOpenError(
                 f"Host circuit open for {urlsplit(url).hostname}", url=url
             )
         async with policy.semaphore:

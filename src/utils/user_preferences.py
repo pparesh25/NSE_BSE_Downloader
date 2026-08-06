@@ -17,6 +17,11 @@ CURRENT_LAYOUT_VERSION = 3
 RESPONSIVE_WINDOW_WIDTH = 720
 
 
+#: Upper bound for the responsiveness dial.  Matches the GUI spin box; the
+#: whole-transfer budget is configured separately in config.yaml.
+MAX_TIMEOUT_SECONDS = 120
+
+
 class UserPreferences:
     """
     Manages user preferences and settings persistence
@@ -217,7 +222,7 @@ class UserPreferences:
             value = merged["download_options"].get(key, default)
             if key == "timeout_seconds":
                 try:
-                    value = max(1, min(30, int(value)))
+                    value = max(1, min(MAX_TIMEOUT_SECONDS, int(value)))
                 except (TypeError, ValueError):
                     value = int(default)
             else:
@@ -341,7 +346,7 @@ class UserPreferences:
     def set_timeout_seconds(self, timeout: int) -> None:
         """Set timeout seconds setting"""
         self.preferences["download_options"]["timeout_seconds"] = max(
-            1, min(30, int(timeout))
+            1, min(MAX_TIMEOUT_SECONDS, int(timeout))
         )
         self.save_preferences()
 

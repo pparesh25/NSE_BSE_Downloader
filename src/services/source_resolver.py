@@ -13,6 +13,12 @@ from datetime import date
 
 NSE_UDIFF_START = date(2024, 7, 8)
 BSE_SECOND_GENERATION_START = date(2022, 8, 17)
+#: BSE switched the BSE_EQ_BHAVCOPY ZIP to UDiFF column names without renaming
+#: the file.  Sampled 2026-08-06: 2022-12-30 is still legacy
+#: (``SCRIP ID``/``SC_GROUP``/``TRADING_DATE``) and 2023-01-02 is already UDiFF
+#: (``TckrSymb``/``SctySrs``/``TradDt``).  Those are consecutive trading days --
+#: 2022-12-31 fell on a Saturday -- so the boundary is exact.
+BSE_UDIFF_SCHEMA_IN_ZIP_START = date(2023, 1, 1)
 BSE_UDIFF_START = date(2024, 7, 8)
 NSE_SME_FOUR_DIGIT_YEAR_START = date(2025, 10, 13)
 
@@ -95,10 +101,17 @@ def price_source(exchange: str, segment: str, target_date: date) -> SourceSpec:
                 "bse-equity-isin-legacy",
                 "zip-csv",
             )
-        if target_date < BSE_UDIFF_START:
+        if target_date < BSE_UDIFF_SCHEMA_IN_ZIP_START:
             return SourceSpec(
                 f"{base}/BSE_EQ_BHAVCOPY_{target_date:%d%m%Y}.ZIP",
                 "bse-equity-bhavcopy-legacy",
+                "zip-csv",
+            )
+        if target_date < BSE_UDIFF_START:
+            # Same URL as the era above, UDiFF columns inside.
+            return SourceSpec(
+                f"{base}/BSE_EQ_BHAVCOPY_{target_date:%d%m%Y}.ZIP",
+                "bse-equity-udiff-zip",
                 "zip-csv",
             )
         return SourceSpec(

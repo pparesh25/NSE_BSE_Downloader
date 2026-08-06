@@ -119,6 +119,18 @@ SOURCE_SCHEMAS = {
         ("FinInstrmId",),
         "TradDt",
     ),
+    # Identical columns to the era above, still delivered inside the older
+    # BSE_EQ_BHAVCOPY ZIP.  Kept as its own era so the name stays honest about
+    # where the file came from, and so the truncated-ticker handling in
+    # normalize_bse_equity can key off it.
+    "bse-equity-udiff-zip": SourceSchema(
+        frozenset({
+            "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
+            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId",
+        }),
+        ("FinInstrmId",),
+        "TradDt",
+    ),
     "nse-index": SourceSchema(
         frozenset({
             "Index Name", "Index Date", "Open Index Value",
@@ -413,10 +425,43 @@ def normalize_nse_sme(
     return result
 
 
+def _resolve_truncated_bse_symbols(
+    normalized: pd.DataFrame, full_names: Optional[pd.Series]
+) -> pd.DataFrame:
+    """Disambiguate BSE symbols truncated to nine characters.
+
+    Reports published before 2024-07-08 truncate the ticker (``SCRIP ID``, and
+    ``TckrSymb`` in the ZIP-era files) to nine characters while carrying the
+    untruncated name in the same row.  Two instruments can therefore arrive with
+    the same ``(SYMBOL, SERIES)``.  Observed on every sampled date from
+    2022-08-18 to 2023-01-02: ``ICICIBANKN`` and ``ICICIBANKP``, two ICICI
+    Prudential ETFs, both truncate to ``ICICIBANK`` in group ``B``.
+
+    Only the colliding rows are renamed, to the exchange's own untruncated name.
+    Dropping them would lose instruments the current era still publishes, and
+    de-duplicating on the truncated symbol would let an ETF's price be written
+    into the history of the equity that shares its prefix.
+    """
+
+    if full_names is None or normalized.empty:
+        return normalized
+
+    names = _clean_text(full_names).str.upper()
+    names = names.reindex(normalized.index)
+    collides = normalized.duplicated(subset=["SYMBOL", "SERIES"], keep=False)
+    usable = collides & names.notna() & (names != "")
+    if not usable.any():
+        return normalized
+
+    resolved = normalized.copy()
+    resolved.loc[usable, "SYMBOL"] = names.loc[usable]
+    return resolved
+
+
 def normalize_bse_equity(
     frame: pd.DataFrame, target_date: date, era: Optional[str] = None
 ) -> pd.DataFrame:
-    """Normalize all three supported BSE cash-market schemas."""
+    """Normalize every supported BSE cash-market schema."""
 
     if era is None:
         if "TckrSymb" in frame.columns:
@@ -426,7 +471,7 @@ def normalize_bse_equity(
         else:
             era = "bse-equity-isin-legacy"
     validate_source_schema(frame, era, target_date)
-    if era == "bse-equity-udiff":
+    if era in ("bse-equity-udiff", "bse-equity-udiff-zip"):
         mapping = {
             "SYMBOL": _column(frame, "TckrSymb"),
             "DATE": _date_values(_column(frame, "TradDt"), target_date),
@@ -440,6 +485,7 @@ def normalize_bse_equity(
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "FinInstrmId"),
         }
+        full_names = _column(frame, "FinInstrmNm")
     elif era == "bse-equity-bhavcopy-legacy":
         mapping = {
             "SYMBOL": _column(frame, "SCRIP ID"),
@@ -454,6 +500,7 @@ def normalize_bse_equity(
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "SCRIP_CODE"),
         }
+        full_names = _column(frame, "SC_NAME")
     elif era == "bse-equity-isin-legacy":
         mapping = {
             "SYMBOL": _column(frame, "SC_NAME"),
@@ -468,12 +515,13 @@ def normalize_bse_equity(
             "ISIN": _column(frame, "ISIN_CODE"),
             "SECURITY_ID": _column(frame, "SC_CODE"),
         }
-
+        full_names = None
     else:
         raise DataProcessingError(f"Unsupported BSE equity era: {era}")
     normalized = pd.DataFrame(mapping)
     normalized["SERIES"] = _clean_text(normalized["SERIES"]).str.upper()
     normalized = normalized[normalized["SERIES"].isin(BSE_EQUITY_SERIES)].copy()
+    normalized = _resolve_truncated_bse_symbols(normalized, full_names)
     result = _finalize_equity(normalized)
     validate_canonical_data(
         result, target_date, INTERNAL_EQUITY_COLUMNS,

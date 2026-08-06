@@ -178,3 +178,76 @@ def test_mixed_udiff_report_allows_unselected_rows_without_a_series():
         mixed, date(2024, 7, 8), era="nse-equity-udiff"
     )
     assert result["SYMBOL"].tolist() == ["ABC"]
+
+
+def _bse_legacy_row(isin, scrip_id, scrip_code, name, group, close):
+    return {
+        "ISIN": isin, "SCRIP ID": scrip_id, "SCRIP_CODE": scrip_code,
+        "SC_NAME": name, "SC_GROUP": group, "OPEN PRICE": close,
+        "HIGH PRICE": close, "LOW PRICE": close, "CLOSING PRICE": close,
+        "NO_OF_SHRS": "100", "NO_TRADES": "10",
+        "TRADING_DATE": "2022-12-30",
+    }
+
+
+def _bse_udiff_zip_row(isin, ticker, instrument_id, name, series, close):
+    return {
+        "ISIN": isin, "TckrSymb": ticker, "FinInstrmId": instrument_id,
+        "FinInstrmNm": name, "SctySrs": series, "OpnPric": close,
+        "HghPric": close, "LwPric": close, "ClsPric": close,
+        "TtlTradgVol": "100", "TtlNbOfTxsExctd": "10",
+        "TradDt": "2023-01-02",
+    }
+
+
+def test_truncated_bse_ticker_collision_is_resolved_not_dropped():
+    # Real data, 2022-12-30: BSE truncates SCRIP ID to nine characters, so two
+    # ICICI Prudential ETFs both arrive as "ICICIBANK" in group B while the bank
+    # itself is "ICICIBANK" in group A.  Before this was handled the whole date
+    # was rejected for duplicate keys.
+    frame = pd.DataFrame([
+        _bse_legacy_row("INE090A01021", "ICICIBANK", "532174", "ICICI BANK", "A", "890.95"),
+        _bse_legacy_row("INF109KC15I8", "ICICIBANK", "542730", "ICICIBANKN", "B", "43.15"),
+        _bse_legacy_row("INF109KC1E35", "ICICIBANK", "542758", "ICICIBANKP", "B", "217.40"),
+    ])
+
+    result = normalize_bse_equity(frame, date(2022, 12, 30), "bse-equity-bhavcopy-legacy")
+
+    # Nothing is lost and nothing is merged.
+    assert len(result) == 3
+    by_isin = result.set_index("ISIN")
+    # The equity keeps the plain ticker; it never collided, being in group A.
+    assert by_isin.loc["INE090A01021", "SYMBOL"] == "ICICIBANK"
+    assert float(by_isin.loc["INE090A01021", "CLOSE"]) == 890.95
+    # The two funds are separated by the exchange's own untruncated names.
+    assert by_isin.loc["INF109KC15I8", "SYMBOL"] == "ICICIBANKN"
+    assert by_isin.loc["INF109KC1E35", "SYMBOL"] == "ICICIBANKP"
+    # The fund prices must not have reached the bank's symbol.
+    bank_rows = result[result["SYMBOL"] == "ICICIBANK"]
+    assert len(bank_rows) == 1
+
+
+def test_truncated_ticker_collision_is_resolved_in_the_zip_udiff_era_too():
+    frame = pd.DataFrame([
+        _bse_udiff_zip_row("INE090A01021", "ICICIBANK", "532174", "ICICI BANK", "A", "903.00"),
+        _bse_udiff_zip_row("INF109KC15I8", "ICICIBANK", "542730", "ICICIBANKN", "B", "43.30"),
+        _bse_udiff_zip_row("INF109KC1E35", "ICICIBANK", "542758", "ICICIBANKP", "B", "219.16"),
+    ])
+
+    result = normalize_bse_equity(frame, date(2023, 1, 2), "bse-equity-udiff-zip")
+
+    assert len(result) == 3
+    assert set(result["SYMBOL"]) == {"ICICIBANK", "ICICIBANKN", "ICICIBANKP"}
+
+
+def test_uncontested_symbols_keep_their_ticker():
+    # Only colliding rows are renamed; an ordinary row must not pick up its
+    # long instrument name.
+    frame = pd.DataFrame([
+        _bse_udiff_zip_row("INE090A01021", "ICICIBANK", "532174", "ICICI BANK LTD.", "A", "903.00"),
+        _bse_udiff_zip_row("INE002A01018", "RELIANCE", "500325", "RELIANCE INDUSTRIES", "A", "2500.00"),
+    ])
+
+    result = normalize_bse_equity(frame, date(2023, 1, 2), "bse-equity-udiff-zip")
+
+    assert set(result["SYMBOL"]) == {"ICICIBANK", "RELIANCE"}

@@ -117,7 +117,7 @@ before any BSE backfill.
 **Acceptance:** a backfill of BSE_EQ over a 2015 date range produces one `.txt` per
 trading day; those dates report `complete=1`; a second run downloads nothing.
 
-### 1.2 Add the missing BSE Equity era, 2023-01-01 → 2024-07-07 — effort M — **blocker**
+### 1.2 Add the missing BSE Equity era, 2023-01-01 → 2024-07-07 — effort M — **done 2026-08-06**
 
 `source_resolver.py:92-103` maps 2022-08-17 … 2024-07-07 to a single era,
 `bse-equity-bhavcopy-legacy`, requiring `SCRIP ID, SC_GROUP, TRADING_DATE`. The owner's
@@ -165,7 +165,7 @@ Passing `bse-equity-udiff` to the same 2023-06-15 and 2024-07-05 files normalize
 cleanly (3,658 and 4,007 rows), which confirms the existing UDiFF mapping is reusable
 as-is and only the era selection is wrong.
 
-#### 1.2b A second, independent defect found while sampling — **blocker**
+#### 1.2b A second, independent defect found while sampling — **done 2026-08-06**
 
 The legacy window is broken too, for a different reason, and the review did not find
 this. **Every** sampled legacy date fails:
@@ -210,19 +210,65 @@ units is the correct fix, and it removes every observed collision.
 #### Work
 
 - [x] Flip date pinned empirically at 2023-01-01
-- [ ] Add `BSE_UDIFF_SCHEMA_IN_ZIP_START = date(2023, 1, 1)` and a fourth era
-      `bse-equity-udiff-zip` that keeps the `.ZIP` URL and reuses the existing UDiFF
-      schema and mapping unchanged
-- [ ] Exclude mutual-fund instruments from BSE equity by ISIN prefix (`INF`), before
-      the duplicate-key check
-- [ ] Add parametrised cases at 2022-12-30 and 2023-01-02 to
-      `tests/test_source_resolver.py` and `tests/test_canonical_data.py`
-- [ ] Add a regression test using the real `ICICIBANK` collision, asserting that the
-      equity row survives and the two fund rows are dropped — not merged, not
-      arbitrarily deduplicated
+- [x] Added `BSE_UDIFF_SCHEMA_IN_ZIP_START` and the era `bse-equity-udiff-zip`, which
+      keeps the `.ZIP` URL and reuses the existing UDiFF schema and mapping unchanged
+- [x] Truncated-ticker collisions resolved by the exchange's own untruncated name
+- [x] Boundary cases added to `tests/test_source_resolver.py`, collision cases to
+      `tests/test_canonical_data.py`
 
-**Acceptance:** a backfill across 2022-08-17 → 2023-01-15 publishes every trading day
-with no quarantine, and `icicibank.txt` contains only `INE090A01021` prices.
+#### The planned fix was wrong; sampling the current era corrected it
+
+The plan said to exclude mutual-fund instruments by `INF` ISIN prefix. Checking the
+**current** era first showed that would have been a mistake: 2026-07-31 keeps **194**
+`INF` rows in groups A and B — `NIFTYBEES`, `SBISENSEX`, `MOM100`, `NIFTYIETF` and
+similar ETFs. Excluding them historically would have produced a database with ETFs
+after 2024-07-08 and none before, which is exactly the kind of silent inconsistency
+this plan exists to remove.
+
+The real cause is narrower. Ticker truncation is a property of the **old files only**:
+
+| Era | Max ticker length | Collisions |
+|---|---|---|
+| 2024-07-08 onward | 11 — untruncated | none |
+| 2023-01-02 (`TckrSymb`) | 9 | 2 per date |
+| 2022-12-30 (`SCRIP ID`) | 9 (`SC_NAME` up to 12) | 2 per date |
+
+Each row carries its untruncated name in the same record, and that name is unique:
+0 duplicates on `(SC_NAME, group)` against 2 on `(SCRIP ID, group)`. So
+`_resolve_truncated_bse_symbols` renames **only the colliding rows** to the
+exchange's own name. Nothing is dropped and nothing is merged.
+
+Note the collision is between the two ETFs, not with the bank: the bank is
+`(ICICIBANK, A)` and the funds are `(ICICIBANK, B)`. Preferring the `INE` row would
+not have resolved it.
+
+#### Verified against real exchange files
+
+All eight sampled dates now normalize, and the current era is unchanged:
+
+```
+2022-08-17  bse-equity-bhavcopy-legacy  OK 3551   ICICIBANK A 883.20  INE090A01021
+                                                 ICICIBANKN B 395.69  INF109KC1E27
+                                                 ICICIBANKP B 200.17  INF109KC1E35
+2022-12-30  bse-equity-bhavcopy-legacy  OK 3627
+2023-01-02  bse-equity-udiff-zip        OK 3782
+2023-06-15  bse-equity-udiff-zip        OK 3658
+2024-07-05  bse-equity-udiff-zip        OK 4007
+2024-07-08  bse-equity-udiff            OK 4159
+2026-07-31  bse-equity-udiff            OK 4379
+```
+
+The collision tests were run against the code with the resolver removed and failed
+with the original `duplicate keys: ['SYMBOL', 'SERIES']`, so they catch the regression
+rather than passing trivially.
+
+**Observation for later, not a defect here:** BSE scrip code 542730 keeps the name
+`ICICIBANKN` across 2022 but its ISIN changes from `INF109KC1E27` to `INF109KC15I8`.
+The security code is stable and is preserved in `SECURITY_ID`, so identity survives,
+but it confirms that ISIN alone is not a safe stable key. Relevant to the ISIN
+validation work in Phase 3.3.
+
+214 tests pass on Python 3.10 and 3.13, coverage 73.82%, Ruff and mypy clean.
 
 ### 1.3 Restore the transport retry layer — effort S — **done 2026-08-06**
 

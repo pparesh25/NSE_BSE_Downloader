@@ -348,7 +348,7 @@ previous `record()` placement; it failed exactly as intended
 
 ## Phase 2 — Make a multi-year backfill finish
 
-### 2.1 Bound and restart the history batch — effort L
+### 2.1 Bound and restart the history batch — effort L — **done 2026-08-06**
 
 `symbol_history.upsert_batch` holds `history_cache` (every touched symbol's full
 history) and `incoming_cache` (one `pd.Series` per row) with no eviction, and writes
@@ -359,14 +359,149 @@ gathering every segment — so the job **dies at the end, after hours of downloa
 Scale: 3,318 NSE + 4,828 BSE symbol files today; 7,426 symbols/day for Select All. A
 2015-today backfill is roughly 8,100 date-entries × ~7,400 rows.
 
-- [ ] Flush every N dates instead of once at the end
-- [ ] Evict `history_cache` / `incoming_cache` per flushed bucket
-- [ ] Add a `LIMIT` to `HistoryBatchJournal.prepare()`
-- [ ] Replace the `iterrows` loop with `groupby("SYMBOL")`
-- [ ] Per-symbol failure isolation — one bad row currently aborts the whole batch
+#### Measured before touching anything
 
-**Acceptance:** a 500-date backfill completes with bounded peak RSS, and killing the
-process mid-run resumes without re-doing completed buckets.
+Peak RSS is linear in batched rows: **117 MiB + 2.03 KiB/row**, from four runs of the
+real `HistoryBatchCoordinator` path against a temporary root.
+
+| Rows batched | Peak RSS |
+|---|---|
+| 37,500 | 193 MiB |
+| 75,000 | 266 MiB |
+| 150,000 | 415 MiB |
+| 300,000 | 725 MiB |
+
+That puts the plan's own 500-date acceptance case (3.7M rows) at **~7.6 GB**, and a full
+2015→2026 Select All backfill (60M rows) at ~122 GB. The review's diagnosis was right;
+this quantifies it.
+
+#### Two independent causes, not one
+
+**A `LIMIT` on its own would not have fixed this**, which is worth stating because it is
+the whole of what the plan asked for. `history_cache` holds one full history per
+*touched symbol*, and every symbol trades every day, so it follows the symbol count and
+history depth — not the number of dates in the batch.
+
+Measured by batching **one date** — the smallest bucket any limit could ever cut — in a
+fresh process against histories already on disk, 3,000 symbols:
+
+| Existing history depth | Old cost of a 1-date batch | New |
+|---|---|---|
+| 100 rows | 84 MiB | 12 MiB |
+| 300 rows | 177 MiB | 12 MiB |
+
+The old cost grows with depth; the new one does not. Scaled to a real backfill's tail
+(7,400 symbols, ~2,700 rows deep) the old figure is roughly **3.9 GB for a single
+date** — with `history_batch_dates: 1`. So the limit bounds one term and the streaming
+publish pass bounds the other; neither alone is enough.
+
+- [x] `HistoryBatchJournal.prepare(limit)` cuts a batch of at most N entries, in
+      `(target_date, entry_key)` order so a batch is always a contiguous window and
+      rows still merge in the order they would have as one batch
+- [x] `upsert_batch` now plans first and publishes second. `_plan_batch` resolves every
+      row's destination from three identity columns without reading a single history
+      file; the publish pass then reads, merges and writes **one symbol at a time** and
+      keeps nothing after its write. This is what removes the `history_cache` term
+- [x] The `iterrows` loop is gone. Planning walks plain column values, and each symbol's
+      rows are gathered by position — so no `pd.Series` per row survives the batch
+- [x] Per-symbol failure isolation, reported through `HistoryBatchResult.failures`
+- [x] `history_batch_dates` (default 50) in `config.yaml` and `DownloadSettings`
+
+#### What isolation actually changed
+
+The old failure mode was worse than "aborts the whole batch". Symbols are written in
+sorted order, so an abort published everything sorting *before* the bad symbol, silently
+skipped everything after it, marked **every** date in the batch failed, and left the
+batch open — so each later run re-attempted the same doomed symbol and stopped at the
+same place. Confirmed by running probes against `5e15efc`.
+
+Now a failed symbol is recorded with the dates its rows came from; only those dates are
+marked failed, and the batch closes so the queue behind it drains. A failure that is not
+per-symbol still fails closed: a rename merge (its rows live in a file the batch would
+then delete) and anything past `MAX_ISOLATED_SYMBOL_FAILURES = 100`, since a full disk
+fails every symbol and should not write 7,400 identical error records.
+
+No `degraded` state was added. A held-back date is `partial`, not `failed`, because its
+daily file *is* published and only the `symbols` stage is outstanding — and `partial`
+already keeps `complete=0`, so the date returns through the ordinary repair path.
+
+#### Verified
+
+Peak RSS is now flat in batched rows, against the same coordinator path:
+
+| Rows batched | Before | After |
+|---|---|---|
+| 37,500 | 193 MiB | 130 MiB |
+| 150,000 | 415 MiB | 161 MiB |
+| 300,000 | 725 MiB | 167 MiB |
+| 600,000 | — | 180 MiB |
+
+At Select All width (200 dates × 7,400 symbols = 1.48M rows) the knob behaves as
+designed, and the cost of a smaller bucket is write volume, not correctness:
+
+| `history_batch_dates` | Buckets | Peak RSS | Finalize |
+|---|---|---|---|
+| 25 | 8 | 293 MiB | 671 s |
+| **50 (default)** | **4** | **366 MiB** | **315 s** |
+| 100 | 2 | 474 MiB | 173 s |
+| 200 (one batch) | 1 | 739 MiB | 146 s |
+
+Note the last row: even unbucketed, 1.48M rows now peak at 739 MiB where the old code
+projects ~3.1 GB. The rewrite and the limit each carry part of the fix.
+
+#### The acceptance case, run rather than projected
+
+500 dates × 7,400 symbols = 3.7M rows, at the shipped default, with a deliberate kill
+during the third bucket:
+
+```
+offer      21.8s  peak  163 MiB
+killed    108.3s  peak  322 MiB   dates already committed: 100
+resume    547.8s  peak  351 MiB   buckets replayed=8
+PEAK RSS 351 MiB | incomplete=0 | symbol files=7,400
+```
+
+**351 MiB against the ~7.6 GB the old code projects for the same work.** The kill
+committed exactly two buckets and the resume replayed exactly the remaining eight, so
+no completed bucket was re-done — the second half of the acceptance criterion, and the
+reason the limit is what makes the run restartable rather than only smaller.
+
+**Byte-equivalence was not assumed.** A generated-plan harness compared the old
+unbounded implementation at `5e15efc` against the final bucketed one across 30 seeded
+runs — randomized renames, mixed EQ/SME segments and deliberate volume ties, which are
+the cases where a bucket boundary could change a dedup tie-break. All 30 produced
+byte-identical symbol files. A second harness compared bucket sizes 1–7 against a single
+unbounded batch over 150 seeds: 150/150 identical. Both harnesses were checked against a
+known-different run first, so they are not passing blind.
+
+In the suite, `test_bucketed_batches_match_one_unbounded_batch_byte_for_byte` walks
+bucket sizes 1, 2, 3, 5, 7 and 12 across a rename at day 7, so at least one boundary
+forces the merge to read a file an earlier bucket already wrote.
+
+`test_batch_holds_one_symbol_history_at_a_time` pins the memory property itself: reads
+and writes must interleave per symbol. Against `5e15efc` the same trace is three reads
+then three writes.
+
+Five symptom probes were run against `5e15efc` and all pass there — unbounded `prepare`,
+one batch regardless of config, all-reads-before-all-writes, the mid-way abort, and one
+bad symbol failing a date it never traded on — so the new tests are mirrors rather than
+tests that would have passed anyway.
+
+One test exists only because the bug nearly shipped: `DownloadSettings` is built key by
+key in `config.py`, so `history_batch_dates` was present in `config.yaml` and in the
+dataclass yet never forwarded — inert, but indistinguishable from working because the
+default matched.
+`test_history_batch_dates_reaches_the_coordinator_from_config_yaml` sets it to 17 and
+follows it all the way to `HistoryBatchCoordinator.batch_dates`.
+
+236 tests pass on Python 3.13, coverage 74.2%, Ruff and mypy clean, `--smoke-gui`
+exits 0. Python 3.10 is not installed on this machine; mypy is pinned to 3.10 and
+passes, and CI covers the runtime.
+
+**Still true after this change:** each bucket rewrites every touched symbol file in
+full, and `_write_history` copies a backup on every write (2.2), so the write volume
+above is roughly double what it needs to be. 2.2 halves it; Phase 5 removes the
+rewrite-per-bucket cost entirely.
 
 ### 2.2 Drop the per-write symbol backup — effort S
 
@@ -449,7 +584,24 @@ turnover screen across the whole history.
       (`symbol_history.py:322-343` — the `unlink()` is unconditional today)
 - [ ] Add ticker-reuse protection: `_ensure_symbol_filename` keys on the ticker string
       alone, so a delisted ticker reassigned to a new company appends into the old file
-      and `_deduplicate` then destroys one row per shared date
+      and `_deduplicate` then destroys one row per shared date.
+
+      **A second, sharper symptom, found while doing 2.1 and confirmed pre-existing.**
+      When the rename and the reuse fall inside the *same* batch, the reused ticker's
+      rows are not merged — they are dropped and the file is deleted. `AAA` (ISIN X)
+      renames to `AAA-NEW`, retiring `aaa.txt`; a different company (ISIN Y) then lists
+      under the freed ticker `AAA`, and its rows are assigned to `aaa.txt`, which is
+      still in the batch's retired set. Retired paths are excluded from the write set
+      and unlinked at the end, so the day-3 row is silently lost:
+
+      ```
+      files: ['aaa-new.txt']   # aaa.txt deleted, its day-3 row gone
+      day-3 row survived: False
+      ```
+
+      Verified byte-identical on `5e15efc` and on the current branch, so 2.1 neither
+      caused nor changed it. Fixing it needs the identity model this section is about,
+      not another special case in the batch, which is why it is recorded here.
 - [ ] Add an ISIN or `SECURITY_ID` column to `SYMBOL_HISTORY_COLUMNS` so a file is
       self-identifying and merge errors are reversible after the fact
 
@@ -553,11 +705,12 @@ whose correctness defects are already closed.
 ## Sequencing
 
 ```
-Phase 0  test isolation          ← everything else is verified by running the suite
+Phase 0  test isolation          ← done; everything else is verified by running the suite
    ↓
-Phase 1  backfill blockers       ← 1.1, 1.2, 1.3 — the owner's goal is blocked without these
+Phase 1  backfill blockers       ← done; 1.1, 1.2, 1.3
    ↓
-Phase 2  make it finish          ← 2.1 is the hard ceiling on any multi-year run
+Phase 2  make it finish          ← 2.1 done — the memory ceiling is gone;
+                                   2.2, 2.3, 2.4 still open
    ↓
 Phase 3  stop writing wrong data ← correctness; some items need a rebuild prompt
    ↓
@@ -574,3 +727,8 @@ Phase 2.1 and Phase 5 must not be worked simultaneously; 5 supersedes much of 2.
 The release (PENDING_TASKS §0) resumes when **Phase 1 is complete and Phase 2.1 is at
 least bounded**. That is the point at which a user who upgrades can actually build the
 database the application promises. Phases 3–5 can ship in 1.1.1 and later.
+
+**That condition is now met** (2026-08-06): 1.1, 1.2, 1.3 and 2.1 are all done, and 2.1
+went past "bounded" to flat. Resuming the release is a separate decision and this note
+does not make it — 2.2, 2.3 and 2.4 are still open, and none of them blocks a backfill
+from finishing. What each still costs a long run is recorded in its own section.

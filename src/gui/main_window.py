@@ -512,6 +512,20 @@ class DownloadWorker(QThread):
                 f"{result.entries} date/segment entries "
                 f"({result.history_reads} reads, {result.history_writes} writes)",
             )
+            if result.failures:
+                # The rest of the batch is published; these dates were marked
+                # failed and come back through the ordinary repair path.
+                named = ", ".join(
+                    failure.path for failure in result.failures[:3]
+                )
+                if len(result.failures) > 3:
+                    named += f", and {len(result.failures) - 3} more"
+                self.error_occurred.emit(
+                    "Symbol histories",
+                    f"{len(result.failures)} symbol histories were not "
+                    f"published and their dates are queued for repair "
+                    f"({named})",
+                )
 
         windows = coordinator.action_windows()
         if not windows:

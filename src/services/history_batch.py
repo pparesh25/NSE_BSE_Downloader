@@ -174,7 +174,26 @@ class HistoryBatchJournal:
             ).fetchone()
         return row is not None
 
-    def prepare(self) -> Optional[tuple[str, tuple[HistoryJournalEntry, ...]]]:
+    def prepare(
+        self, limit: Optional[int] = None
+    ) -> Optional[tuple[str, tuple[HistoryJournalEntry, ...]]]:
+        """Claim the open batch, or cut a new one of at most ``limit`` entries.
+
+        The limit is what keeps a multi-year backfill inside memory. The caller
+        loads every entry of a batch at once, so an unbounded batch makes peak
+        memory a function of how long the run has been collecting rather than
+        of anything the machine can bound.
+
+        Entries are cut in date order, so a batch is always a contiguous window
+        and rows still merge in the order they would have if the whole run were
+        one batch.
+        """
+
+        bound = limit if limit is not None and limit > 0 else -1
+        selection = (
+            "SELECT entry_key FROM history_pending_entries "
+            "ORDER BY target_date, entry_key LIMIT ?"
+        )
         with self._connect() as connection:
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
@@ -185,7 +204,10 @@ class HistoryBatchJournal:
                 batch_id = active["batch_id"]
             else:
                 pending = connection.execute(
-                    "SELECT * FROM history_pending_entries ORDER BY entry_key"
+                    "SELECT * FROM history_pending_entries "
+                    f"WHERE entry_key IN ({selection}) "
+                    "ORDER BY target_date, entry_key",
+                    (bound,),
                 ).fetchall()
                 if not pending:
                     return None
@@ -199,7 +221,7 @@ class HistoryBatchJournal:
                     (batch_id, time.time()),
                 )
                 connection.execute(
-                    """
+                    f"""
                     INSERT INTO history_batch_entries(
                         batch_id, entry_key, exchange, segment, target_date,
                         snapshot_path, sha256
@@ -207,13 +229,18 @@ class HistoryBatchJournal:
                     SELECT ?, entry_key, exchange, segment, target_date,
                            snapshot_path, sha256
                     FROM history_pending_entries
+                    WHERE entry_key IN ({selection})
                     """,
-                    (batch_id,),
+                    (batch_id, bound),
                 )
-                connection.execute("DELETE FROM history_pending_entries")
+                connection.execute(
+                    "DELETE FROM history_pending_entries "
+                    f"WHERE entry_key IN ({selection})",
+                    (bound,),
+                )
             rows = connection.execute(
                 "SELECT * FROM history_batch_entries WHERE batch_id=? "
-                "ORDER BY entry_key",
+                "ORDER BY target_date, entry_key",
                 (batch_id,),
             ).fetchall()
             return batch_id, tuple(self._entry(row) for row in rows)
@@ -248,6 +275,13 @@ class HistoryBatchCoordinator:
 
     _lock = Lock()
 
+    # How many date/segment entries one batch may hold.  Every entry in a batch
+    # is loaded at once, so this is the knob that trades peak memory against
+    # how often each touched symbol file is rewritten.  Fifty dates keeps a
+    # Select All backfill under roughly a gigabyte while still amortizing each
+    # rewrite over fifty trading days.
+    DEFAULT_BATCH_DATES = 50
+
     def __init__(
         self,
         config: Any,
@@ -259,7 +293,20 @@ class HistoryBatchCoordinator:
         self.pipeline = PipelineManifest(self.base_path)
         self.journal = HistoryBatchJournal(self.pipeline.database_path)
         self.telemetry = telemetry or PipelineTelemetry()
+        self.batch_dates = self._resolve_batch_dates(config)
         self._action_windows: dict[tuple[str, str], HistoryActionWindow] = {}
+
+    @classmethod
+    def _resolve_batch_dates(cls, config: Any) -> int:
+        settings = getattr(config, "download_settings", None)
+        try:
+            configured = int(
+                getattr(settings, "history_batch_dates", None)
+                or cls.DEFAULT_BATCH_DATES
+            )
+        except (TypeError, ValueError):
+            return cls.DEFAULT_BATCH_DATES
+        return max(1, configured)
 
     @staticmethod
     def _entry_key(exchange: str, segment: str, target_date: date) -> str:
@@ -329,6 +376,26 @@ class HistoryBatchCoordinator:
             self._action_windows[key] for key in sorted(self._action_windows)
         )
 
+    @staticmethod
+    def _held_back_dates(
+        result: HistoryBatchResult,
+    ) -> dict[tuple[str, str, date], str]:
+        """Map each date a failed symbol held back to why it was held back."""
+
+        held_back: dict[tuple[str, str, date], list[str]] = {}
+        for failure in result.failures:
+            for identity in failure.entries:
+                held_back.setdefault(identity, []).append(
+                    f"{failure.path}: {failure.error}"
+                )
+        summaries: dict[tuple[str, str, date], str] = {}
+        for identity, reasons in held_back.items():
+            summary = "; ".join(reasons[:3])
+            if len(reasons) > 3:
+                summary += f"; and {len(reasons) - 3} more symbols"
+            summaries[identity] = f"Symbol history not published -- {summary}"
+        return summaries
+
     def finalize(self) -> tuple[HistoryBatchOutcome, ...]:
         with self._lock:
             return self._finalize_locked()
@@ -336,7 +403,7 @@ class HistoryBatchCoordinator:
     def _finalize_locked(self) -> tuple[HistoryBatchOutcome, ...]:
         outcomes: list[HistoryBatchOutcome] = []
         while True:
-            prepared = self.journal.prepare()
+            prepared = self.journal.prepare(self.batch_dates)
             if prepared is None:
                 return tuple(outcomes)
             batch_id, entries = prepared
@@ -368,23 +435,39 @@ class HistoryBatchCoordinator:
                         batch_id, path
                     ),
                 )
-                updates: list[StageUpdate] = [
-                    (
-                        entry.exchange,
-                        entry.segment,
-                        entry.target_date,
-                        "symbols",
-                        "complete",
-                        {
-                            "batch_id": batch_id,
-                            "symbols": result.symbols,
-                            "history_reads": result.history_reads,
-                            "history_writes": result.history_writes,
-                        },
+                held_back = self._held_back_dates(result)
+                updates: list[StageUpdate] = []
+                for entry in entries:
+                    identity = (
+                        entry.exchange, entry.segment, entry.target_date
                     )
-                    for entry in entries
-                ]
+                    if identity in held_back:
+                        updates.append((
+                            *identity,
+                            "symbols",
+                            "failed",
+                            {
+                                "batch_id": batch_id,
+                                "error": held_back[identity],
+                            },
+                        ))
+                    else:
+                        updates.append((
+                            *identity,
+                            "symbols",
+                            "complete",
+                            {
+                                "batch_id": batch_id,
+                                "symbols": result.symbols,
+                                "history_reads": result.history_reads,
+                                "history_writes": result.history_writes,
+                            },
+                        ))
                 self.pipeline.mark_many(updates)
+                # The batch is closed either way. Every date a failed symbol
+                # held back is now marked failed, so it returns through the
+                # ordinary repair path with a fresh download instead of
+                # blocking the batches queued behind it.
                 self.journal.finish(batch_id)
             except Exception as error:
                 try:
@@ -412,7 +495,8 @@ class HistoryBatchCoordinator:
             self.telemetry.record(
                 "history_batch_finished",
                 batch_id=batch_id,
-                outcome="success",
+                outcome="partial" if result.failures else "success",
+                failed_symbols=len(result.failures),
                 entries=result.entries,
                 rows=result.rows,
                 symbols=result.symbols,

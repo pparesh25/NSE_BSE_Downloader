@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 from threading import Lock
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
@@ -24,6 +24,13 @@ from .state_store import (
     quarantine_copy,
     validate_corporate_ledger,
 )
+
+
+# Per-symbol failures are isolated so one unreadable history cannot hold back
+# a whole backfill.  Past this many, the store itself is the problem -- a full
+# disk fails every symbol -- and failing fast beats writing thousands of
+# identical error records.
+MAX_ISOLATED_SYMBOL_FAILURES = 100
 
 
 class HistoryCorruptionError(StateStoreError):
@@ -53,6 +60,20 @@ class HistoryBatchItem:
 
 
 @dataclass(frozen=True)
+class HistorySymbolFailure:
+    """One symbol file that could not be published, and what it holds back.
+
+    ``entries`` names every ``(exchange, segment, date)`` whose rows were in
+    that file, so the caller can fail exactly those dates for repair and
+    still publish the rest of the batch.
+    """
+
+    path: str
+    error: str
+    entries: tuple[tuple[str, str, date], ...]
+
+
+@dataclass(frozen=True)
 class HistoryBatchResult:
     """Observable I/O outcome for one symbol-history batch."""
 
@@ -61,6 +82,68 @@ class HistoryBatchResult:
     symbols: int
     history_reads: int
     history_writes: int
+    failures: tuple[HistorySymbolFailure, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ActionIndex:
+    """Applied corporate actions, indexed so most symbols skip the replay.
+
+    Replaying actions is the most expensive step in a batch and applies to
+    almost no symbols, so the membership sets exist purely to answer "can any
+    audited action reach this symbol?" before any per-row work starts.
+    """
+
+    records: tuple[dict, ...]
+    symbols: frozenset[tuple[str, str]]
+    identifiers: frozenset[tuple[str, str]]
+
+    @classmethod
+    def build(cls, records: List[dict]) -> "_ActionIndex":
+        symbols: set[tuple[str, str]] = set()
+        identifiers: set[tuple[str, str]] = set()
+        for record in records:
+            exchange = str(record.get("exchange", "")).strip().upper()
+            symbol = str(record.get("symbol", "")).strip().upper()
+            if symbol:
+                symbols.add((exchange, symbol))
+            stable_id = str(record.get("stable_id", "")).strip().upper()
+            if stable_id:
+                identifiers.add((exchange, stable_id))
+        return cls(tuple(records), frozenset(symbols), frozenset(identifiers))
+
+    def touches(
+        self,
+        exchange: str,
+        symbols: Iterable[str],
+        identifiers: Iterable[str],
+    ) -> bool:
+        """Mirror the two match rules in ``_apply_recorded_actions``."""
+
+        if not self.records:
+            return False
+        if any((exchange, symbol) in self.symbols for symbol in symbols):
+            return True
+        return any(
+            (exchange, identifier) in self.identifiers
+            for identifier in identifiers
+        )
+
+
+@dataclass(frozen=True)
+class _BatchPlan:
+    """Where every batched row is published, resolved before any file I/O.
+
+    ``contributions`` maps a final symbol file to the ``(batch index, row
+    position, symbol)`` triples that belong in it, ``merge_sources`` records
+    the files a rename must fold in first, and ``retired`` holds the files a
+    rename leaves behind.
+    """
+
+    contributions: dict[Path, list[tuple[int, int, str]]]
+    merge_sources: dict[Path, list[Path]]
+    retired: set[Path]
+    rows_seen: int
 
 
 class SymbolHistoryStore:
@@ -342,7 +425,14 @@ class SymbolHistoryStore:
         )
 
     @staticmethod
-    def _stable_keys(row: pd.Series) -> List[str]:
+    def _identifier(value: Any) -> str:
+        """Normalize one raw identifier, rejecting pandas' null spellings."""
+
+        text = str(value).strip().upper()
+        return "" if text in {"", "NAN", "<NA>"} else text
+
+    @classmethod
+    def _stable_keys_from(cls, isin: Any, security_id: Any) -> List[str]:
         """Return every stable identifier available for the security.
 
         BSE corporate actions are keyed by security code while its price files
@@ -351,13 +441,19 @@ class SymbolHistoryStore:
         """
 
         keys = []
-        isin = str(row.get("ISIN", "")).strip().upper()
-        if isin and isin not in {"NAN", "<NA>"}:
-            keys.append(f"ISIN:{isin}")
-        security_id = str(row.get("SECURITY_ID", "")).strip().upper()
-        if security_id and security_id not in {"NAN", "<NA>"}:
-            keys.append(f"ID:{security_id}")
+        value = cls._identifier(isin)
+        if value:
+            keys.append(f"ISIN:{value}")
+        value = cls._identifier(security_id)
+        if value:
+            keys.append(f"ID:{value}")
         return keys
+
+    @classmethod
+    def _stable_keys(cls, row: pd.Series) -> List[str]:
+        return cls._stable_keys_from(
+            row.get("ISIN", ""), row.get("SECURITY_ID", "")
+        )
 
     def _read_applied_actions(self) -> List[dict]:
         ledger_path = self.state_path / "corporate_actions.json"
@@ -379,7 +475,7 @@ class SymbolHistoryStore:
         exchange: str,
         symbol: str,
         row: pd.Series,
-        action_records: List[dict],
+        action_records: Sequence[dict],
     ) -> pd.Series:
         """Reapply audited actions when a historical raw row is re-downloaded.
 
@@ -629,6 +725,185 @@ class SymbolHistoryStore:
             CorporateActionEngine(self.base_path).reconcile_pending(exchange)
         return written
 
+    @staticmethod
+    def _identity_column(frame: pd.DataFrame, name: str) -> List[Any]:
+        """Return one identity column as plain values, or blanks if absent."""
+
+        if name in frame.columns:
+            return frame[name].tolist()
+        return [""] * len(frame)
+
+    @staticmethod
+    def _canonical_order(frame: pd.DataFrame) -> Sequence[int]:
+        """Return row positions in stable date order.
+
+        Every canonical daily frame carries one validated date, so the common
+        case needs no sort at all; the sort only exists for the mixed-date
+        frames a rebuild or a test can hand over.
+        """
+
+        parsed = pd.to_datetime(
+            frame["DATE"].astype(str), format="%Y%m%d", errors="coerce"
+        ).reset_index(drop=True)
+        if parsed.nunique(dropna=False) <= 1:
+            return range(len(frame))
+        return list(parsed.sort_values(kind="stable").index)
+
+    def _plan_batch(
+        self,
+        registry: dict[str, Any],
+        batch: List[HistoryBatchItem],
+    ) -> _BatchPlan:
+        """Resolve every row's destination without reading one history file.
+
+        Renames make the registry order-dependent, so this stays a sequential
+        walk in canonical order.  It reads only the three identity columns and
+        keeps positions rather than rows, which is what lets a batch span many
+        dates while the publish pass holds one symbol at a time.
+        """
+
+        contributions: dict[Path, list[tuple[int, int, str]]] = {}
+        merge_sources: dict[Path, list[Path]] = {}
+        retired: set[Path] = set()
+        interned: dict[str, str] = {}
+        rows_seen = 0
+
+        for index, item in enumerate(batch):
+            exchange = item.exchange.upper()
+            exchange_registry = registry["exchanges"].setdefault(exchange, {})
+            frame = item.rows
+            symbols = frame["SYMBOL"].tolist()
+            isins = self._identity_column(frame, "ISIN")
+            security_ids = self._identity_column(frame, "SECURITY_ID")
+
+            for position in self._canonical_order(frame):
+                symbol = str(symbols[position]).strip().upper()
+                if not symbol:
+                    continue
+                rows_seen += 1
+                symbol = interned.setdefault(symbol, symbol)
+                stable_keys = self._stable_keys_from(
+                    isins[position], security_ids[position]
+                )
+                self._ensure_symbol_filename(
+                    registry, exchange, symbol, stable_keys
+                )
+                new_path = self._path_from_registry(registry, exchange, symbol)
+
+                for stable_key in stable_keys:
+                    old_symbol = exchange_registry.get(stable_key)
+                    if old_symbol and old_symbol != symbol:
+                        old_path = self._path_from_registry(
+                            registry, exchange, old_symbol
+                        )
+                        if old_path != new_path:
+                            # The retired file's rows and its own pending
+                            # merges lead, exactly as an incremental rename
+                            # would have folded them in.
+                            merge_sources[new_path] = [
+                                *merge_sources.pop(old_path, []),
+                                old_path,
+                                *merge_sources.get(new_path, []),
+                            ]
+                            moved = contributions.pop(old_path, [])
+                            if moved:
+                                contributions[new_path] = [
+                                    *moved,
+                                    *contributions.get(new_path, []),
+                                ]
+                            retired.add(old_path)
+                            retired.discard(new_path)
+                            registry["files"].setdefault(exchange, {}).pop(
+                                old_symbol.upper(), None
+                            )
+                    exchange_registry[stable_key] = symbol
+
+                contributions.setdefault(new_path, []).append(
+                    (index, position, symbol)
+                )
+
+        return _BatchPlan(contributions, merge_sources, retired, rows_seen)
+
+    @staticmethod
+    def _contributing_entries(
+        batch: List[HistoryBatchItem],
+        pairs: Sequence[tuple[int, int, str]],
+    ) -> tuple[tuple[str, str, date], ...]:
+        """Name every date/segment whose rows were bound for one symbol file."""
+
+        return tuple(dict.fromkeys(
+            (
+                batch[index].exchange.upper(),
+                batch[index].segment.upper(),
+                batch[index].target_date,
+            )
+            for index, _position, _symbol in pairs
+        ))
+
+    def _batch_incoming(
+        self,
+        batch: List[HistoryBatchItem],
+        pairs: Sequence[tuple[int, int, str]],
+        actions: _ActionIndex,
+    ) -> Optional[pd.DataFrame]:
+        """Materialize one symbol's batched rows in canonical order."""
+
+        if not pairs:
+            return None
+        frames: List[pd.DataFrame] = []
+        current = pairs[0][0]
+        positions: List[int] = []
+        for index, position, _symbol in pairs:
+            if index != current:
+                frames.append(batch[current].rows.take(positions))
+                current, positions = index, []
+            positions.append(position)
+        frames.append(batch[current].rows.take(positions))
+        gathered = (
+            frames[0].reset_index(drop=True)
+            if len(frames) == 1
+            else pd.concat(frames, ignore_index=True)
+        )
+        return self._history_rows(
+            self._replay_actions(batch, pairs, gathered, actions)
+        )
+
+    def _replay_actions(
+        self,
+        batch: List[HistoryBatchItem],
+        pairs: Sequence[tuple[int, int, str]],
+        gathered: pd.DataFrame,
+        actions: _ActionIndex,
+    ) -> pd.DataFrame:
+        """Re-apply audited actions to re-downloaded rows.
+
+        Skipped whole-symbol unless an audited action actually names this
+        symbol or one of its identifiers, because the replay is per row and
+        reaches almost nothing.
+        """
+
+        exchange = batch[pairs[0][0]].exchange.upper()
+        identifiers = {
+            self._identifier(value)
+            for column in ("ISIN", "SECURITY_ID")
+            if column in gathered.columns
+            for value in gathered[column].unique()
+        }
+        identifiers.discard("")
+        if not actions.touches(
+            exchange, {symbol for _i, _p, symbol in pairs}, identifiers
+        ):
+            return gathered
+        return pd.DataFrame([
+            self._apply_recorded_actions(
+                batch[index].exchange.upper(),
+                symbol,
+                gathered.iloc[offset],
+                actions.records,
+            )
+            for offset, (index, _position, symbol) in enumerate(pairs)
+        ])
+
     def upsert_batch(
         self,
         items: Iterable[HistoryBatchItem],
@@ -639,12 +914,28 @@ class SymbolHistoryStore:
     ) -> HistoryBatchResult:
         """Merge many dates with at most one read/write per final symbol.
 
+        Destinations are planned first, then symbols are published one at a
+        time, so peak memory follows the batch's own row count instead of the
+        combined depth of every history the batch touches.
+
         ``completed_paths`` and ``on_symbol_written`` form the recovery hook
         used by the run journal. Replaying an uncheckpointed write is safe
         because date deduplication is deterministic.
+
+        A symbol that cannot be published is reported in
+        ``HistoryBatchResult.failures`` rather than aborting the batch, so one
+        unreadable history no longer holds back every other symbol.  Failures
+        that are not per-symbol still raise: a renamed symbol whose merge
+        cannot complete, because its rows live in a file this batch would then
+        delete, and any run that exceeds
+        ``MAX_ISOLATED_SYMBOL_FAILURES``, because that many failures is a
+        problem with the store rather than with the symbols.
         """
 
-        batch = [item for item in items if item.rows is not None and not item.rows.empty]
+        batch = [
+            item for item in items
+            if item.rows is not None and not item.rows.empty
+        ]
         if not batch:
             return HistoryBatchResult(0, 0, 0, 0, 0)
 
@@ -665,9 +956,9 @@ class SymbolHistoryStore:
             ).recover_incomplete_transactions()
 
         completed = set(completed_paths)
-        rows_seen = 0
         history_reads = 0
         history_writes = 0
+        failures: List[HistorySymbolFailure] = []
         with self._lock:
             if not snapshots_saved:
                 for item in batch:
@@ -679,105 +970,59 @@ class SymbolHistoryStore:
                     )
 
             registry = self._read_registry()
-            action_records = self._read_applied_actions()
-            history_cache: dict[Path, pd.DataFrame] = {}
-            incoming_cache: dict[Path, list[pd.Series]] = {}
-            old_paths: set[Path] = set()
+            actions = _ActionIndex.build(self._read_applied_actions())
+            plan = self._plan_batch(registry, batch)
 
-            def load(path: Path) -> pd.DataFrame:
+            def read_history(path: Path) -> pd.DataFrame:
                 nonlocal history_reads
-                if path not in history_cache:
-                    history_cache[path] = self._read_history(path)
-                    history_reads += int(path.exists())
-                return history_cache[path]
-
-            for item in batch:
-                exchange = item.exchange.upper()
-                exchange_registry = registry["exchanges"].setdefault(
-                    exchange, {}
-                )
-                ordered_rows = item.rows.copy()
-                ordered_rows["_batch_order"] = range(len(ordered_rows))
-                ordered_rows["_batch_date"] = pd.to_datetime(
-                    ordered_rows["DATE"].astype(str),
-                    format="%Y%m%d",
-                    errors="coerce",
-                )
-                ordered_rows = ordered_rows.sort_values(
-                    ["_batch_date", "_batch_order"], kind="stable"
-                ).drop(columns=["_batch_date", "_batch_order"])
-
-                for _, row in ordered_rows.iterrows():
-                    symbol = str(row.get("SYMBOL", "")).strip().upper()
-                    if not symbol:
-                        continue
-                    rows_seen += 1
-                    stable_keys = self._stable_keys(row)
-                    self._ensure_symbol_filename(
-                        registry, exchange, symbol, stable_keys
-                    )
-                    new_path = self._path_from_registry(
-                        registry, exchange, symbol
-                    )
-                    for stable_key in stable_keys:
-                        old_symbol = exchange_registry.get(stable_key)
-                        if old_symbol and old_symbol != symbol:
-                            old_path = self._path_from_registry(
-                                registry, exchange, old_symbol
-                            )
-                            if old_path != new_path:
-                                combined = pd.concat(
-                                    [load(old_path), load(new_path)],
-                                    ignore_index=True,
-                                )
-                                history_cache[new_path] = combined
-                                old_incoming = incoming_cache.pop(
-                                    old_path, []
-                                )
-                                if old_incoming:
-                                    incoming_cache[new_path] = [
-                                        *old_incoming,
-                                        *incoming_cache.get(new_path, []),
-                                    ]
-                                old_paths.add(old_path)
-                                old_paths.discard(new_path)
-                                registry["files"].setdefault(
-                                    exchange, {}
-                                ).pop(old_symbol.upper(), None)
-                        exchange_registry[stable_key] = symbol
-
-                    adjusted_row = self._apply_recorded_actions(
-                        exchange, symbol, row, action_records
-                    )
-                    incoming_cache.setdefault(new_path, []).append(
-                        adjusted_row
-                    )
-
-            for path, incoming_rows in incoming_cache.items():
-                incoming = self._history_rows(pd.DataFrame(incoming_rows))
-                existing = load(path)
-                history_cache[path] = (
-                    incoming
-                    if existing.empty
-                    else pd.concat([existing, incoming], ignore_index=True)
-                )
+                history_reads += int(path.exists())
+                return self._read_history(path)
 
             final_paths = (
-                set(history_cache) | set(incoming_cache)
-            ).difference(old_paths)
+                set(plan.contributions) | set(plan.merge_sources)
+            ).difference(plan.retired)
             for path in sorted(final_paths, key=str):
                 relative = str(path.relative_to(self.base_path))
-                if relative not in completed:
-                    history = history_cache[path]
+                if relative in completed:
+                    continue
+                sources = plan.merge_sources.get(path, ())
+                pairs = plan.contributions.get(path, ())
+                try:
+                    frames = [read_history(source) for source in sources]
+                    frames.append(read_history(path))
+                    existing = (
+                        frames[0] if len(frames) == 1
+                        else pd.concat(frames, ignore_index=True)
+                    )
+                    incoming = self._batch_incoming(batch, pairs, actions)
+                    if incoming is None:
+                        history = existing
+                    elif existing.empty:
+                        history = incoming
+                    else:
+                        history = pd.concat(
+                            [existing, incoming], ignore_index=True
+                        )
                     if not path.exists() and len(history) == 1:
                         self._write_new_single_history(path, history)
                     else:
                         self._write_history(path, history)
-                    history_writes += 1
-                    if on_symbol_written is not None:
-                        on_symbol_written(relative)
+                except Exception as error:
+                    if sources or len(failures) >= MAX_ISOLATED_SYMBOL_FAILURES:
+                        raise
+                    failures.append(HistorySymbolFailure(
+                        relative,
+                        f"{type(error).__name__}: {error}",
+                        self._contributing_entries(batch, pairs),
+                    ))
+                    continue
+                history_writes += 1
+                if on_symbol_written is not None:
+                    on_symbol_written(relative)
 
-            for old_path in sorted(old_paths.difference(final_paths), key=str):
+            for old_path in sorted(
+                plan.retired.difference(final_paths), key=str
+            ):
                 old_path.unlink(missing_ok=True)
             self._write_registry(registry)
 
@@ -787,10 +1032,13 @@ class SymbolHistoryStore:
             CorporateActionEngine(self.base_path).reconcile_pending()
         return HistoryBatchResult(
             entries=len(batch),
-            rows=rows_seen,
-            symbols=len(final_paths),
+            rows=plan.rows_seen,
+            # Symbol files this batch leaves published, which is not the same
+            # as the files it planned once a failure can be isolated.
+            symbols=len(final_paths) - len(failures),
             history_reads=history_reads,
             history_writes=history_writes,
+            failures=tuple(failures),
         )
 
     def rewrite_symbol(

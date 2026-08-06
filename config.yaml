@@ -50,6 +50,13 @@ download_settings:
   persistence_workers: 1
   stage_queue_size: 2
   prepared_cache_dates: 4
+  # How many date/segment entries one symbol-history batch may hold.  A batch
+  # loads all of its entries at once and rewrites each touched symbol file
+  # once, so this trades peak memory against write volume: lower is smaller
+  # and slower, higher is faster and larger.  A multi-year backfill needs this
+  # bounded -- publishing every collected date in one batch is what used to
+  # exhaust memory at the very end of a long run.
+  history_batch_dates: 50
 
 # Download options for data processing
 download_options:

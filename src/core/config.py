@@ -38,6 +38,7 @@ class DownloadSettings:
     persistence_workers: int = 1
     stage_queue_size: int = 2
     prepared_cache_dates: int = 4
+    history_batch_dates: int = 50
 
 
 @dataclass
@@ -179,6 +180,7 @@ class Config:
             persistence_workers=download_data.get('persistence_workers', 1),
             stage_queue_size=download_data.get('stage_queue_size', 2),
             prepared_cache_dates=download_data.get('prepared_cache_dates', 4),
+            history_batch_dates=download_data.get('history_batch_dates', 50),
         )
 
         date_data = self._config_data.get('date_settings', {})

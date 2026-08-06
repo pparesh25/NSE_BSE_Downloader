@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 import re
 from threading import Lock
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 
 import aiohttp
 import pandas as pd
@@ -18,6 +18,7 @@ from .symbol_history import SymbolHistoryStore
 from .state_store import (
     StateStoreError,
     VersionedJSONStore,
+    corporate_action_key,
     default_corporate_ledger,
     file_sha256,
     migrate_corporate_ledger,
@@ -26,29 +27,138 @@ from .state_store import (
 )
 
 
-SPLIT_PATTERN = re.compile(r"(\d+\.?\d*)[\/\- a-z\.]+(\d+\.?\d*)", re.I)
-BONUS_PATTERN = re.compile(r"(\d+)\s*:\s*(\d+)")
+# Free-text dates have never appeared in either exchange's feed (0 of 7,996
+# distinct descriptions sampled from 2006-2026), but a single stray one would
+# be read as a ratio, so they are removed before any number is trusted.
+DATE_PATTERN = re.compile(
+    r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b"
+    r"|\b\d{1,2}[\s-]*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    r"[\s,-]*\d{2,4}\b"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,-]*"
+    r"\d{1,2}[\s,-]*\d{2,4}\b",
+    re.I,
+)
+BONUS_KEYWORD = re.compile(r"\bbonus\b", re.I)
+# Bonus debentures, preference shares, NCRPS and DVR units are not equity, so
+# the ratio beside them must never reach an equity price history.
+NON_EQUITY_BONUS = re.compile(r"\b(deb|pref|ncrps|dvr)", re.I)
+BONUS_PATTERN = re.compile(r"(?<![\d.])(\d{1,6})\s*:\s*(\d{1,6})(?![\d.])")
+SPLIT_KEYWORD = re.compile(r"consolidat|sub[\s-]?division|split|splt", re.I)
+# "<face value> ... to ... <face value>", anchored after the keyword.  The word
+# "from" and the currency token are both optional because the feeds omit them
+# ("Fv Split Rs.10 To Re.1", "Face Value Split From 10/- To Face Value 2/-").
+SPLIT_PATTERN = re.compile(
+    r"(?<!\d)(?<!\d\.)(\d{1,6}(?:\.\d+)?)(?!\d)"
+    r"[^\d]{0,20}?\bto\b[^\d]{0,20}?"
+    r"(?<!\d)(?<!\d\.)(\d{1,6}(?:\.\d+)?)(?!\d)",
+    re.I,
+)
+MAX_FACE_VALUE = 100000.0
+
+
+@dataclass(frozen=True)
+class ParsedAction:
+    """One capital adjustment read out of an announcement."""
+
+    action_type: str
+    factor: float
+
+
+@dataclass(frozen=True)
+class ParsedDescription:
+    """Every adjustment in one description, or why none could be trusted."""
+
+    actions: Tuple[ParsedAction, ...] = ()
+    review: str = ""
+
+
+def _parse_bonus(text: str) -> Tuple[Optional[ParsedAction], str]:
+    keyword = BONUS_KEYWORD.search(text)
+    if keyword is None:
+        return None, ""
+    if NON_EQUITY_BONUS.search(text):
+        return None, ""
+    ratio = BONUS_PATTERN.search(text, keyword.end())
+    if ratio is None:
+        return None, "bonus without a readable ratio"
+    numerator, denominator = float(ratio.group(1)), float(ratio.group(2))
+    if numerator <= 0 or denominator <= 0:
+        return None, "bonus ratio is not usable"
+    return ParsedAction("bonus", 1 + numerator / denominator), ""
+
+
+def _parse_split(text: str) -> Tuple[Optional[ParsedAction], str]:
+    keyword = SPLIT_KEYWORD.search(text)
+    if keyword is None:
+        return None, ""
+    kind = (
+        "consolidation"
+        if keyword.group(0).lower().startswith("consolidat")
+        else "split"
+    )
+    # Search only after the keyword.  Descriptions routinely carry an unrelated
+    # amount first ("Interim Dividend Rs 2/- Per Share And Face Value Split
+    # From Rs 10/- To Rs 2/-"), which the old whole-string search read as the
+    # face value and turned into a factor of 0.2 instead of 5.
+    pairs = {
+        (match.group(1), match.group(2))
+        for match in SPLIT_PATTERN.finditer(text, keyword.end())
+    }
+    if not pairs:
+        return None, f"{kind} without a readable face-value change"
+    if len(pairs) > 1:
+        return None, f"{kind} names more than one face-value change"
+    before, after = (float(value) for value in pairs.pop())
+    if not 0 < before <= MAX_FACE_VALUE or not 0 < after <= MAX_FACE_VALUE:
+        return None, f"{kind} face values are out of range"
+    factor = before / after
+    if kind == "split" and factor <= 1:
+        return None, "split does not reduce the face value"
+    if kind == "consolidation" and factor >= 1:
+        return None, "consolidation does not raise the face value"
+    return ParsedAction(kind, factor), ""
+
+
+def parse_actions(description: str) -> ParsedDescription:
+    """Read every adjustment in one announcement, or none at all.
+
+    A single announcement often carries both a bonus and a face-value split
+    ("Bonus 1:1 And Face Value Split From Rs.10/- To Re.1/-", whose true factor
+    is 20).  Returning a list lets the engine compose them; returning the first
+    one silently discarded the other.
+    """
+
+    text = DATE_PATTERN.sub(" ", str(description).lower())
+    actions: List[ParsedAction] = []
+    reasons: List[str] = []
+    for reader in (_parse_bonus, _parse_split):
+        action, reason = reader(text)
+        if action is not None:
+            actions.append(action)
+        elif reason:
+            reasons.append(reason)
+    return ParsedDescription(tuple(actions), "; ".join(reasons))
+
+
+def _single_factor(description: str, wanted: Iterable[str]) -> Optional[float]:
+    wanted = set(wanted)
+    factors = [
+        action.factor for action in parse_actions(description).actions
+        if action.action_type in wanted
+    ]
+    return factors[0] if len(factors) == 1 else None
 
 
 def parse_split_factor(subject: str) -> Optional[float]:
-    match = SPLIT_PATTERN.search(str(subject).lower())
-    if match is None:
-        return None
-    try:
-        return float(match.group(1)) / float(match.group(2))
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
+    """Return the face-value factor alone, for callers that want just that."""
+
+    return _single_factor(subject, ("split", "consolidation"))
 
 
 def parse_bonus_factor(subject: str) -> Optional[float]:
-    match = BONUS_PATTERN.search(str(subject).lower())
-    if match is None:
-        return None
-    try:
-        denominator = int(match.group(2))
-        return 1 + int(match.group(1)) / denominator if denominator else None
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
+    """Return the bonus factor alone, for callers that want just that."""
+
+    return _single_factor(subject, ("bonus",))
 
 
 @dataclass(frozen=True)
@@ -64,36 +174,21 @@ class CorporateAction:
 
     @property
     def key(self) -> str:
-        raw = "|".join([
-            self.exchange.upper(), self.stable_id.upper(), self.ex_date.isoformat(),
-            self.action_type.lower(), f"{self.factor:.12g}",
-        ])
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _action_type_and_factor(description: str):
-    subject = str(description).strip()
-    lowered = subject.lower()
-    if "bonus" in lowered:
-        if any(term in lowered for term in ("deb", "pref", "ncrps", "dvr")):
-            return None, None
-        return "bonus", parse_bonus_factor(subject)
-    if any(term in lowered for term in (
-        "split", "splt", "sub-division", "sub division", "consolidation"
-    )):
-        kind = "consolidation" if "consolidation" in lowered else "split"
-        return kind, parse_split_factor(subject)
-    return None, None
+        return corporate_action_key(
+            self.exchange, self.stable_id, self.ex_date.isoformat(),
+            self.action_type,
+        )
 
 
 def normalize_nse_actions(
     records: Iterable[dict], add_sme_suffix: bool = True
 ) -> List[CorporateAction]:
-    result = []
+    result: List[CorporateAction] = []
     for record in records:
-        action_type, factor = _action_type_and_factor(record.get("subject", ""))
+        description = str(record.get("subject", "")).strip()
+        parsed = parse_actions(description)
         ex_date = pd.to_datetime(record.get("exDate"), errors="coerce", dayfirst=True)
-        if not action_type or not factor or pd.isna(ex_date) or factor <= 0:
+        if not parsed.actions or pd.isna(ex_date):
             continue
         series = str(record.get("series", "")).strip().upper()
         if series not in {"EQ", "BE", "BZ", "SM", "ST"}:
@@ -102,31 +197,37 @@ def normalize_nse_actions(
         if add_sme_suffix and series in {"SM", "ST"}:
             symbol += "_SME"
         stable_id = str(record.get("isin") or symbol).strip().upper()
-        result.append(CorporateAction(
-            "NSE", symbol, stable_id, ex_date.date(), action_type, float(factor),
-            str(record.get("subject", "")).strip(), series,
-        ))
+        result.extend(
+            CorporateAction(
+                "NSE", symbol, stable_id, ex_date.date(), action.action_type,
+                float(action.factor), description, series,
+            )
+            for action in parsed.actions
+        )
     return result
 
 
 def normalize_bse_actions(frame: pd.DataFrame) -> List[CorporateAction]:
     frame = frame.copy()
     frame.columns = [str(column).strip() for column in frame.columns]
-    result = []
+    result: List[CorporateAction] = []
     for _, record in frame.iterrows():
         description = " ".join([
             str(record.get("Purpose", "")), str(record.get("Detail/Remarks", ""))
         ]).strip()
-        action_type, factor = _action_type_and_factor(description)
+        parsed = parse_actions(description)
         ex_date = pd.to_datetime(record.get("Ex Date"), errors="coerce", dayfirst=True)
-        if not action_type or not factor or pd.isna(ex_date) or factor <= 0:
+        if not parsed.actions or pd.isna(ex_date):
             continue
         symbol = str(record.get("Security Name", "")).strip().upper()
         stable_id = str(record.get("Security Code") or symbol).strip().upper()
-        result.append(CorporateAction(
-            "BSE", symbol, stable_id, ex_date.date(), action_type, float(factor),
-            description,
-        ))
+        result.extend(
+            CorporateAction(
+                "BSE", symbol, stable_id, ex_date.date(), action.action_type,
+                float(action.factor), description,
+            )
+            for action in parsed.actions
+        )
     return result
 
 
@@ -233,6 +334,26 @@ class CorporateActionEngine:
         self._ledger_state.write(ledger)
 
     @staticmethod
+    def _empty_summary() -> dict:
+        return {
+            "applied": 0,
+            "skipped": 0,
+            "deferred": 0,
+            "manual_review": 0,
+            "factor_conflicts": 0,
+            "recovered": 0,
+        }
+
+    @staticmethod
+    def _same_factor(recorded: Any, parsed: float) -> bool:
+        try:
+            return abs(float(recorded) - float(parsed)) <= 1e-9 * max(
+                1.0, abs(float(parsed))
+            )
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _ledger_record(
         action: CorporateAction, status: str, rows_adjusted: int, note: str = ""
     ) -> dict:
@@ -276,7 +397,7 @@ class CorporateActionEngine:
             self._action_from_record(record)
             for record in ledger["actions"].values()
             if record.get("status") in {
-                "symbol_not_found", "no_prior_history"
+                "symbol_not_found", "no_prior_history", "awaiting_ex_date"
             }
             and (
                 wanted_exchange is None
@@ -284,12 +405,9 @@ class CorporateActionEngine:
             )
         ]
         if not actions:
-            return {
-                "applied": 0,
-                "skipped": 0,
-                "manual_review": 0,
-                "recovered": recovered,
-            }
+            summary = self._empty_summary()
+            summary["recovered"] = recovered
+            return summary
         summary = self.apply(actions)
         summary["recovered"] += recovered
         return summary
@@ -441,23 +559,38 @@ class CorporateActionEngine:
         with self._lock:
             ledger = self._read_ledger()
             recovered = self._recover_transactions(ledger)
-            pending = [
-                action for action in actions
-                if ledger["actions"].get(action.key, {}).get("status") != "applied"
-            ]
+            summary = self._empty_summary()
+            summary["recovered"] = recovered
+            ledger_dirty = False
+
+            pending = []
+            for action in actions:
+                record = ledger["actions"].get(action.key)
+                if record is None or record.get("status") != "applied":
+                    pending.append(action)
+                    continue
+                # The announcement is already in the history.  If this run read
+                # a different factor from the same words, re-applying would
+                # divide the prices a second time, so report it instead.
+                if not self._same_factor(record.get("factor"), action.factor):
+                    record["note"] = (
+                        f"Applied with factor {float(record['factor']):.12g}; "
+                        f"this run reads {action.factor:.12g} from the same "
+                        "description. Rebuild this symbol to adopt the new "
+                        "reading."
+                    )
+                    record["updated_at"] = pd.Timestamp.now(
+                        tz="Asia/Kolkata"
+                    ).isoformat()
+                    ledger_dirty = True
+                    summary["factor_conflicts"] += 1
+
             groups: dict[tuple[str, str, date], list[CorporateAction]] = {}
             for action in pending:
                 groups.setdefault(
                     (action.exchange, action.stable_id, action.ex_date), []
                 ).append(action)
 
-            summary = {
-                "applied": 0,
-                "skipped": 0,
-                "manual_review": 0,
-                "recovered": recovered,
-            }
-            ledger_dirty = False
             for (_, _, ex_date), group in groups.items():
                 first = group[0]
                 symbol = self.histories.resolve_symbol(
@@ -486,6 +619,22 @@ class CorporateActionEngine:
                         )
                     ledger_dirty = True
                     summary["skipped"] += len(group)
+                    continue
+
+                if int((~mask).sum()) == 0:
+                    # Without a bar on or after the ex-date the continuity
+                    # check below cannot run, and an unchecked adjustment is
+                    # exactly how a misread factor reaches the history.  A
+                    # backfill bucket that stops the day before an ex-date hits
+                    # this every time, so wait for the next run instead.
+                    for action in group:
+                        ledger["actions"][action.key] = self._ledger_record(
+                            action, "awaiting_ex_date", 0,
+                            "No bar on or after the ex-date yet, so the "
+                            "continuity check cannot run",
+                        )
+                    ledger_dirty = True
+                    summary["deferred"] += len(group)
                     continue
 
                 combined_factor = 1.0

@@ -161,26 +161,120 @@ class VersionedJSONStore:
             os.close(descriptor)
 
 
-def default_corporate_ledger() -> dict[str, Any]:
-    """Return a new v2 corporate-action ledger document."""
+CORPORATE_ACTION_STATUSES = (
+    "applied",
+    "prepared",
+    "symbol_not_found",
+    "no_prior_history",
+    "awaiting_ex_date",
+    "manual_review",
+)
 
-    return {"version": 2, "actions": {}, "transactions": {}}
+
+def corporate_action_key(
+    exchange: str, stable_id: str, ex_date: str, action_type: str
+) -> str:
+    """Return the audit identity of one announcement.
+
+    The parsed factor is deliberately absent.  It is a *reading* of the
+    announcement, not part of what the announcement is, so including it would
+    make every parser correction look like a new, unapplied action and divide
+    an already-adjusted history a second time.
+    """
+
+    raw = "|".join([
+        exchange.upper(), stable_id.upper(), str(ex_date), action_type.lower(),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def default_corporate_ledger() -> dict[str, Any]:
+    """Return a new v3 corporate-action ledger document."""
+
+    return {"version": 3, "actions": {}, "transactions": {}}
+
+
+def _rekey_corporate_actions(
+    actions: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Re-derive every record's key without the factor, keeping the audit."""
+
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    mapping: dict[str, str] = {}
+    for old_key, record in actions.items():
+        if not isinstance(record, dict):
+            raise ValueError("invalid corporate-action ledger record")
+        try:
+            new_key = corporate_action_key(
+                str(record["exchange"]),
+                str(record["stable_id"]),
+                str(record["ex_date"]),
+                str(record["action_type"]),
+            )
+        except KeyError as error:
+            raise ValueError(
+                f"corporate-action record is missing {error}"
+            ) from error
+        mapping[old_key] = new_key
+        grouped.setdefault(new_key, []).append((old_key, record))
+
+    rekeyed: dict[str, Any] = {}
+    for new_key, candidates in grouped.items():
+        # Two v2 records can only collide here if the same announcement was
+        # once read with two different factors.  Keep the one that reached the
+        # history, so migration never demotes an applied adjustment.
+        chosen = max(candidates, key=lambda item: (
+            item[1].get("status") == "applied",
+            str(item[1].get("updated_at", "")),
+            item[0],
+        ))[1]
+        rekeyed[new_key] = deepcopy(chosen)
+    return rekeyed, mapping
 
 
 def migrate_corporate_ledger(data: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade the v1 action-only ledger without losing audit records."""
+    """Upgrade older ledgers without losing audit records."""
 
     if data.get("version") == 1 and isinstance(data.get("actions"), dict):
-        return {
+        data = {
             "version": 2,
             "actions": deepcopy(data["actions"]),
             "transactions": {},
         }
-    return data
+    if data.get("version") != 2 or not isinstance(data.get("actions"), dict):
+        return data
+
+    transactions = data.get("transactions")
+    if not isinstance(transactions, dict):
+        return data
+    actions, mapping = _rekey_corporate_actions(data["actions"])
+    migrated_transactions: dict[str, Any] = {}
+    for transaction_id, transaction in transactions.items():
+        if not isinstance(transaction, dict):
+            raise ValueError("invalid corporate-action transaction record")
+        transaction = deepcopy(transaction)
+        final_records = transaction.get("final_action_records")
+        if isinstance(final_records, dict):
+            rekeyed, _ = _rekey_corporate_actions(final_records)
+            transaction["final_action_records"] = rekeyed
+            transaction["action_keys"] = sorted(rekeyed)
+        elif isinstance(transaction.get("action_keys"), list):
+            transaction["action_keys"] = sorted({
+                mapping.get(str(key), str(key))
+                for key in transaction["action_keys"]
+            })
+        # The transaction id itself is left alone: a prepared transaction's
+        # staged CSV is named after it, and renaming would orphan that file.
+        migrated_transactions[transaction_id] = transaction
+    return {
+        "version": 3,
+        "actions": actions,
+        "transactions": migrated_transactions,
+    }
 
 
 def validate_corporate_ledger(data: dict[str, Any]) -> None:
-    if data.get("version") != 2:
+    if data.get("version") != 3:
         raise ValueError("unsupported corporate-action ledger version")
     actions = data.get("actions")
     transactions = data.get("transactions")
@@ -189,13 +283,7 @@ def validate_corporate_ledger(data: dict[str, Any]) -> None:
     for key, record in actions.items():
         if not isinstance(key, str) or not isinstance(record, dict):
             raise ValueError("invalid corporate-action ledger record")
-        if record.get("status") not in {
-            "applied",
-            "prepared",
-            "symbol_not_found",
-            "no_prior_history",
-            "manual_review",
-        }:
+        if record.get("status") not in CORPORATE_ACTION_STATUSES:
             raise ValueError("corporate-action record has invalid status")
         for field in (
             "exchange", "symbol", "stable_id", "ex_date", "action_type"

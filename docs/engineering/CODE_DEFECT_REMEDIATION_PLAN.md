@@ -829,7 +829,7 @@ this machine it is version 1 and empty, so nothing is retired.
 
 ## Phase 3 — Stop writing wrong data
 
-### 3.1 Corporate-action parser — effort M
+### 3.1 Corporate-action parser — effort M — **done 2026-08-06**
 
 `SPLIT_PATTERN` (`corporate_actions.py:29`) is an unanchored `search`. Executed against
 the real function during review:
@@ -851,14 +851,136 @@ the narrow band (a true 2.0 parsed as 1.5 gives 0.75) and any run where the ex-d
 is not yet downloaded, so the guard is skipped. The dominant failure mode is therefore a
 **stalled `manual_review` entry with no GUI workflow to resolve it**.
 
-- [ ] Strip date-shaped substrings before matching
-- [ ] Require `from X to Y` ordering and face-value tokens
-- [ ] Return a *list* of actions per description
-- [ ] Route more than two surviving numbers to `manual_review`
-- [ ] Drop `factor` from `CorporateAction.key` (`corporate_actions.py:66-71`) — it
-      currently hashes the parsed factor, so any future parser fix re-keys historical
-      announcements and re-divides already-adjusted files
-- [ ] Build a ~40-case unit table from real NSE `subject` and BSE `Purpose` strings
+#### What the exchanges actually publish, 2006–2026
+
+Both feeds were pulled in full rather than reasoned about: 35,091 NSE `subject` records
+(2010–2026) and 33,278 BSE `Purpose` rows (2006–2026), **7,996 distinct descriptions**.
+That corrects two of the six planned bullets and confirms the most damaging one.
+
+| Planned premise | What the corpus shows |
+|---|---|
+| Free-text dates inside descriptions | **0 of 7,996** carry a date-shaped substring; **0** contain `w.e.f.` |
+| BSE `Detail/Remarks` is where dates live | The CSV endpoint the app uses has no such column at all, so the concatenation in `normalize_bse_actions` has always appended an empty string |
+| Require `from X to Y` and face-value tokens | Both are optional in the real wordings — `Fv Split Rs.10 To Re.1` has no "from"; `Face Value Split From 10/- To Face Value 2/-` has no "Rs" |
+| Return a *list* of actions | **Confirmed and the big one.** 30 distinct NSE subjects name a bonus *and* a split; only the bonus was ever produced |
+| More than two surviving numbers → review | Only 6 descriptions in twenty years are action-shaped and unreadable, and all 6 are genuinely unusable |
+
+Date stripping was implemented anyway — it costs one regex and one stray date would be
+read as a ratio — but it is inert on every real description, which was measured rather
+than assumed.
+
+#### The rule the corpus actually needs
+
+The real defect is not the date; it is that the search was unanchored, so it read the
+first two numbers *anywhere* in the string. Descriptions routinely open with an unrelated
+rupee amount:
+
+```
+'Interim Dividend Rs 2/- Per Share And Face Value Split From Rs 10/- To Rs 2/-'
+   old -> ('split', 0.2)      read the dividend, then the 10;  true factor 5
+'Annual General Meeting / Dividend - Rs 1.35/- ... Split - From Rs 10/- To Rs 2/-'
+   old -> ('split', 0.135)                                     true factor 5
+```
+
+So `SPLIT_PATTERN` now searches only **after** the split keyword, and the pair must be
+`X … to … Y` with the direction matching the word used — a "split" that raises the face
+value, or a "consolidation" that lowers it, is refused rather than guessed. Anchoring on
+the keyword also reads `Capital Reduction Rs 10 To Rs 3.30 / Consolidation Rs 3.30 To
+Rs.10` correctly (0.33, from the consolidation's own numbers) where the old whole-string
+search returned 3.03.
+
+#### Verified against the exchange's own prices, not only against tests
+
+If a description names both a bonus and a split, the market's ex-date gap is the product
+of the two. Nine announcements were checked by downloading the NSE bhavcopy either side
+of the ex-date and dividing the closes:
+
+| Symbol | Ex-date | Previous close | Ex-date close | Actual gap | Old factor | New factor |
+|---|---|---|---|---|---|---|
+| SUNILHITEC | 2016-12-01 | 202.75 | 10.65 | **19.04** | 2 | **20** |
+| SBC | 2022-02-22 | 147.50 | 7.75 | **19.03** | 2 | **20** |
+| VINNY | 2023-02-24 | 334.30 | 15.25 | **21.92** | 2.3 | **23** |
+| MMTC | 2010-07-29 | 30222.85 | 1841.80 | **16.41** | 2 | **20** |
+| BAJFINANCE | 2016-09-08 | 11393.30 | 1162.80 | **9.80** | 2 | **10** |
+| SHARONBIO | 2014-02-20 | 411.85 | 49.40 | **8.34** | 2 | **10** |
+| EASEMYTRIP | 2022-11-21 | 381.95 | 57.30 | **6.67** | 4 | **8** |
+| AARTECH | 2024-08-09 | 212.64 | 74.37 | **2.86** | 1.5 | **3** |
+| AVANTIFEED | 2018-06-26 | 1563.35 | 599.30 | **2.61** | 1.5 | **3** |
+
+Every gap matches the composed factor and none matches the bonus alone. Across the whole
+corpus the new parser changes **38** of 7,996 descriptions, produces an action for **no**
+description that previously produced none, and drops none that previously parsed — so it
+is a correction, not a widening.
+
+#### Work
+
+- [x] Date-shaped substrings stripped before matching (inert on real data, kept as
+      insurance)
+- [x] `parse_actions()` returns a **list**, so one announcement can carry both a bonus
+      and a face-value split; the engine's existing per-(symbol, ex-date) grouping then
+      composes them — `bonus 1:1 × split 10→1 = 20`
+- [x] The face-value pair is read only after the split keyword, with the direction
+      checked against the word used
+- [x] Nothing is guessed: an action-shaped description that cannot be read produces no
+      action and a stated reason
+- [x] `factor` dropped from the audit key, with a ledger migration (below)
+- [x] A 51-case table of verbatim NSE and BSE strings in `tests/test_corporate_actions.py`
+
+#### Dropping the factor from the key needed a ledger migration, not just an edit
+
+The plan's reasoning was right and the consequence is larger than one line. Keys are the
+ledger's primary keys, so re-deriving them without the factor makes **every existing
+record unfindable** — and an unfindable applied action is re-applied. Run against the
+pre-3.1 code, with a backfill bucket that stops the day before the ex-date so the
+continuity guard cannot run:
+
+```
+start                       CLOSE = 202.75
+after the bonus-only read   CLOSE = 101.40      (the truth is 10.14)
+after the corrected read    CLOSE =   5.05      divided by 2, then by 20
+```
+
+So the ledger is now version 3 and `migrate_corporate_ledger` re-derives every key from
+the record's own fields, including the keys inside each transaction's `action_keys` and
+`final_action_records`. Transaction ids are deliberately left alone: a prepared
+transaction's staged CSV is named after its id, and renaming would orphan that file.
+
+Dry-run against a copy of the live ledger on this machine — 149 records, 134
+transactions: version 2 → 3, every announcement survives, every key is the new
+derivation, every status unchanged, every transaction key resolves to a live record.
+
+An already-applied action whose factor this run reads differently is now **reported, not
+re-applied** (`summary["factor_conflicts"]`, surfaced in the GUI). Re-dividing is the
+real damage; only a `--rebuild-symbol` can adopt a corrected factor, and the ledger note
+says so.
+
+#### The unchecked path is closed too
+
+The guard is skipped whenever the history has no bar on or after the ex-date — which a
+50-date backfill bucket produces every time it stops the day before one. An action in
+that position is now recorded `awaiting_ex_date` and left for the next run, where
+`reconcile_pending` (already called at the end of every `upsert_batch`) retries it with
+the guard active. Like the two existing retry statuses it is unbounded; the cost is one
+local file read per run, not a download.
+
+**What is still open, deliberately:** the six unreadable descriptions are dropped
+silently. There is nowhere to report them — no logging configuration exists anywhere in
+the application (4.3). The GUI now reports deferred actions and factor conflicts because
+those flow through the apply summary; parse failures do not, and plumbing them is 4.3's
+work, not this section's.
+
+**On upgrade:** `corporate_actions.json` migrates from version 2 to 3 on first read. On
+this machine that is 149 records and 134 transactions, all preserved. Re-reading all 149
+descriptions with the new parser produces **0 factor conflicts and 0 dropped records**,
+so nothing on this machine's data changes. A rollback to an older build would refuse to
+read a v3 ledger (`StateCorruptionError`) rather than silently re-apply — the same
+property v1 → v2 already had.
+
+346 tests pass on Python 3.10 and 3.13, coverage 76.2%, Ruff and mypy clean,
+`--smoke-gui` exits 0. Every new behavioural test was run against the code with its own
+fix reverted and fails there: the deferral test reports `applied=1` instead of
+`deferred=1`, the key tests fail on the hash, and the three migration tests fail on
+`assert 2 == 3`.
 
 ### 3.2 Inverse-adjust volume — effort S
 
@@ -1011,7 +1133,8 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
                                    offline and absent reports retire; 2.4 delivery
                                    retries bounded
    ↓
-Phase 3  stop writing wrong data ← correctness; some items need a rebuild prompt
+Phase 3  stop writing wrong data ← 3.1 done; 3.2-3.5 open. Some items need a
+                                   rebuild prompt
    ↓
 Phase 4  verifiability           ← --audit answers "can I trust this?"
    ↓

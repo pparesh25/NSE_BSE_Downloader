@@ -714,6 +714,7 @@ class DownloadWorker(QThread):
                         {
                             "applied": summary.get("applied", 0),
                             "manual_review": summary.get("manual_review", 0),
+                            "deferred": summary.get("deferred", 0),
                         },
                     )
                     for window in related
@@ -724,6 +725,23 @@ class DownloadWorker(QThread):
                         exchange,
                         f"{summary['manual_review']} corporate action(s) "
                         "require manual review",
+                    )
+                if summary.get("deferred"):
+                    self.status_updated.emit(
+                        exchange,
+                        f"{summary['deferred']} corporate action(s) wait for "
+                        "the ex-date bar and are retried on the next run",
+                    )
+                if summary.get("factor_conflicts"):
+                    # The history already carries an older reading of these
+                    # announcements, so nothing is re-divided; say so, because
+                    # only a rebuild can adopt the corrected factor.
+                    self.error_occurred.emit(
+                        exchange,
+                        f"{summary['factor_conflicts']} corporate action(s) "
+                        "are recorded with a different factor than this run "
+                        "reads; rebuild those symbols to adopt the new "
+                        "reading",
                     )
             except Exception as error:
                 if telemetry is not None:

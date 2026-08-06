@@ -136,16 +136,93 @@ Effect: roughly 370 BSE trading days download, fail schema validation, get quara
 and re-enter `incomplete_dates` on every run — an infinite retry loop whose error
 message names the wrong cause.
 
-- [ ] **Pin the flip date empirically first.** Sample 2022-12-30 and 2023-01-02 and
-      inspect the actual columns. 2023-01-01 is inferred from prototype filenames, not
-      observed. Record the sampled evidence in this file.
-- [ ] Add `BSE_UDIFF_SCHEMA_IN_ZIP_START` and a fourth era `bse-equity-udiff-zip` that
-      keeps the `.ZIP` URL but reuses the UDiFF schema and mapping
-- [ ] Add parametrised cases at the two boundary dates to
-      `tests/test_source_resolver.py` and `tests/test_canonical_data.py`
+#### Sampled evidence, 2026-08-06
 
-**Acceptance:** a backfill across 2022-12-15 → 2023-01-15 publishes every trading day
-with no quarantine.
+Real files were downloaded from BSE and inspected. The flip date is **confirmed as
+2023-01-01**, and it is exact: 2022-12-31 was a Saturday and 2023-01-01 a Sunday, so
+2022-12-30 and 2023-01-02 are consecutive trading days.
+
+| Date | Header (first columns) | Schema |
+|---|---|---|
+| 2022-08-17 | `ISIN,SCRIP ID,SCRIP_CODE,SC_NAME,SC_GROUP,OPEN PRICE,…` | legacy |
+| 2022-12-30 | `ISIN,SCRIP ID,SCRIP_CODE,SC_NAME,SC_GROUP,OPEN PRICE,…` | legacy |
+| 2023-01-02 | `ISIN,TckrSymb,FinInstrmId,FinInstrmNm,SctySrs,OpnPric,…` | **UDiFF** |
+| 2023-06-15 | `ISIN,TckrSymb,FinInstrmId,FinInstrmNm,SctySrs,OpnPric,…` | UDiFF |
+| 2024-07-05 | `ISIN,TckrSymb,FinInstrmId,FinInstrmNm,SctySrs,OpnPric,…` | UDiFF |
+
+Both variants carry 32 columns inside the identical
+`BSE_EQ_BHAVCOPY_{ddmmyyyy}.ZIP` filename, so nothing in the URL distinguishes them.
+
+Running the production path against the real files reproduces the failure exactly:
+
+```
+2023-01-02  app passes era='bse-equity-bhavcopy-legacy'
+  DataProcessingError: report is missing required columns:
+  ['CLOSING PRICE', 'HIGH PRICE', 'LOW PRICE', 'NO_OF_SHRS', 'OPEN PRICE', 'SCRIP ID', …]
+```
+
+Passing `bse-equity-udiff` to the same 2023-06-15 and 2024-07-05 files normalizes
+cleanly (3,658 and 4,007 rows), which confirms the existing UDiFF mapping is reusable
+as-is and only the era selection is wrong.
+
+#### 1.2b A second, independent defect found while sampling — **blocker**
+
+The legacy window is broken too, for a different reason, and the review did not find
+this. **Every** sampled legacy date fails:
+
+```
+2022-12-30  DataProcessingError: Normalized report contains duplicate keys: ['SYMBOL', 'SERIES']
+```
+
+BSE truncates `SCRIP ID` to 9 characters while `SC_NAME` holds the full 10. Three rows
+therefore share the symbol `ICICIBANK` on 2022-12-30:
+
+| ISIN | SCRIP ID | SC_NAME | Group | Close |
+|---|---|---|---|---|
+| **INE**090A01021 | `ICICIBANK` | ICICI BANK | A | ₹890.95 |
+| **INF**109KC15I8 | `ICICIBANK` | ICICIBANKN | B | ₹43.15 |
+| **INF**109KC1E35 | `ICICIBANK` | ICICIBANKP | B | ₹217.40 |
+
+The `INF` prefix marks a mutual-fund unit; `INE` marks equity. The two group-B rows are
+ICICI Prudential ETFs, not bank shares, and they collide with each other on
+`(SYMBOL, SERIES)`.
+
+Counts after the app's own group filter, one row per sampled date:
+
+| Date | Rows kept | Duplicates | Duplicates if `INF` ISINs excluded |
+|---|---|---|---|
+| 2022-08-18 | 3,533 | 2 | **0** |
+| 2022-09-15 | 3,614 | 2 | **0** |
+| 2022-10-14 | 3,588 | 2 | **0** |
+| 2022-11-15 | 3,629 | 2 | **0** |
+| 2022-12-30 | 3,627 | 2 | **0** |
+| 2023-01-02 | — | 2 | **0** |
+
+Current behaviour is fail-closed, which is the right default — nothing is corrupted.
+But it means the whole 2022-08-17 → 2024-07-05 window is unfetchable, not just the
+2023+ part. That is roughly **470 trading days**, not the ~370 the review estimated.
+
+The danger is in the obvious wrong fix. Deduplicating on `(SYMBOL, SERIES)` would let
+an ETF at ₹43.15 or ₹217.40 be written into `icicibank.txt` alongside the real bank at
+₹890.95, because symbol histories are keyed by symbol name. Excluding mutual-fund
+units is the correct fix, and it removes every observed collision.
+
+#### Work
+
+- [x] Flip date pinned empirically at 2023-01-01
+- [ ] Add `BSE_UDIFF_SCHEMA_IN_ZIP_START = date(2023, 1, 1)` and a fourth era
+      `bse-equity-udiff-zip` that keeps the `.ZIP` URL and reuses the existing UDiFF
+      schema and mapping unchanged
+- [ ] Exclude mutual-fund instruments from BSE equity by ISIN prefix (`INF`), before
+      the duplicate-key check
+- [ ] Add parametrised cases at 2022-12-30 and 2023-01-02 to
+      `tests/test_source_resolver.py` and `tests/test_canonical_data.py`
+- [ ] Add a regression test using the real `ICICIBANK` collision, asserting that the
+      equity row survives and the two fund rows are dropped — not merged, not
+      arbitrarily deduplicated
+
+**Acceptance:** a backfill across 2022-08-17 → 2023-01-15 publishes every trading day
+with no quarantine, and `icicibank.txt` contains only `INE090A01021` prices.
 
 ### 1.3 Restore the transport retry layer — effort S — **done 2026-08-06**
 

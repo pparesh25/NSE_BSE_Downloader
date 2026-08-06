@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Optional
 
 
 NSE_UDIFF_START = date(2024, 7, 8)
@@ -21,6 +22,28 @@ BSE_SECOND_GENERATION_START = date(2022, 8, 17)
 BSE_UDIFF_SCHEMA_IN_ZIP_START = date(2023, 1, 1)
 BSE_UDIFF_START = date(2024, 7, 8)
 NSE_SME_FOUR_DIGIT_YEAR_START = date(2025, 10, 13)
+
+
+#: Earliest date each segment has an official report for.  A segment is not a
+#: missing dependency before this date -- it never existed -- so a combined file
+#: must still publish rather than waiting forever for a component the exchange
+#: never produced.  Segments absent from this mapping have no known floor.
+SEGMENT_FIRST_AVAILABLE = {
+    ("BSE", "INDEX"): date(2025, 4, 17),
+}
+
+
+def first_available(exchange: str, segment: str) -> Optional[date]:
+    """Return the first date this segment can be downloaded, if bounded."""
+
+    return SEGMENT_FIRST_AVAILABLE.get((exchange.upper(), segment.upper()))
+
+
+def is_available(exchange: str, segment: str, target_date: date) -> bool:
+    """Whether the segment publishes a report for ``target_date`` at all."""
+
+    floor = first_available(exchange, segment)
+    return floor is None or target_date >= floor
 
 
 @dataclass(frozen=True)

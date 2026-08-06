@@ -124,3 +124,86 @@ def test_finalize_missing_dependency_keeps_existing_public_eq(tmp_path):
     assert len(results) == 1 and not results[0].ok
     assert "NSE_INDEX" in results[0].error
     assert output.read_bytes() == b"previous-validated-output\n"
+
+
+def test_bse_eq_publishes_before_index_exists(tmp_path):
+    # The shipped default enables bse_index_append_to_eq, but BSE INDEX only
+    # starts on 2025-04-17.  Every earlier BSE EQ date used to end the run with
+    # no published file at all and be re-downloaded on every future run.
+    day = date(2015, 6, 15)
+    config = _Config(tmp_path)
+    coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
+    equity = pd.DataFrame(
+        [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50]],
+        columns=EQUITY_DAILY_COLUMNS,
+    )
+
+    assert coordinator.dependencies_for("BSE", day) == ()
+
+    published = coordinator.offer("BSE", "EQ", day, equity)
+
+    assert published is not None, "EQ alone must publish before INDEX exists"
+    assert published.ok
+    assert published.components == ("EQ",)
+    output = pd.read_csv(published.output_path, header=None)
+    assert len(output) == 1
+
+
+def test_bse_eq_still_waits_for_index_once_it_exists(tmp_path):
+    day = date(2025, 6, 16)
+    config = _Config(tmp_path)
+    coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
+    equity = pd.DataFrame(
+        [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50]],
+        columns=EQUITY_DAILY_COLUMNS,
+    )
+    index = pd.DataFrame(
+        [["SENSEX", "20250616", 1, 2, 1, 2, 0]], columns=INDEX_DAILY_COLUMNS
+    )
+
+    assert coordinator.dependencies_for("BSE", day) == ("INDEX",)
+    assert coordinator.offer("BSE", "EQ", day, equity) is None
+
+    published = coordinator.offer("BSE", "INDEX", day, index)
+
+    assert published is not None and published.ok
+    assert published.components == ("EQ", "INDEX")
+
+
+def test_finalize_publishes_when_nothing_is_genuinely_outstanding(tmp_path):
+    day = date(2015, 6, 15)
+    config = _Config(tmp_path)
+    coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
+    coordinator.offer(
+        "BSE", "EQ", day,
+        pd.DataFrame(
+            [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50]],
+            columns=EQUITY_DAILY_COLUMNS,
+        ),
+    )
+
+    results = coordinator.finalize()
+
+    assert len(results) == 1
+    assert results[0].ok, results[0].error
+
+
+def test_finalize_still_fails_a_transiently_missing_component(tmp_path):
+    # A dependency that exists for this date but did not arrive is a real
+    # failure and must keep the date queued for repair.
+    day = date(2025, 6, 16)
+    config = _Config(tmp_path)
+    coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
+    coordinator.offer(
+        "BSE", "EQ", day,
+        pd.DataFrame(
+            [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50]],
+            columns=EQUITY_DAILY_COLUMNS,
+        ),
+    )
+
+    results = coordinator.finalize()
+
+    assert len(results) == 1
+    assert not results[0].ok
+    assert "BSE_INDEX" in (results[0].error or "")

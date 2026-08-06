@@ -9,14 +9,18 @@ from ..core.base_downloader import BaseDownloader
 from ..core.config import Config
 from ..core.exceptions import DataProcessingError
 from ..services.canonical_data import normalize_bse_index, read_report
-from ..services.source_resolver import price_source
+from ..services.source_resolver import first_available, price_source
 from ..utils.memory_optimizer import MemoryOptimizer
 
 
 class BSEIndexDownloader(BaseDownloader):
     """Download BSE index reports and publish the seven-column contract."""
 
-    FIRST_AVAILABLE_DATE = date(2025, 4, 17)
+    #: Declared once in source_resolver so the combined-file builder can apply
+    #: the same floor.  Clamping only this downloader's dates, as before, left
+    #: every earlier BSE EQ date waiting for an index component that never
+    #: existed.
+    FIRST_AVAILABLE_DATE = first_available("BSE", "INDEX")
 
     def __init__(self, config: Config):
         super().__init__("BSE", "INDEX", config)
@@ -28,7 +32,10 @@ class BSEIndexDownloader(BaseDownloader):
         custom_end: Optional[date] = None,
     ) -> tuple[date, date]:
         start_date, end_date = super().get_date_range(custom_start, custom_end)
-        return max(start_date, self.FIRST_AVAILABLE_DATE), end_date
+        floor = self.FIRST_AVAILABLE_DATE
+        if floor is not None:
+            start_date = max(start_date, floor)
+        return start_date, end_date
 
     def build_url(self, target_date: date) -> str:
         return price_source("BSE", "INDEX", target_date).url

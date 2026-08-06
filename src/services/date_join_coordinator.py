@@ -10,6 +10,7 @@ from typing import Optional
 import pandas as pd
 
 from .combined_file_builder import CombinedBuildResult, CombinedFileBuilder
+from .source_resolver import is_available
 from .pipeline_telemetry import PipelineTelemetry
 
 
@@ -46,6 +47,26 @@ class DateJoinCoordinator:
         with self._lock:
             return len(self._cache)
 
+    def dependencies_for(
+        self, exchange: str, target_date: date
+    ) -> tuple[str, ...]:
+        """Dependencies that actually have a report for ``target_date``.
+
+        A segment whose first-available date is later is not late -- it does not
+        exist yet, and waiting for it holds the combined file back forever.  BSE
+        INDEX begins on 2025-04-17, so with the shipped
+        ``bse_index_append_to_eq`` default every earlier BSE EQ date used to end
+        the run with no published file at all and be re-downloaded on every
+        subsequent run.
+        """
+
+        exchange = exchange.upper()
+        return tuple(
+            segment
+            for segment in self.dependencies.get(exchange, ())
+            if is_available(exchange, segment, target_date)
+        )
+
     def offer(
         self,
         exchange: str,
@@ -57,9 +78,10 @@ class DateJoinCoordinator:
 
         exchange = exchange.upper()
         segment = segment.upper()
-        dependencies = self.dependencies.get(exchange, ())
-        if not dependencies or segment not in {"EQ", *dependencies}:
+        configured = self.dependencies.get(exchange, ())
+        if not configured or segment not in {"EQ", *configured}:
             return None
+        dependencies = self.dependencies_for(exchange, target_date)
         key = (exchange, target_date)
         with self._lock:
             if key in self._results:
@@ -100,19 +122,37 @@ class DateJoinCoordinator:
         with self._lock:
             for key, ready in sorted(self._ready.items()):
                 exchange, target_date = key
-                dependencies = self.dependencies.get(exchange, ())
-                if key in self._results or "EQ" not in ready or not dependencies:
+                if key in self._results or "EQ" not in ready:
                     continue
+                if not self.dependencies.get(exchange, ()):
+                    continue
+                dependencies = self.dependencies_for(exchange, target_date)
                 missing = [
                     segment for segment in dependencies if segment not in ready
                 ]
-                result = self.builder.record_failure(
-                    exchange,
-                    target_date,
-                    dependencies,
-                    "Required staged component did not complete: "
-                    + ", ".join(f"{exchange}_{segment}" for segment in missing),
-                )
+                if missing:
+                    result = self.builder.record_failure(
+                        exchange,
+                        target_date,
+                        dependencies,
+                        "Required staged component did not complete: "
+                        + ", ".join(
+                            f"{exchange}_{segment}" for segment in missing
+                        ),
+                    )
+                else:
+                    # Every dependency that exists for this date arrived, so the
+                    # date is complete even though the configured list is
+                    # shorter here than for a recent date.  Publish rather than
+                    # fail; failing would leave no file and re-queue the date on
+                    # every future run.
+                    result = self.builder.reconcile_frames(
+                        exchange,
+                        target_date,
+                        dependencies,
+                        self._cache.get(key, {}),
+                    )
+                    self._cache.pop(key, None)
                 self._results[key] = result
             return tuple(
                 self._results[key] for key in sorted(self._results)

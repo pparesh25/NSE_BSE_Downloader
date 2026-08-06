@@ -81,7 +81,7 @@ and mypy clean.
 These three are what stand between the current build and a working multi-year
 database. Nothing else in this plan matters until they are done.
 
-### 1.1 Publish EQ-only when a dependency is permanently unavailable — effort M — **blocker**
+### 1.1 Publish EQ-only when a dependency is permanently unavailable — effort M — **done 2026-08-06**
 
 `base_downloader.py:435-447` sets `publication_deferred` whenever any append option is
 on, skipping the `.txt` write. Publication then flows only through
@@ -99,23 +99,41 @@ Effect: select BSE_EQ and backfill 2015→2026 and **no** `BSE/EQ/*.txt` file is
 for roughly ten years of dates, while those dates stay `complete=0` and are
 re-downloaded on every future run forever.
 
-- [ ] Make `dependencies_from_options` date-aware so BSE INDEX is not required before
-      `2025-04-17` (`combined_file_builder.py:269-288`)
-- [ ] In `DateJoinCoordinator.finalize()`, publish EQ-only via
-      `CombinedFileBuilder.reconcile(exchange, date, ())` when a dependency is
-      *permanently* unavailable, and mark the combined stage `degraded`/`disabled`
-      rather than `failed` (`date_join_coordinator.py:97-119`)
-- [ ] Wire `reconcile()` into a post-run pass; today it exists only behind the manual
-      `--rebuild-combined` flag
-- [ ] Distinguish *permanently* unavailable (before first-available date, hard 404 on a
-      historical date) from *transiently* unavailable (timeout, 5xx) — only the former
-      degrades, the latter must still retry
+The fix turned out to be one idea rather than four: **make the dependency list
+date-aware**, and the rest follows.
 
-**Interim workaround for the owner, usable today:** untick `bse_index_append_to_eq`
-before any BSE backfill.
+- [x] `SEGMENT_FIRST_AVAILABLE` in `source_resolver.py` declares each segment's floor
+      once, with `first_available()` and `is_available()` accessors
+- [x] `BSEIndexDownloader.FIRST_AVAILABLE_DATE` now reads from it instead of holding a
+      second copy of the date. Clamping only that downloader's own dates was the
+      original bug — it left every earlier BSE EQ date waiting on a component the
+      exchange had never produced
+- [x] `DateJoinCoordinator.dependencies_for(exchange, date)` returns only the
+      dependencies that exist for that date, and both `offer()` and `finalize()` use it
+- [x] `finalize()` publishes when nothing is genuinely outstanding, and still records a
+      failure when a dependency that *does* exist for the date failed to arrive
 
-**Acceptance:** a backfill of BSE_EQ over a 2015 date range produces one `.txt` per
-trading day; those dates report `complete=1`; a second run downloads nothing.
+No `degraded` status was needed. A segment that did not exist yet is not a degraded
+dependency, so the honest representation is a shorter dependency list for that date and
+an ordinary successful publication. A transient failure keeps the existing
+`record_failure` path, so the date stays queued for repair.
+
+**Verified.** Four tests in `tests/test_phase7_date_join.py` cover a 2015 BSE date
+publishing EQ-only, a 2025 date still waiting for INDEX, `finalize()` publishing when
+nothing is outstanding, and `finalize()` still failing a genuinely missing component.
+Run against the previous date-blind code, two of them fail with exactly the reported
+symptom:
+
+```
+CombinedBuildResult(status='failed', output_path=None,
+                    error='Required staged component did not complete: BSE_INDEX')
+```
+
+218 tests pass on Python 3.10 and 3.13, coverage 73.85%, Ruff and mypy clean,
+`--smoke-gui` exits 0.
+
+**The interim workaround is no longer needed:** `bse_index_append_to_eq` can stay on
+for a historical backfill.
 
 ### 1.2 Add the missing BSE Equity era, 2023-01-01 → 2024-07-07 — effort M — **done 2026-08-06**
 

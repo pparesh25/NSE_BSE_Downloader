@@ -1781,10 +1781,29 @@ class MainWindow(QMainWindow):
                 self.append_status_message("\n" + status_text)
 
             self.status_bar.showMessage("Data summary loaded")
+            self._show_history_revision_notice()
 
         except Exception as e:
             self.logger.error(f"Error loading data summary: {e}")
             self.status_text.setText(f"Error loading data summary: {e}")
+
+    def _show_history_revision_notice(self) -> None:
+        """Tell the user when existing symbol files predate the current rule.
+
+        Adjusted bars are sticky: an audited action is never applied twice, so
+        corrected arithmetic reaches old bars only through an explicit rebuild.
+        """
+
+        try:
+            from ..services.history_revision import HistoryRevisionStore
+
+            notice = HistoryRevisionStore(self.config.base_data_path).notice()
+        except Exception as error:
+            # A rebuild hint must never be the reason the window fails to open.
+            self.logger.warning(f"History revision check skipped: {error}")
+            return
+        if notice:
+            self.append_status_message(notice)
 
     def get_selected_exchanges(self) -> List[str]:
         """Get list of selected exchanges"""

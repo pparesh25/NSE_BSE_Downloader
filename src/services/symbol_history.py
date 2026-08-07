@@ -513,20 +513,15 @@ class SymbolHistoryStore:
 
         if not applicable:
             return row
-        adjusted = row.copy()
-        # Match the engine's chronological, per-ex-date tick rounding so a raw
-        # replay is byte-for-byte deterministic even across multiple actions.
+        # Call the engine's own arithmetic rather than repeating it.  A replayed
+        # row that disagreed with the row the engine wrote would be resolved by
+        # _deduplicate on volume rank, silently, with no error anywhere.
+        from .corporate_actions import adjust_rows
+
+        frame = row.to_frame().T
         for ex_date in sorted(applicable):
-            factor = applicable[ex_date]
-            for column in ("OPEN", "HIGH", "LOW", "CLOSE"):
-                value = pd.to_numeric(
-                    pd.Series([adjusted.get(column)]), errors="coerce"
-                ).iloc[0]
-                if pd.notna(value):
-                    adjusted[column] = round(
-                        round(float(value) / factor / 0.05) * 0.05, 2
-                    )
-        return adjusted
+            adjust_rows(frame, frame.index, applicable[ex_date])
+        return frame.iloc[0]
 
     def save_internal_snapshot(
         self,

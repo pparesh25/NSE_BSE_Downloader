@@ -650,7 +650,9 @@ def test_batch_delivery_revision_reapplies_audited_action_once(tmp_path):
     history = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "aaa.txt")
     old_day = history.loc[history["DATE"] == 20250101].iloc[0]
     assert float(old_day["CLOSE"]) == 50.0
-    assert int(old_day["DELIVERY_QTY"]) == 777
+    # The revision carries a fresh raw delivery quantity, so the replay must
+    # scale it by the audited factor exactly as the engine would have.
+    assert int(old_day["DELIVERY_QTY"]) == 777 * 2
     ledger = CorporateActionEngine(tmp_path)._read_ledger()
     assert ledger["actions"][action.key]["status"] == "applied"
 

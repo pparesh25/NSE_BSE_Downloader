@@ -22,7 +22,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - NSE/BSE delivery quantity and percentage merged into cash-market files.
 - NSE futures open interest and change in open interest.
 - Symbol-wise text histories such as `NSE/SYMBOLS/reliance.txt`.
-- Split, consolidation and equity-bonus adjustments on pre-ex-date symbol OHLC.
+- Split, consolidation and equity-bonus adjustments on pre-ex-date symbol
+  prices and share counts, so price and turnover stay continuous.
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
 - Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
@@ -162,7 +163,9 @@ Each symbol file has one header and one row per date:
 DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,DELIVERY_PERCENT
 ```
 
-Symbol files are sorted, idempotently updated and renamed/merged using ISIN or exchange security code when available. Split, consolidation and equity-bonus actions adjust only pre-ex-date OHLC. Volume, delivery fields and FO OI are not adjusted.
+Symbol files are sorted, idempotently updated and renamed/merged using ISIN or exchange security code when available. Split, consolidation and equity-bonus actions adjust pre-ex-date rows only: `OPEN`, `HIGH`, `LOW` and `CLOSE` are divided by the factor, and `VOLUME`, `DELIVERY_QTY` and `QTY_PER_TRADE` are multiplied by it, so price x volume is unchanged across the ex-date. `TOTAL_TRADES` counts transactions rather than shares and `DELIVERY_PERCENT` is a ratio of two columns that both scale, so neither is touched. FO open interest is not adjusted.
+
+Histories written by version 1.1.0 or earlier used a different rule: prices were snapped to a 0.05 grid and share counts were left unadjusted. An audited action is never applied twice, so those bars keep the old arithmetic until the exchange is rebuilt. The application reports which exchanges are affected on startup; `--rebuild-exchange` replays the checksummed `.state/raw` snapshots through the current rule.
 
 State files and symbol histories are validated before any update. Damaged bytes
 are preserved under `.state/quarantine` and the operation stops with a

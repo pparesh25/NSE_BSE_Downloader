@@ -9,6 +9,7 @@ import pandas as pd
 
 from .canonical_data import INTERNAL_EQUITY_COLUMNS
 from .corporate_actions import CorporateActionEngine
+from .history_revision import HistoryRevisionStore
 from .state_store import (
     StateCorruptionError,
     StateStoreError,
@@ -225,10 +226,14 @@ class SymbolHistoryRebuilder:
             if str(row.get("SYMBOL", "")).strip()
         }
         self.rebuild_registry()
-        return [
+        paths = [
             self.rebuild_symbol(exchange, symbol)
             for symbol in sorted(symbols)
         ]
+        # Every symbol this exchange has raw snapshots for was just replayed
+        # through the current arithmetic, so the rebuild prompt can stop.
+        HistoryRevisionStore(self.base_path).mark_current(exchange)
+        return paths
 
     def rebuild_all(self) -> dict[str, list[Path]]:
         snapshots = self._read_snapshots()

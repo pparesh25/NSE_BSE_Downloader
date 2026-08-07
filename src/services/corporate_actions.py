@@ -55,6 +55,56 @@ SPLIT_PATTERN = re.compile(
 )
 MAX_FACE_VALUE = 100000.0
 
+# A capital adjustment changes the *unit*, so every per-share quantity moves
+# with it.  Prices are divided by the factor and share counts multiplied by it,
+# which is what keeps turnover (price x volume) constant across the ex-date.
+# TOTAL_TRADES counts transactions, not shares, so it is left alone, and
+# DELIVERY_PERCENT is a ratio of two columns that both scale, so it is too.
+ADJUSTED_PRICE_COLUMNS = ("OPEN", "HIGH", "LOW", "CLOSE")
+ADJUSTED_SHARE_COUNT_COLUMNS = ("VOLUME", "DELIVERY_QTY")
+ADJUSTED_RATE_COLUMNS = ("QTY_PER_TRADE",)
+PRICE_DECIMALS = 2
+RATE_DECIMALS = 2
+
+
+def adjust_rows(frame: pd.DataFrame, mask: Any, factor: float) -> None:
+    """Apply one capital adjustment, in place, to the selected rows.
+
+    Both adjustment paths call this — the engine over a whole history and the
+    raw replay over a single re-downloaded row — so a replayed row can never
+    disagree with the row the engine wrote.  Values that are absent stay
+    absent: delivery fields are legitimately blank for many dates.
+    """
+
+    for column in ADJUSTED_PRICE_COLUMNS:
+        _write_scaled(
+            frame, mask, column,
+            lambda values: (values / factor).round(PRICE_DECIMALS),
+        )
+    for column in ADJUSTED_RATE_COLUMNS:
+        _write_scaled(
+            frame, mask, column,
+            lambda values: (values * factor).round(RATE_DECIMALS),
+        )
+    for column in ADJUSTED_SHARE_COUNT_COLUMNS:
+        # Share counts stay whole numbers, written without a decimal point.
+        _write_scaled(
+            frame, mask, column,
+            lambda values: (values * factor).round().astype("int64"),
+        )
+
+
+def _write_scaled(
+    frame: pd.DataFrame, mask: Any, column: str, scale: Any
+) -> None:
+    if column not in frame.columns:
+        return
+    values = pd.to_numeric(frame.loc[mask, column], errors="coerce")
+    present = values[values.notna()]
+    if present.empty:
+        return
+    frame.loc[present.index, column] = scale(present)
+
 
 @dataclass(frozen=True)
 class ParsedAction:
@@ -311,12 +361,11 @@ class CorporateActionEngine:
 
     _lock = Lock()
 
-    def __init__(self, base_data_path: Path, tick_size: float = 0.05):
+    def __init__(self, base_data_path: Path):
         self.base_path = Path(base_data_path)
         self.state_path = self.base_path / ".state"
         self.ledger_path = self.state_path / "corporate_actions.json"
         self.transaction_path = self.state_path / "corporate_action_transactions"
-        self.tick_size = tick_size
         self.histories = SymbolHistoryStore(self.base_path)
         self._ledger_state = VersionedJSONStore(
             self.ledger_path,
@@ -591,7 +640,12 @@ class CorporateActionEngine:
                     (action.exchange, action.stable_id, action.ex_date), []
                 ).append(action)
 
-            for (_, _, ex_date), group in groups.items():
+            # Chronological within a symbol, so a run that receives two
+            # ex-dates at once composes them in the order the raw replay does.
+            # Rounding is not associative, so the order is observable.
+            for group_key in sorted(groups):
+                ex_date = group_key[2]
+                group = groups[group_key]
                 first = group[0]
                 symbol = self.histories.resolve_symbol(
                     first.exchange, first.stable_id
@@ -641,12 +695,7 @@ class CorporateActionEngine:
                 for action in group:
                     combined_factor *= action.factor
                 adjusted = history.copy()
-                for column in ("OPEN", "HIGH", "LOW", "CLOSE"):
-                    values = pd.to_numeric(adjusted.loc[mask, column], errors="coerce")
-                    adjusted.loc[mask, column] = (
-                        (values / combined_factor / self.tick_size).round()
-                        * self.tick_size
-                    ).round(2)
+                adjust_rows(adjusted, mask, combined_factor)
 
                 before = adjusted.loc[mask, "CLOSE"]
                 after = adjusted.loc[~mask, "CLOSE"]

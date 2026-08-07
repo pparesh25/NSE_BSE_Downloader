@@ -184,6 +184,12 @@ def run_rebuild_mode(config_path: str, args) -> int:
             result = rebuilder.rebuild_all()
             count = sum(len(paths) for paths in result.values())
             print(f"Rebuilt {count} symbol histories across all exchanges")
+
+        from src.services.history_revision import HistoryRevisionStore
+
+        notice = HistoryRevisionStore(config.base_data_path).notice()
+        if notice:
+            print(notice)
         return 0
     except Exception as error:
         print(f"Repair failed; existing data was left in place: {error}")

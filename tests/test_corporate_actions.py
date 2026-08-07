@@ -382,7 +382,7 @@ def test_an_action_waits_until_the_ex_date_bar_exists(tmp_path):
     assert float(previous) == pytest.approx(202.75 / 2, abs=0.05)
 
 
-def test_corporate_action_applies_once_and_keeps_raw_volume(tmp_path):
+def test_corporate_action_applies_once_and_scales_the_share_counts(tmp_path):
     rows = _history_rows()
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
@@ -396,8 +396,13 @@ def test_corporate_action_applies_once_and_keeps_raw_volume(tmp_path):
     path = tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
     adjusted = pd.read_csv(path)
     assert float(adjusted.loc[0, "CLOSE"]) == 50.0
-    assert int(adjusted.loc[0, "VOLUME"]) == 10
-    assert int(adjusted.loc[0, "DELIVERY_QTY"]) == 5
+    # One share became two, so the pre-ex-date share counts double while the
+    # transaction count and the delivery ratio stay as the exchange reported.
+    assert int(adjusted.loc[0, "VOLUME"]) == 20
+    assert int(adjusted.loc[0, "DELIVERY_QTY"]) == 10
+    assert int(adjusted.loc[0, "TOTAL_TRADES"]) == 1
+    assert float(adjusted.loc[0, "DELIVERY_PERCENT"]) == 50.0
+    assert float(adjusted.loc[0, "QTY_PER_TRADE"]) == 20.0
 
     assert engine.apply([action])["applied"] == 0
     unchanged = pd.read_csv(path)
@@ -411,7 +416,156 @@ def test_corporate_action_applies_once_and_keeps_raw_volume(tmp_path):
     retried = pd.read_csv(path)
     old_day = retried.loc[retried["DATE"] == 20250101].iloc[0]
     assert float(old_day["CLOSE"]) == 50.0
-    assert int(old_day["DELIVERY_QTY"]) == 9
+    assert int(old_day["DELIVERY_QTY"]) == 18
+
+
+def test_an_adjustment_keeps_turnover_continuous_across_the_ex_date(tmp_path):
+    """MWL, 2026-07-10: NSE published 370.25 then 36.65 on a 10:1 split.
+
+    Price x volume is the money that changed hands, and it cannot jump because
+    the share unit changed. The pre-3.2 code adjusted price and left volume
+    raw, so every pre-split bar's turnover was divided by the factor.
+    """
+
+    rows = _history_rows(
+        ("20260709", "20260710"), (370.25, 36.65)
+    )
+    rows.loc[0, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [120588, 2336, 40000]
+    rows.loc[1, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [7549418, 18516, 2000000]
+    rows["QTY_PER_TRADE"] = (
+        rows["VOLUME"] / rows["TOTAL_TRADES"]
+    ).round(2)
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2026, 7, 10), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2026, 7, 10), "split", 10.0,
+        "Face Value Split (Sub-Division) - From Rs 10/- Per Share To "
+        "Re 1/- Per Share", "EQ",
+    )])
+    adjusted = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "abc.txt")
+    before = adjusted.loc[adjusted["DATE"] == 20260709].iloc[0]
+    assert float(before["CLOSE"]) == 37.02  # 370.25 / 10, at two decimals
+    assert int(before["VOLUME"]) == 1205880
+    # Turnover survives the change of unit; only the 2dp price rounding moves
+    # it, by about a hundredth of a percent. The pre-3.2 code was out by 10x.
+    assert float(before["CLOSE"]) * int(before["VOLUME"]) == pytest.approx(
+        370.25 * 120588, rel=1e-3
+    )
+    # QTY_PER_TRADE is VOLUME / TOTAL_TRADES at source, so scaling the volume
+    # without the trade count must scale the rate by the same factor.  The
+    # source value is already rounded to 2dp, so the factor scales that half
+    # a hundredth up with it.
+    assert float(before["QTY_PER_TRADE"]) == pytest.approx(
+        int(before["VOLUME"]) / int(before["TOTAL_TRADES"]), abs=0.005 * 10
+    )
+
+
+def test_a_consolidation_reduces_the_share_counts(tmp_path):
+    rows = _history_rows(("20250101", "20250102"), (10.0, 100.0))
+    rows.loc[0, ["VOLUME", "DELIVERY_QTY"]] = [5000, 2500]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share",
+        "EQ",
+    )])
+    adjusted = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "abc.txt")
+    assert float(adjusted.loc[0, "CLOSE"]) == 100.0
+    assert int(adjusted.loc[0, "VOLUME"]) == 500
+    assert int(adjusted.loc[0, "DELIVERY_QTY"]) == 250
+
+
+def test_adjusted_prices_are_no_longer_snapped_to_a_tick_grid(tmp_path):
+    """202.75 / 20 is 10.1375. The pre-3.2 code wrote 10.15."""
+
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2016, 12, 1), _history_rows(
+        ("20161130", "20161201"), (202.75, 10.14)
+    ))
+    CorporateActionEngine(tmp_path).apply([
+        CorporateAction("NSE", "ABC", "INE1", date(2016, 12, 1), "bonus",
+                        2.0, "Bonus 1:1 and split", "EQ"),
+        CorporateAction("NSE", "ABC", "INE1", date(2016, 12, 1), "split",
+                        10.0, "Bonus 1:1 and split", "EQ"),
+    ])
+    adjusted = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "abc.txt")
+    assert float(adjusted.loc[0, "CLOSE"]) == 10.14
+    assert round(float(adjusted.loc[0, "CLOSE"]) % 0.05, 4) != 0
+
+
+def test_a_blank_delivery_field_stays_blank_through_an_adjustment(tmp_path):
+    rows = _history_rows()
+    rows["DELIVERY_QTY"] = pd.NA
+    rows["DELIVERY_PERCENT"] = pd.NA
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2025, 1, 2), "bonus", 2.0, "Bonus 1:1", "EQ"
+    )])
+    adjusted = (
+        tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
+    ).read_text().splitlines()[1]
+    # Delivery is legitimately absent for many dates; scaling must not turn a
+    # blank into a number, and a share count must not acquire a decimal point.
+    assert adjusted.endswith(",,")
+    assert adjusted.split(",")[5] == "20"
+
+
+def test_the_raw_replay_agrees_with_the_engine_column_for_column(tmp_path):
+    """Two paths adjust: the engine, and the replay for a re-downloaded row.
+
+    A disagreement is not an error anywhere. `_deduplicate` picks the survivor
+    by volume rank, so whichever path scaled the volume simply wins and the
+    history drifts in silence.
+    """
+
+    rows = _history_rows(("20250101", "20250102"), (137.77, 45.9))
+    rows.loc[0, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [12345, 67, 4321]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2025, 1, 2), "split", 3.0,
+        "Face Value Split From Rs 3 To Re 1", "EQ",
+    )])
+    published = pd.read_csv(
+        tmp_path / "NSE" / "SYMBOLS" / "abc.txt", dtype=str
+    )
+    engine_row = published.loc[published["DATE"] == "20250101"].iloc[0]
+
+    replayed = store._apply_recorded_actions(
+        "NSE", "ABC", store._history_rows(rows.iloc[[0]]).iloc[0],
+        store._read_applied_actions(),
+    )
+    for column in (
+        "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "TOTAL_TRADES",
+        "QTY_PER_TRADE", "DELIVERY_QTY", "DELIVERY_PERCENT",
+    ):
+        assert float(replayed[column]) == float(engine_row[column]), column
+    assert int(replayed["VOLUME"]) == 12345 * 3
+
+
+def test_a_consolidation_replay_does_not_revert_the_adjustment(tmp_path):
+    """The dangerous direction: a consolidation shrinks the adjusted volume.
+
+    `_deduplicate` keeps the higher-volume row per date, so an unscaled raw
+    replay would outrank the adjusted row and quietly undo it.
+    """
+
+    rows = _history_rows(("20250101", "20250102"), (10.0, 100.0))
+    rows.loc[0, ["VOLUME", "DELIVERY_QTY"]] = [5000, 2500]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
+    )])
+    store.upsert("NSE", "EQ", date(2025, 1, 1), rows.iloc[[0]].copy())
+
+    history = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "abc.txt")
+    replayed = history.loc[history["DATE"] == 20250101].iloc[0]
+    assert float(replayed["CLOSE"]) == 100.0
+    assert int(replayed["VOLUME"]) == 500
 
 
 def test_continuity_failure_does_not_replace_symbol_file(tmp_path):

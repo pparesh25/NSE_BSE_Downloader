@@ -982,18 +982,126 @@ fix reverted and fails there: the deferral test reports `applied=1` instead of
 `deferred=1`, the key tests fail on the hash, and the three migration tests fail on
 `assert 2 == 3`.
 
-### 3.2 Inverse-adjust volume — effort S
+### 3.2 Inverse-adjust volume — effort S — **done 2026-08-07**
 
 `corporate_actions.py:495-500` loops only `("OPEN","HIGH","LOW","CLOSE")`. After a 1:10
 split the price series is continuous while volume steps 10×, poisoning every RVOL and
 turnover screen across the whole history.
 
-- [ ] Inverse-adjust `VOLUME`, `DELIVERY_QTY`, `QTY_PER_TRADE`
-- [ ] Do **not** scale `TOTAL_TRADES` — it is a transaction count
-- [ ] Stop tick-snapping adjusted prices (`corporate_actions.py:498-500`). Adjusted
-      prices are synthetic and have no reason to sit on a 0.05 grid; snapping injects
-      ±0.025 per bar and compounds across successive actions
-- [ ] Ship with a `.state` version marker and a rebuild prompt
+- [x] Adjust `VOLUME`, `DELIVERY_QTY`, `QTY_PER_TRADE`
+- [x] Do **not** scale `TOTAL_TRADES` — it is a transaction count
+- [x] Stop tick-snapping adjusted prices
+- [x] Ship with a `.state` version marker and a rebuild prompt
+
+#### The operation is multiply, not divide
+
+"Inverse-adjust" is ambiguous and the wrong reading destroys the series. Factors are
+greater than 1 for splits and bonuses and prices are *divided* by them, so share counts
+must be **multiplied**. Dividing would double the discontinuity rather than remove it.
+
+The invariant that settles it is turnover: price × volume is money that changed hands,
+and it cannot jump because the unit of a share changed. MWL's real NSE bars either side
+of its 10:1 split on 2026-07-10, run through the shipped engine:
+
+| Date | CLOSE before | CLOSE after | VOLUME before | VOLUME after |
+|---|---|---|---|---|
+| 2026-07-08 | 373.10 | 37.31 | 62,105 | 621,050 |
+| 2026-07-09 | 370.25 | 37.02 | 120,588 | 1,205,880 |
+| **2026-07-10 (ex)** | 36.65 | 36.65 | 7,549,418 | 7,549,418 |
+
+Before the change the pre-split turnover computed as 37.70 × 29,403 = ₹1.11M where the
+market actually traded ₹11.08M that day — the adjustment had silently divided ten years
+of turnover by the split factor. `QTY_PER_TRADE` is `VOLUME / TOTAL_TRADES` at source
+(`canonical_data.py:595`), so scaling the volume without the trade count requires
+scaling the rate by the same factor to keep that identity true. `DELIVERY_PERCENT` is a
+ratio of two columns that both scale, so it is left alone.
+
+#### The documented reason for the old rule was checked, not assumed
+
+`IMPLEMENTATION_PLAN.md:98-101` pins **both** halves of the old behaviour — the 0.05
+snap and the untouched volume — to "`Mark Python` compatibility". That is the owner's
+own downstream screener, so it was read rather than reasoned about:
+
+- `Mark Python/config.py:47-50` puts its database at `~/Mark EMA and HTF/Database/
+  NSE_BSE_EOD.duckdb`, filled by its own `nse_eod_downloader`/`bse_eod_downloader`.
+- A search of that tree for `NSE_BSE_Data` returns **nothing**. It never reads these
+  files.
+- `Mark Python/eod_store.py:16` stores `Date, Symbol, Exchange, Open, High, Low, Close,
+  Volume` only, and `nse_eod_downloader/eod_downloader.py:157` runs the same OHLC-only,
+  0.05-snapped adjustment on its own copy.
+
+So nothing breaks. What changes is that the two databases now disagree about volume
+across a corporate action — this one is right, and Mark Python has the same defect in
+its own code.
+
+#### Tick snapping can zero a real price
+
+Measured over all 2,720 real NSE closes on 2026-07-31, comparing the snapped quotient
+against the exact one:
+
+| Factor | Median error | p95 | Max | Rows over 0.5% |
+|---|---|---|---|---|
+| 2 | 0.010% | 0.33% | 33.3% | 92 |
+| 5 | 0.025% | 0.88% | 66.7% | 229 |
+| 10 | 0.048% | 1.63% | **100%** | 375 |
+
+The 100% is not a rounding artefact. A stock whose LOW is ₹0.14 divided by 10 gives
+0.014, which snaps to **0.00**. On that one day a 10× adjustment zeroes 3 real prices
+and a 20× adjustment zeroes 11 — a zero OHLC value reads downstream as a −100% bar, the
+exact failure 3.4 exists to reject. Two successive actions compound it: median error
+0.114% for a 10 then a 2.
+
+Snapping is gone; adjusted prices are rounded to two decimals, which is what the writers
+emit anyway. The tick size itself was never configurable — it was a constructor default
+no caller ever passed — so the parameter is removed rather than exposed.
+
+#### One arithmetic, not two copies of it
+
+`symbol_history._apply_recorded_actions` held a **second** implementation of the rule,
+with the tick size hardcoded as a `0.05` literal, used whenever a raw row is
+re-downloaded or a rebuild replays a snapshot. Both now call one `adjust_rows()`.
+
+That coupling is the important part, because a disagreement between them is not an error
+anywhere: `_deduplicate` keeps the **higher-volume** row per date
+(`symbol_history.py:305-312`), so whichever path scaled the volume simply wins and the
+history drifts in silence. The direction that bites is a consolidation, where the
+adjusted volume is *smaller* than the raw one and an unscaled replay would outrank and
+quietly undo the adjustment. Both cases are pinned by tests.
+
+Group iteration is now sorted, so two ex-dates arriving in one run compose in the same
+chronological order the replay uses. Rounding is not associative, so the order was
+observable.
+
+#### The marker, and what it can honestly promise
+
+An audited action is never applied twice, so corrected arithmetic cannot reach bars that
+were already adjusted — only a rebuild can. `.state/history_revision.json` records the
+adjustment revision **per exchange**; `--rebuild-exchange` and `--rebuild-all` set it to
+current, and the GUI and CLI report which exchanges are behind.
+
+A fresh installation has no symbol files and is deliberately never prompted. The prompt
+also states its own limit: a rebuild replays `.state/raw`, so it can only repair dates
+this application downloaded.
+
+On this machine both exchanges are behind, and the raw tree covers the whole span the
+histories do, so a rebuild would repair all of it:
+
+```
+stale exchanges: ['BSE', 'NSE']
+NSE: 3,354 symbol files, 144 raw snapshot dates (2026-01-01 .. 2026-08-04)
+BSE: 4,931 symbol files, 144 raw snapshot dates (2026-01-01 .. 2026-08-04)
+```
+
+`README.md` carried the old contract in three places ("Volume, delivery fields and FO OI
+are not adjusted") and now states the new one, including that pre-1.1.0 histories keep
+the old arithmetic until rebuilt.
+
+357 tests pass on Python 3.10 and 3.13, coverage 76.4%, Ruff and mypy clean,
+`--smoke-gui` exits 0. Each new test was run against the code with its own fix reverted
+and fails there — including one that first passed for the wrong reason: the byte-equality
+version of the replay test was satisfied by `_deduplicate` discarding the unscaled row,
+so it was replaced with a column-by-column comparison that fails on `CLOSE 45.9 != 45.92`
+and on VOLUME.
 
 ### 3.3 Protect symbol identity — effort S
 
@@ -1133,8 +1241,7 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
                                    offline and absent reports retire; 2.4 delivery
                                    retries bounded
    ↓
-Phase 3  stop writing wrong data ← 3.1 done; 3.2-3.5 open. Some items need a
-                                   rebuild prompt
+Phase 3  stop writing wrong data ← 3.1 and 3.2 done; 3.3-3.5 open
    ↓
 Phase 4  verifiability           ← --audit answers "can I trust this?"
    ↓

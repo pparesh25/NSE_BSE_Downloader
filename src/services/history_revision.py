@@ -26,9 +26,16 @@ SYMBOL_ADJUSTMENT_REVISION = 2
 REVISION_NOTICE = (
     "Symbol histories for {exchanges} were built before the corporate-action "
     "volume fix, so bars before an old split or bonus still carry unadjusted "
-    "volume and grid-snapped prices. Run a rebuild for those exchanges to "
-    "adopt the corrected arithmetic; it replays the checksummed .state/raw "
-    "snapshots, so only dates this application downloaded can be repaired."
+    "volume and grid-snapped prices. Run `--rebuild-exchange` for those "
+    "exchanges to adopt the corrected arithmetic; it replays the checksummed "
+    ".state/raw snapshots, so only dates this application downloaded can be "
+    "repaired."
+)
+UNREPAIRABLE_NOTICE = (
+    "Symbol histories for {exchanges} also predate the corporate-action "
+    "volume fix, but there are no .state/raw snapshots for them, so a rebuild "
+    "cannot repair those bars. Re-downloading the affected date range is the "
+    "only way to recover them."
 )
 
 
@@ -86,12 +93,33 @@ class HistoryRevisionStore:
             return False
         return any(directory.glob("*.txt"))
 
-    def stale_exchanges(self) -> List[str]:
-        """Exchanges whose existing symbol files predate the current rule.
+    def _has_raw_snapshots(self, exchange: str) -> bool:
+        directory = self.base_path / ".state" / "raw" / exchange.upper()
+        if not directory.is_dir():
+            return False
+        return any(directory.glob("*/*.csv"))
 
-        A fresh installation has no symbol files and is therefore never stale,
-        so a new user is not told to rebuild something that does not exist.
+    def claim_new_history(self, exchange: str) -> None:
+        """Record the current revision for an exchange starting from nothing.
+
+        Files this build writes from scratch already use the current rule, so
+        an exchange whose history begins now must not be reported as stale.
+        Called before the first symbol file is written; an exchange that
+        already has files is left alone, because those files are what the
+        prompt is about.
         """
+
+        exchange = exchange.upper()
+        if self._has_symbol_files(exchange):
+            return
+        document = self.read()
+        if exchange in document["adjustment"]:
+            return
+        document["adjustment"][exchange] = SYMBOL_ADJUSTMENT_REVISION
+        self._store.write(document)
+
+    def stale_exchanges(self) -> List[str]:
+        """Exchanges whose existing symbol files predate the current rule."""
 
         document = self.read()
         stale = []
@@ -107,9 +135,30 @@ class HistoryRevisionStore:
         return stale
 
     def notice(self) -> str:
-        """Return the rebuild prompt, or an empty string when nothing is stale."""
+        """Return the rebuild prompt, or an empty string when nothing is stale.
 
-        stale = self.stale_exchanges()
-        if not stale:
-            return ""
-        return REVISION_NOTICE.format(exchanges=" and ".join(stale))
+        Exchanges a rebuild cannot reach are named separately rather than
+        folded in, so the prompt never asks for a repair that would fail and
+        then repeat unchanged on every run.
+        """
+
+        repairable: List[str] = []
+        unrepairable: List[str] = []
+        for exchange in self.stale_exchanges():
+            target = (
+                repairable if self._has_raw_snapshots(exchange)
+                else unrepairable
+            )
+            target.append(exchange)
+        lines = []
+        if repairable:
+            lines.append(
+                REVISION_NOTICE.format(exchanges=" and ".join(repairable))
+            )
+        if unrepairable:
+            lines.append(
+                UNREPAIRABLE_NOTICE.format(
+                    exchanges=" and ".join(unrepairable)
+                )
+            )
+        return "\n".join(lines)

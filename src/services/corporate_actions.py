@@ -76,22 +76,28 @@ def adjust_rows(frame: pd.DataFrame, mask: Any, factor: float) -> None:
     absent: delivery fields are legitimately blank for many dates.
     """
 
+    def scale_price(values: pd.Series) -> pd.Series:
+        return (values / factor).round(PRICE_DECIMALS)
+
+    def scale_rate(values: pd.Series) -> pd.Series:
+        return (values * factor).round(RATE_DECIMALS)
+
+    def _scaled_share_counts(values: pd.Series) -> pd.Series:
+        scaled = (values * factor).round()
+        # A consolidation scales share counts *down*, and rounding a thinly
+        # traded day to zero would rewrite a day that traded as a day that did
+        # not -- turnover collapsing to zero is the very thing this adjustment
+        # exists to prevent.  No whole number is right (4 shares at 10:1 is
+        # 0.4), but "it traded" is a fact, so keep the smallest count that
+        # still says so.
+        return scaled.mask((scaled <= 0) & (values > 0), 1).astype("int64")
+
     for column in ADJUSTED_PRICE_COLUMNS:
-        _write_scaled(
-            frame, mask, column,
-            lambda values: (values / factor).round(PRICE_DECIMALS),
-        )
+        _write_scaled(frame, mask, column, scale_price)
     for column in ADJUSTED_RATE_COLUMNS:
-        _write_scaled(
-            frame, mask, column,
-            lambda values: (values * factor).round(RATE_DECIMALS),
-        )
+        _write_scaled(frame, mask, column, scale_rate)
     for column in ADJUSTED_SHARE_COUNT_COLUMNS:
-        # Share counts stay whole numbers, written without a decimal point.
-        _write_scaled(
-            frame, mask, column,
-            lambda values: (values * factor).round().astype("int64"),
-        )
+        _write_scaled(frame, mask, column, _scaled_share_counts)
 
 
 def _write_scaled(

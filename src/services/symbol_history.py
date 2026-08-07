@@ -299,17 +299,21 @@ class SymbolHistoryStore:
 
     @staticmethod
     def _deduplicate(frame: pd.DataFrame) -> pd.DataFrame:
+        """Keep one row per date: the newest, which is the last one offered.
+
+        Every caller concatenates the incoming rows after the stored ones, so
+        "last" means "recomputed from the current raw data by the current
+        rules".  This used to rank by VOLUME instead, which discarded an
+        exchange's corrected bhavcopy whenever the correction reduced volume --
+        and once a corporate action began scaling volume, it let a stale row
+        outrank its own repair, silently and with no failure recorded.
+        """
+
         if frame.empty:
             return frame
-        result = frame.copy()
-        result["_volume_rank"] = pd.to_numeric(
-            result["VOLUME"], errors="coerce"
-        ).fillna(0)
         result = (
-            result.sort_values(["DATE", "_volume_rank"], kind="stable")
+            frame.sort_values("DATE", kind="stable")
             .drop_duplicates("DATE", keep="last")
-            .sort_values("DATE", kind="stable")
-            .drop(columns=["_volume_rank"])
         )
         return result.loc[:, SYMBOL_HISTORY_COLUMNS]
 
@@ -655,6 +659,18 @@ class SymbolHistoryStore:
                 path, quarantine_path, error
             ) from error
 
+    def _claim_history_revision(self, exchange: str) -> None:
+        """Stamp the current adjustment revision on a history starting now."""
+
+        try:
+            from .history_revision import HistoryRevisionStore
+
+            HistoryRevisionStore(self.base_path).claim_new_history(exchange)
+        except Exception:
+            # A missing stamp only costs an unnecessary rebuild prompt.  It
+            # must never stop a download from publishing.
+            pass
+
     def upsert(
         self,
         exchange: str,
@@ -668,6 +684,7 @@ class SymbolHistoryStore:
             return 0
 
         exchange = exchange.upper()
+        self._claim_history_revision(exchange)
         ledger_path = self.state_path / "corporate_actions.json"
         if ledger_path.exists():
             from .corporate_actions import CorporateActionEngine
@@ -940,6 +957,8 @@ class SymbolHistoryStore:
                 item.segment.upper(),
             ),
         )
+        for exchange in {item.exchange.upper() for item in batch}:
+            self._claim_history_revision(exchange)
         ledger_path = self.state_path / "corporate_actions.json"
         if ledger_path.exists():
             from .corporate_actions import CorporateActionEngine

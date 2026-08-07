@@ -1096,12 +1096,70 @@ BSE: 4,931 symbol files, 144 raw snapshot dates (2026-01-01 .. 2026-08-04)
 are not adjusted") and now states the new one, including that pre-1.1.0 histories keep
 the old arithmetic until rebuilt.
 
-357 tests pass on Python 3.10 and 3.13, coverage 76.4%, Ruff and mypy clean,
+#### An adversarial review found four defects in the first cut
+
+The change above was reviewed by independent agents on three lenses (arithmetic and
+dtypes, interaction with existing machinery, the marker itself), each finding put to
+three skeptics. Seven findings survived; four were defects in this work and were fixed
+before it is called done. Every one was reproduced by hand before being accepted.
+
+**1. A consolidation rewrote thinly-traded days as untraded.** `(values * factor).round()`
+with a factor below 1 sends a small share count to zero:
+
+```
+before   20250101, CLOSE 1.0, VOLUME 4, TOTAL_TRADES 2, DELIVERY_QTY 4, DLV% 100
+after    20250101, CLOSE 10.0, VOLUME 0, TOTAL_TRADES 2, DELIVERY_QTY 0, DLV% 100
+```
+
+Turnover ₹4 → ₹0 — a 100% error in the exact quantity this section exists to preserve —
+and the row asserts zero shares traded in two trades at 100% delivery. Nothing catches
+it: `_validate_history` checks only that OHLC parse, and the continuity guard reads only
+CLOSE. On the owner's own BSE tree the 1st-percentile daily volume is **2 shares**, and a
+sample of 600 files (74,772 traded days) had **1,269 days zeroed** at a 10:1
+consolidation. No whole number is right here — 4 shares at 10:1 is 0.4 — but "it traded"
+is a fact, so a positive count now floors at 1. Re-measured on the same sample: 0 zeroed,
+2,123 floored (2.84%).
+
+**2. `_deduplicate` let a stale row outrank its own repair.** It kept the
+**higher-volume** row per date. That was invisible while volume was never adjusted — the
+two rows always tied and position decided — but scaling volume turned the tiebreak into a
+value comparison. On an install upgraded from 1.1.0 the stored bar has the old rule's raw
+volume while a re-download is replayed under the new one, so for a consolidation the
+stale row always wins and a delivery repair is discarded with `failures=()` and no error
+anywhere. This is **3.4's "prefer the newer row" item, pulled forward**, because 3.2 is
+what made it harmful: the later row now wins, which is also the right answer for the case
+3.4 raised (exchanges republish corrected bhavcopies and corrections frequently *reduce*
+volume).
+
+**3. A fresh install was told its histories were stale.** `mark_current` had exactly one
+caller — `rebuild_exchange` — so the moment a new user's first day was published,
+`stale_exchanges()` reported the exchange as revision 1 and the notice repeated at every
+startup, every refresh and after every download, forever. The commit's claim that a fresh
+install is never prompted held only for a data root with nothing downloaded yet. The
+write path now stamps the current revision on an exchange whose history *starts* under
+it, and leaves an exchange that already has files alone.
+
+**4. The prompt asked for a repair that could not run.** `rebuild_exchange` raises when
+`.state/raw/<EX>` is empty and `rebuild_all` derives its exchange list from the snapshots,
+while `stale_exchanges` derives its list from `SYMBOLS/*.txt`. An exchange in one list and
+not the other was stuck: the rebuild failed, the notice reprinted unchanged, forever. The
+notice now names those exchanges separately and says a rebuild cannot repair them.
+
+**Two findings were left, deliberately.** An adjusted price can still round to `0.00` for
+a stock under ₹0.005 × factor — but the strongest refutation measured the owner's real
+tree (1,057,347 closes, 147 applied actions) and found the closest real action was 70×
+clear of the threshold, while this change already *improves* the count 26× over the tick
+snap it replaced (1,618 → 61 closes at factor 10). Rejecting zero OHLC is 3.4's item and
+belongs there. Separately, `rebuild_exchange` can revert an adjustment for a symbol whose
+`stable_id` fell back to its ticker and was later renamed — reproduced at `3bdf198^` as
+well, so it is pre-existing, and it is an identity defect that belongs to **3.3**.
+
+362 tests pass on Python 3.10 and 3.13, coverage 76.5%, Ruff and mypy clean,
 `--smoke-gui` exits 0. Each new test was run against the code with its own fix reverted
-and fails there — including one that first passed for the wrong reason: the byte-equality
-version of the replay test was satisfied by `_deduplicate` discarding the unscaled row,
-so it was replaced with a column-by-column comparison that fails on `CLOSE 45.9 != 45.92`
-and on VOLUME.
+and fails there — including **two that first passed for the wrong reason**: the
+byte-equality version of the replay test was satisfied by `_deduplicate` discarding the
+unscaled row, and the first dedup test built its stored row with the *current* build, so
+both rows tied and the old rule passed it too. Both were rewritten until they failed.
 
 ### 3.3 Protect symbol identity — effort S
 
@@ -1144,9 +1202,12 @@ complete trading day and never re-downloaded.
 - [ ] Reject all-zero OHLC rows and add an `LOW <= min(O,C) <= max(O,C) <= HIGH` check —
       currently only NaN and negative are rejected, so `0,0,0,0,0` publishes and reads
       downstream as a genuine −100% day
-- [ ] Prefer the *newer* row in `_deduplicate`, not the higher-volume one. Exchanges
+- [x] Prefer the *newer* row in `_deduplicate`, not the higher-volume one. Exchanges
       republish corrected bhavcopies and corrections frequently *reduce* volume, so the
-      corrected row is currently discarded in favour of the erroneous one
+      corrected row is currently discarded in favour of the erroneous one.
+      **Done in 3.2**, which is what made it urgent: once a corporate action scaled
+      volume, the higher-volume rank became a value comparison a stale row could win, so
+      a delivery repair was silently discarded on any upgraded install
 - [ ] Explicit `lineterminator="\n"` on `to_csv` — output is currently `os.linesep`, so
       a cloud-synced or cross-platform data root produces byte-different files and
       breaks the sha256-based corporate-action ledger

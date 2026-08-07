@@ -22,14 +22,41 @@ def _rows(day="20250101"):
     }])
 
 
+def _upgraded_tree(tmp_path, *exchanges):
+    """A data root as an older build left it: symbol files, and no marker."""
+
+    histories = SymbolHistoryStore(tmp_path)
+    for exchange in exchanges:
+        histories.upsert(exchange, "EQ", date(2025, 1, 1), _rows())
+    (tmp_path / ".state" / "history_revision.json").unlink(missing_ok=True)
+    (tmp_path / ".state" / "history_revision.json.bak").unlink(missing_ok=True)
+    return histories
+
+
 def test_a_fresh_installation_is_never_asked_to_rebuild(tmp_path):
     store = HistoryRevisionStore(tmp_path)
     assert store.stale_exchanges() == []
     assert store.notice() == ""
 
 
-def test_symbol_files_written_before_the_marker_are_stale(tmp_path):
+def test_a_history_this_build_started_is_not_stale(tmp_path):
+    """The prompt is about files an older build wrote, not new downloads."""
+
     SymbolHistoryStore(tmp_path).upsert("NSE", "EQ", date(2025, 1, 1), _rows())
+    store = HistoryRevisionStore(tmp_path)
+    assert store.revision_for("NSE") == SYMBOL_ADJUSTMENT_REVISION
+    assert store.stale_exchanges() == []
+    assert store.notice() == ""
+
+    # A later day must not disturb the stamp either.
+    SymbolHistoryStore(tmp_path).upsert(
+        "NSE", "EQ", date(2025, 1, 2), _rows("20250102")
+    )
+    assert store.stale_exchanges() == []
+
+
+def test_symbol_files_written_before_the_marker_are_stale(tmp_path):
+    _upgraded_tree(tmp_path, "NSE")
     store = HistoryRevisionStore(tmp_path)
     assert store.stale_exchanges() == ["NSE"]
     notice = store.notice()
@@ -39,17 +66,14 @@ def test_symbol_files_written_before_the_marker_are_stale(tmp_path):
 
 
 def test_only_exchanges_with_symbol_files_are_reported(tmp_path):
-    histories = SymbolHistoryStore(tmp_path)
-    histories.upsert("NSE", "EQ", date(2025, 1, 1), _rows())
+    _upgraded_tree(tmp_path, "NSE")
     (tmp_path / "BSE" / "EQ").mkdir(parents=True)
     (tmp_path / "BSE" / "EQ" / "2025-01-01.txt").write_text("x\n")
     assert HistoryRevisionStore(tmp_path).stale_exchanges() == ["NSE"]
 
 
 def test_a_rebuild_clears_the_prompt_for_that_exchange(tmp_path):
-    histories = SymbolHistoryStore(tmp_path)
-    histories.upsert("NSE", "EQ", date(2025, 1, 1), _rows())
-    histories.upsert("BSE", "EQ", date(2025, 1, 1), _rows())
+    _upgraded_tree(tmp_path, "NSE", "BSE")
     store = HistoryRevisionStore(tmp_path)
     assert store.stale_exchanges() == ["BSE", "NSE"]
 
@@ -57,6 +81,21 @@ def test_a_rebuild_clears_the_prompt_for_that_exchange(tmp_path):
     assert store.stale_exchanges() == ["BSE"]
     assert store.revision_for("NSE") == SYMBOL_ADJUSTMENT_REVISION
     assert store.revision_for("BSE") == 1
+
+
+def test_an_exchange_a_rebuild_cannot_reach_is_named_separately(tmp_path):
+    """A prompt that asks for a repair which fails would repeat forever."""
+
+    _upgraded_tree(tmp_path, "NSE", "BSE")
+    import shutil
+
+    shutil.rmtree(tmp_path / ".state" / "raw" / "BSE")
+    notice = HistoryRevisionStore(tmp_path).notice()
+    assert "--rebuild-exchange" in notice
+    lines = notice.splitlines()
+    assert len(lines) == 2
+    assert "NSE" in lines[0] and "BSE" not in lines[0]
+    assert "BSE" in lines[1] and "cannot repair" in lines[1]
 
 
 def test_the_marker_is_a_validated_state_document(tmp_path):

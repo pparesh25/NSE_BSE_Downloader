@@ -476,6 +476,79 @@ def test_a_consolidation_reduces_the_share_counts(tmp_path):
     assert int(adjusted.loc[0, "DELIVERY_QTY"]) == 250
 
 
+def test_a_consolidation_never_rewrites_a_traded_day_as_untraded(tmp_path):
+    """4 shares at 10:1 is 0.4 new shares, and rounding that to 0 is a lie.
+
+    On the owner's own BSE tree the 1st-percentile daily volume is 2 shares,
+    so this is the ordinary illiquid population a reverse split lands on.
+    """
+
+    rows = _history_rows(("20250101", "20250102"), (1.0, 10.0))
+    rows.loc[0, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [4, 2, 4]
+    rows.loc[1, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [900, 20, 400]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("BSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "BSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
+    )])
+    adjusted = pd.read_csv(tmp_path / "BSE" / "SYMBOLS" / "abc.txt")
+    traded = adjusted.loc[adjusted["DATE"] == 20250101].iloc[0]
+    assert int(traded["VOLUME"]) == 1
+    assert int(traded["DELIVERY_QTY"]) == 1
+    # A row claiming zero shares in two trades at 100% delivery is not a
+    # rounding nuisance, it is a contradiction.
+    assert int(traded["VOLUME"]) > 0 and int(traded["TOTAL_TRADES"]) > 0
+
+
+def test_a_day_that_did_not_trade_stays_at_zero(tmp_path):
+    rows = _history_rows(("20250101", "20250102"), (1.0, 10.0))
+    rows.loc[0, ["VOLUME", "TOTAL_TRADES", "DELIVERY_QTY"]] = [0, 0, 0]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("BSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "BSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
+    )])
+    adjusted = pd.read_csv(tmp_path / "BSE" / "SYMBOLS" / "abc.txt")
+    assert int(adjusted.loc[0, "VOLUME"]) == 0
+
+
+def test_a_repair_is_never_outranked_by_the_row_it_replaces(tmp_path):
+    """`_deduplicate` used to keep the higher-volume row per date.
+
+    On an install upgraded from 1.1.0 the stored bar carries the old rule's
+    raw volume while a re-download is replayed under the new one. For a
+    consolidation the new value is smaller, so the stale row won the rank and
+    the repair was discarded with no failure recorded anywhere.
+    """
+
+    rows = _history_rows(("20250101", "20250102"), (3.8, 38.0))
+    rows.loc[0, ["VOLUME", "DELIVERY_QTY"]] = [300000, 150000]
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
+    CorporateActionEngine(tmp_path).apply([CorporateAction(
+        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
+    )])
+    path = tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
+
+    # Put the stored bar back the way version 1.1.0 would have left it:
+    # price adjusted, share counts raw.
+    legacy = pd.read_csv(path, dtype=str)
+    legacy.loc[0, ["VOLUME", "DELIVERY_QTY"]] = ["300000", "150000"]
+    legacy.to_csv(path, index=False)
+
+    # A late delivery report now corrects the quantity for the same date.
+    repair = rows.iloc[[0]].copy()
+    repair.loc[:, "DELIVERY_QTY"] = 222222
+    store.upsert("NSE", "EQ", date(2025, 1, 1), repair)
+
+    published = pd.read_csv(path)
+    assert int(published.loc[0, "DELIVERY_QTY"]) == 22222
+    assert int(published.loc[0, "VOLUME"]) == 30000
+
+
 def test_adjusted_prices_are_no_longer_snapped_to_a_tick_grid(tmp_path):
     """202.75 / 20 is 10.1375. The pre-3.2 code wrote 10.15."""
 

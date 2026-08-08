@@ -75,7 +75,7 @@ def test_nse_index_allows_blank_optional_ohlc_but_rejects_bad_text():
 def test_version_history_drives_update_notification():
     assert get_version() == "1.1.0"
     notes = VERSION_HISTORY["1.1.0"]
-    assert notes["release_date"] == "2026-07-31"
+    assert notes["release_date"] == "2026-08-09"
     assert any("delivery" in item.lower() for item in notes["features"])
     assert any("open interest" in item.lower() for item in notes["features"])
     assert any("calendar" in item.lower() for item in notes["features"])

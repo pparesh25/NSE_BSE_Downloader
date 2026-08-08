@@ -5,7 +5,7 @@ Contains application version and build information.
 """
 
 __version__ = "1.1.0"
-__build_date__ = "2026-08-04"
+__build_date__ = "2026-08-09"
 __build_number__ = 27
 
 # Verified update artifacts, keyed by "<platform>-<architecture>" exactly as
@@ -32,7 +32,7 @@ __update_artifacts__: dict[str, dict[str, str]] = {
 VERSION_HISTORY = {
 
     "1.1.0": {
-        "release_date": "2026-07-31",
+        "release_date": "2026-08-09",
         "features": [
             "One date-aware downloader path for every legacy and current NSE/BSE report URL",
             "Stable 9-column NSE/BSE equity output with delivery quantity and percentage",
@@ -50,7 +50,9 @@ VERSION_HISTORY = {
             "Nuitka-safe resource paths, stable app identity and guarded packaging dry run",
             "Responsive default GUI layout with readable macOS source-process identity",
             "Python 3.10/3.13 CI quality gates with enforced 70 percent coverage",
-            "Staged-only per-date publication with stable canonical output columns"
+            "Staged-only per-date publication with stable canonical output columns",
+            "Self-identifying symbol histories carrying the security ISIN",
+            "One writer per data folder, so two copies cannot overwrite each other"
         ],
         "bug_fixes": [
             "Fixed NSE SME filename switch from two-digit to four-digit year",
@@ -65,7 +67,16 @@ VERSION_HISTORY = {
             "Prevented stale hard-coded holidays and host-timezone drift from selecting the wrong trading date",
             "Preserved update preferences through the same config and user-setting precedence path",
             "Removed working-directory and duplicate version-data assumptions from packaged execution",
-            "Kept both date controls and the Donate action visible in the default window"
+            "Kept both date controls and the Donate action visible in the default window",
+            "Read every adjustment in one corporate action, not only the first",
+            "Moved traded and delivered quantities with a split, keeping turnover intact",
+            "Kept a thinly traded day from being rewritten as an untraded day",
+            "Preferred an exchange's corrected bhavcopy over the row it replaces",
+            "Stopped a reused ticker from appending into a delisted company's history",
+            "Refused to merge two histories that claim the same trading dates",
+            "Kept superseded symbol files in quarantine instead of deleting them",
+            "Rejected placeholder and truncated daily reports instead of publishing them",
+            "Wrote every output file with one line ending on all platforms"
         ]
     },
 

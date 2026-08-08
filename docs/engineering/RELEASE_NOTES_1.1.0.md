@@ -66,6 +66,30 @@ wrong.
 **Stop actually stops.** Cancellation waits for the current atomic operation instead of
 killing the worker, so published files stay valid.
 
+**Corporate actions are read in full.** An announcement often names a bonus *and* a
+face-value split together ("Bonus 1:1 / Face Value Split From Rs 10/- To Re 1/-", whose
+true factor is 20). Both are now read and composed instead of only the first, and an
+announcement that cannot be read produces a stated reason rather than a guess. Traded
+quantity, delivered quantity and quantity-per-trade move with the split as well as the
+price, so turnover across an ex-date stays what the market actually traded — and a
+thinly traded day is never rewritten as a day with no trades.
+
+**A ticker is not a company.** When an exchange reassigns a delisted ticker to a new
+company, the new company's rows used to be appended into the delisted company's file,
+where one row per shared date was then destroyed. Each history file now remembers the
+security it belongs to, carries that security's ISIN in a final column, and a merge is
+refused outright when two files claim the same trading dates. A file that is superseded
+by a rename is kept in quarantine rather than deleted.
+
+**A short day is not a trading day.** A placeholder or truncated report used to publish
+as a complete day and was never downloaded again. A day whose row count is implausible
+beside the sessions around it is now rejected and re-queued, and a published file whose
+line count no longer matches what was written is treated as damaged and repaired.
+
+**Only one copy writes at a time.** Two copies of the application pointed at the same
+data folder overwrote each other's symbol histories with no error anywhere. The second
+copy now says so and stops; repair commands take the same lock.
+
 Full changelog: see `VERSION_HISTORY` in
 [version.py](https://github.com/pparesh25/NSE_BSE_Downloader/blob/main/version.py).
 
@@ -80,7 +104,9 @@ Three things to know:
    again, so the folder will contain both. If your own scripts read these files, handle
    both widths or re-download the dates you care about.
 2. **Symbol history files start empty.** They are built from downloads made *after* you
-   upgrade. Re-download a date range to populate history for past dates.
+   upgrade. Re-download a date range to populate history for past dates. Each history
+   file carries the security's ISIN as a final twelfth column; the first eleven are
+   unchanged, so anything reading them by position keeps working.
 3. **Your settings carry over.** A few v1.0.1 settings that no longer control anything
    are dropped. Worth a glance at the Settings panel once.
 4. **The app tidies up after itself.** Inside the hidden `.state` folder it keeps a few

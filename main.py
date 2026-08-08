@@ -5,7 +5,7 @@ NSE/BSE Data Downloader - Main Entry Point
 A comprehensive data downloader for NSE and BSE market data with:
 - Concurrent downloads for faster processing
 - Memory optimization for large datasets
-- PyQt6 GUI interface for easy use
+- PySide6 GUI interface for easy use
 - Smart date management and automatic updates
 
 Usage:
@@ -17,18 +17,61 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add src directory to Python path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+MINIMUM_PYTHON = (3, 10)
 
-from src.core.config import Config
-from src.gui.main_window import MainWindow
+
+def _require_supported_python() -> None:
+    """Stop with a readable message instead of an error from a later import.
+
+    Users upgrading from v1.0.1 may still be on the Python 3.8 that release
+    supported.  Every ``src`` module uses syntax that only parses on 3.10 or
+    newer, so this has to run before the first project import.
+    """
+
+    if sys.version_info >= MINIMUM_PYTHON:
+        return
+    running = ".".join(str(part) for part in sys.version_info[:3])
+    required = ".".join(str(part) for part in MINIMUM_PYTHON)
+    print(
+        "Error: this application needs Python {0} or newer, but it is running "
+        "on Python {1}.".format(required, running)
+    )
+    print("Install a newer Python from https://www.python.org/downloads/ and")
+    print("run the application with it, then reinstall the dependencies:")
+    print("    pip install -r requirements.txt")
+    print("See UPGRADE.md for the full upgrade instructions.")
+    raise SystemExit(1)
+
+
+_require_supported_python()
 
 try:
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QApplication
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
-    print("Warning: PyQt6 not available. GUI mode disabled.")
+    print("Warning: PySide6 not available. GUI mode disabled.")
+    print("Install the application dependencies with:")
+    print("    pip install -r requirements.txt")
+    print(
+        "Version 1.1.0 replaced PyQt6 with PySide6, so an installation carried "
+        "over from v1.0.1 needs this step.  See UPGRADE.md."
+    )
+
+# Deliberately below the interpreter check: these modules use syntax that only
+# parses on Python 3.10 or newer, so importing them first would replace the
+# guard's readable message with a SyntaxError traceback.
+from src.core.config import Config  # noqa: E402
+from runtime_paths import default_config_path, resource_path  # noqa: E402
+from runtime_identity import configure_process_identity  # noqa: E402
+from version import get_version  # noqa: E402
+from app_metadata import (  # noqa: E402
+    APP_NAME,
+    ORGANIZATION_DOMAIN,
+    ORGANIZATION_NAME,
+    PRODUCT_NAME,
+)
 
 
 def setup_argument_parser():
@@ -40,46 +83,203 @@ def setup_argument_parser():
 Examples:
     python main.py                    # Launch GUI
     python main.py --config custom.yaml  # Use custom config
+    python main.py --rebuild-symbol NSE RELIANCE
+    python main.py --rebuild-exchange BSE
+    python main.py --rebuild-combined NSE 2026-07-31
         """
     )
 
     parser.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).parent / "config.yaml"),
+        default=str(default_config_path()),
         help="Path to configuration file (default: config.yaml)"
+    )
+
+    repair = parser.add_mutually_exclusive_group()
+    repair.add_argument(
+        "--rebuild-symbol",
+        nargs=2,
+        metavar=("EXCHANGE", "SYMBOL"),
+        help="Rebuild one symbol history from validated raw snapshots",
+    )
+    parser.add_argument(
+        "--smoke-gui",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    repair.add_argument(
+        "--rebuild-exchange",
+        choices=("NSE", "BSE"),
+        help="Rebuild every symbol history for one exchange",
+    )
+    repair.add_argument(
+        "--rebuild-registry",
+        action="store_true",
+        help="Rebuild the stable-id/symbol registry from raw snapshots",
+    )
+    repair.add_argument(
+        "--rebuild-all",
+        action="store_true",
+        help="Rebuild all NSE/BSE symbol histories from raw snapshots",
+    )
+    repair.add_argument(
+        "--rebuild-combined",
+        nargs=2,
+        metavar=("EXCHANGE", "YYYY-MM-DD"),
+        help="Rebuild one deterministic EQ+SME/Index output from components",
     )
 
     return parser
 
 
-def run_gui_mode(config_path: str):
-    """Run the application in GUI mode"""
-    if not GUI_AVAILABLE:
-        print("Error: PyQt6 is not installed. Cannot run GUI mode.")
-        print("Install PyQt6 with: pip install PyQt6")
+def run_rebuild_mode(config_path: str, args) -> int:
+    """Run an explicit fail-closed symbol-history repair command."""
+
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
+    try:
+        config = Config(config_path)
+    except Exception as error:
+        print(f"Repair failed; existing data was left in place: {error}")
         return 1
 
-    # Enable High DPI support (PyQt6 compatible)
+    # A rebuild rewrites the same histories a running download appends to, so
+    # it takes the same lock the application holds.
+    try:
+        lock = SingleInstanceLock(config.base_data_path).acquire()
+    except InstanceLockError as error:
+        print(f"Repair not started: {error}")
+        return 1
+
+    try:
+        if args.rebuild_combined:
+            from datetime import date
+            from src.services.combined_file_builder import CombinedFileBuilder
+            from src.utils.user_preferences import UserPreferences
+
+            exchange, raw_date = args.rebuild_combined
+            exchange = exchange.upper()
+            if exchange not in {"NSE", "BSE"}:
+                raise ValueError("EXCHANGE must be NSE or BSE")
+            target_date = date.fromisoformat(raw_date)
+            builder = CombinedFileBuilder(config)
+            dependencies = builder.dependencies_from_options(
+                exchange,
+                UserPreferences(config).get_append_options(),
+            )
+            build_result = builder.reconcile(
+                exchange, target_date, dependencies
+            )
+            if not build_result.ok:
+                raise RuntimeError(build_result.error)
+            print(
+                f"Rebuilt {build_result.output_path} with "
+                f"{build_result.rows} rows from "
+                f"{', '.join(build_result.components)}"
+            )
+            return 0
+
+        from src.services.rebuild_service import SymbolHistoryRebuilder
+
+        rebuilder = SymbolHistoryRebuilder(config.base_data_path)
+        if args.rebuild_symbol:
+            exchange, symbol = args.rebuild_symbol
+            path = rebuilder.rebuild_symbol(exchange, symbol)
+            print(f"Rebuilt symbol history: {path}")
+        elif args.rebuild_exchange:
+            paths = rebuilder.rebuild_exchange(args.rebuild_exchange)
+            print(
+                f"Rebuilt {len(paths)} {args.rebuild_exchange} symbol histories"
+            )
+        elif args.rebuild_registry:
+            count = rebuilder.rebuild_registry()
+            print(f"Rebuilt symbol registry with {count} stable identifiers")
+        elif args.rebuild_all:
+            result = rebuilder.rebuild_all()
+            count = sum(len(paths) for paths in result.values())
+            print(f"Rebuilt {count} symbol histories across all exchanges")
+
+        from src.services.history_revision import HistoryRevisionStore
+
+        notice = HistoryRevisionStore(config.base_data_path).notice()
+        if notice:
+            print(notice)
+        return 0
+    except Exception as error:
+        print(f"Repair failed; existing data was left in place: {error}")
+        return 1
+    finally:
+        lock.release()
+
+
+def run_gui_mode(config_path: str, *, smoke_test: bool = False):
+    """Run the application in GUI mode"""
+    if not GUI_AVAILABLE:
+        print("Error: PySide6 is not installed. Cannot run GUI mode.")
+        print("Install the application dependencies with:")
+        print("    pip install -r requirements.txt")
+        return 1
+
+    # Imported here rather than at module scope so that the repair commands and
+    # the messages above still work on an installation whose dependencies have
+    # not been updated yet.
+    from src.gui.main_window import MainWindow
+
+    # Enable High DPI support
     import os
     os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
     os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
     os.environ['QT_SCALE_FACTOR'] = '1'
 
+    configure_process_identity()
     app = QApplication(sys.argv)
-    app.setApplicationName("NSE/BSE Data Downloader")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(PRODUCT_NAME)
+    app.setApplicationVersion(get_version())
+    app.setOrganizationName(ORGANIZATION_NAME)
+    app.setOrganizationDomain(ORGANIZATION_DOMAIN)
+    app_icon = QIcon(str(resource_path("src", "gui", "resources", "icon.png")))
+    if app_icon.isNull():
+        print("Error: bundled application icon could not be loaded.")
+        return 1
+    app.setWindowIcon(app_icon)
 
     # Set application style
     app.setStyle("Fusion")
 
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
+    lock = None
     try:
         # Initialize configuration
         config = Config(config_path)
 
+        # Two copies writing one data root destroy each other's histories
+        # silently, so the second copy stops here rather than at the first
+        # damaged file.
+        try:
+            lock = SingleInstanceLock(config.base_data_path).acquire()
+        except InstanceLockError as error:
+            print(f"Error starting GUI: {error}")
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(None, "Already running", str(error))
+            return 1
+
         # Create and show main window
         main_window = MainWindow(config)
+        main_window.setWindowIcon(app_icon)
         main_window.show()
+
+        if smoke_test:
+            # Exercise real widget construction, one event-processing pass,
+            # and the normal close path without relying on a compiled Python
+            # timer callback to terminate the release probe.
+            app.processEvents()
+            main_window.close()
+            app.processEvents()
+            return 0
 
         # Run the application
         return app.exec()
@@ -87,6 +287,9 @@ def run_gui_mode(config_path: str):
     except Exception as e:
         print(f"Error starting GUI: {e}")
         return 1
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 
@@ -104,7 +307,18 @@ def main():
         return 1
 
     try:
+        if (
+            args.rebuild_symbol
+            or args.rebuild_exchange
+            or args.rebuild_registry
+            or args.rebuild_all
+            or args.rebuild_combined
+        ):
+            return run_rebuild_mode(str(config_path), args)
+
         # Run in GUI mode
+        if args.smoke_gui:
+            return run_gui_mode(str(config_path), smoke_test=True)
         return run_gui_mode(str(config_path))
 
     except KeyboardInterrupt:
@@ -117,5 +331,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-    

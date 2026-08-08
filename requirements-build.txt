@@ -1,0 +1,11 @@
+# Install only in the dedicated packaging environment.
+Nuitka==4.1.3
+ordered-set==4.1.0
+zstandard==0.25.0
+
+# Exact Qt runtime for reproducible artifacts.  requirements.txt deliberately
+# allows a range so that source installs work on older operating systems; this
+# file narrows that range to the single validated version, so an unvalidated Qt
+# minor release can never produce a binary that differs from a clean CI runner.
+# Both files are installed together for every release build.
+PySide6==6.10.2

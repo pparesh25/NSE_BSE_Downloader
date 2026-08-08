@@ -17,7 +17,7 @@ from .exceptions import (
 __all__ = [
     "Config",
     "DataManager",
-    "BaseDownloader", 
+    "BaseDownloader",
     "DownloaderError",
     "ConfigError",
     "DataProcessingError",

@@ -9,11 +9,11 @@ from typing import Optional, Any
 
 class DownloaderError(Exception):
     """Base exception class for all downloader-related errors"""
-    
+
     def __init__(self, message: str, details: Optional[Any] = None):
         """
         Initialize downloader error
-        
+
         Args:
             message: Error message
             details: Additional error details (optional)
@@ -21,7 +21,7 @@ class DownloaderError(Exception):
         super().__init__(message)
         self.message = message
         self.details = details
-    
+
     def __str__(self) -> str:
         if self.details:
             return f"{self.message} (Details: {self.details})"
@@ -35,11 +35,11 @@ class ConfigError(DownloaderError):
 
 class DataProcessingError(DownloaderError):
     """Raised when there are data processing errors"""
-    
+
     def __init__(self, message: str, file_path: Optional[str] = None, details: Optional[Any] = None):
         """
         Initialize data processing error
-        
+
         Args:
             message: Error message
             file_path: Path to file that caused the error (optional)
@@ -47,7 +47,7 @@ class DataProcessingError(DownloaderError):
         """
         super().__init__(message, details)
         self.file_path = file_path
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.file_path:
@@ -57,11 +57,11 @@ class DataProcessingError(DownloaderError):
 
 class NetworkError(DownloaderError):
     """Raised when there are network-related errors"""
-    
+
     def __init__(self, message: str, url: Optional[str] = None, status_code: Optional[int] = None, details: Optional[Any] = None):
         """
         Initialize network error
-        
+
         Args:
             message: Error message
             url: URL that caused the error (optional)
@@ -71,7 +71,7 @@ class NetworkError(DownloaderError):
         super().__init__(message, details)
         self.url = url
         self.status_code = status_code
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.url:
@@ -81,13 +81,24 @@ class NetworkError(DownloaderError):
         return base_msg
 
 
+class CircuitOpenError(NetworkError):
+    """Raised when a host's circuit breaker is open and rejects a request.
+
+    A distinct type because this is not a request outcome.  Nothing was sent, so
+    it must not count as a failure against the same breaker that produced it --
+    otherwise every rejected date re-arms the cooldown and the circuit can never
+    close.  Callers match on the type rather than the message, which carries the
+    URL and would otherwise be substring-matched for status codes.
+    """
+
+
 class FileOperationError(DownloaderError):
     """Raised when there are file operation errors"""
-    
+
     def __init__(self, message: str, file_path: Optional[str] = None, operation: Optional[str] = None, details: Optional[Any] = None):
         """
         Initialize file operation error
-        
+
         Args:
             message: Error message
             file_path: Path to file that caused the error (optional)
@@ -97,7 +108,7 @@ class FileOperationError(DownloaderError):
         super().__init__(message, details)
         self.file_path = file_path
         self.operation = operation
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.operation:
@@ -109,11 +120,11 @@ class FileOperationError(DownloaderError):
 
 class DateRangeError(DownloaderError):
     """Raised when there are date range calculation errors"""
-    
+
     def __init__(self, message: str, start_date: Optional[str] = None, end_date: Optional[str] = None, details: Optional[Any] = None):
         """
         Initialize date range error
-        
+
         Args:
             message: Error message
             start_date: Start date that caused the error (optional)
@@ -123,7 +134,7 @@ class DateRangeError(DownloaderError):
         super().__init__(message, details)
         self.start_date = start_date
         self.end_date = end_date
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.start_date or self.end_date:
@@ -134,11 +145,11 @@ class DateRangeError(DownloaderError):
 
 class MemoryError(DownloaderError):
     """Raised when there are memory-related errors"""
-    
+
     def __init__(self, message: str, memory_usage: Optional[str] = None, details: Optional[Any] = None):
         """
         Initialize memory error
-        
+
         Args:
             message: Error message
             memory_usage: Memory usage information (optional)
@@ -146,7 +157,7 @@ class MemoryError(DownloaderError):
         """
         super().__init__(message, details)
         self.memory_usage = memory_usage
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.memory_usage:
@@ -156,11 +167,11 @@ class MemoryError(DownloaderError):
 
 class ValidationError(DownloaderError):
     """Raised when there are data validation errors"""
-    
+
     def __init__(self, message: str, field_name: Optional[str] = None, field_value: Optional[Any] = None, details: Optional[Any] = None):
         """
         Initialize validation error
-        
+
         Args:
             message: Error message
             field_name: Name of field that failed validation (optional)
@@ -170,7 +181,7 @@ class ValidationError(DownloaderError):
         super().__init__(message, details)
         self.field_name = field_name
         self.field_value = field_value
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.field_name:
@@ -183,11 +194,11 @@ class ValidationError(DownloaderError):
 
 class GUIError(DownloaderError):
     """Raised when there are GUI-related errors"""
-    
+
     def __init__(self, message: str, widget_name: Optional[str] = None, details: Optional[Any] = None):
         """
         Initialize GUI error
-        
+
         Args:
             message: Error message
             widget_name: Name of widget that caused the error (optional)
@@ -195,7 +206,7 @@ class GUIError(DownloaderError):
         """
         super().__init__(message, details)
         self.widget_name = widget_name
-    
+
     def __str__(self) -> str:
         base_msg = super().__str__()
         if self.widget_name:

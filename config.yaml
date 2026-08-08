@@ -1,5 +1,21 @@
 # NSE/BSE Data Downloader Configuration
 
+app_settings:
+  release_date: "2026-08-04"
+  features:
+    - "Date-aware legacy/current NSE and BSE downloads"
+    - "Delivery volume and percentage for NSE/BSE cash data"
+    - "Open interest and change in OI for NSE futures"
+    - "Corporate-action-adjusted symbol-wise text histories"
+    - "Strict source validation and resumable per-date repair"
+    - "Deterministic restart-safe EQ, SME and Index reconciliation"
+    - "Custom calendar ranges and collapsible GUI sections"
+    - "Official NSE holiday refresh with IST-aware trading dates"
+    - "Cooperative cancellation and typed GUI outcomes"
+    - "Nuitka-safe bundled resources and stable packaged-app identity"
+    - "Responsive default GUI layout and source-mode process identity"
+    - "Python 3.10/3.13 CI gates with enforced test coverage"
+    - "Automatic update notifications"
 
 # Data storage paths
 data_paths:
@@ -19,18 +35,60 @@ download_settings:
   max_concurrent_downloads: 1  # Sequential downloads for stability
   retry_attempts: 3  # Consistent retry attempts for all servers
   timeout_seconds: 5  # Wait for server response (user configurable)
+  # Split budgets.  Without these three keys the value above becomes an aiohttp
+  # *total* timeout covering the connect plus every body read, which a
+  # multi-megabyte UDiFF ZIP cannot finish in 5 seconds.  Keeping them separate
+  # lets `timeout_seconds` stay the responsiveness dial while a slow but healthy
+  # transfer still runs to completion.
+  connect_timeout_seconds: 10   # TCP and TLS handshake only
+  read_timeout_seconds: 60      # allowed gap between two body chunks
+  attempt_timeout_seconds: 300  # one whole attempt, including a large download
   chunk_size: 8192
   rate_limit_delay: 0.5  # Consistent delay between requests for all servers
+  # Phase 7 bounded stage defaults; date selection/scheduling is unchanged.
+  prepare_workers: 2
+  persistence_workers: 1
+  stage_queue_size: 2
+  prepared_cache_dates: 4
+  # How many date/segment entries one symbol-history batch may hold.  A batch
+  # loads all of its entries at once and rewrites each touched symbol file
+  # once, so this trades peak memory against write volume: lower is smaller
+  # and slower, higher is faster and larger.  A multi-year backfill needs this
+  # bounded -- publishing every collected date in one batch is what used to
+  # exhaust memory at the very end of a long run.
+  history_batch_dates: 50
 
 # Download options for data processing
 download_options:
+  # Extended canonical market data
+  include_delivery_data: true
+  include_fo_open_interest: true
+  generate_symbol_files: true
+  apply_corporate_actions: true
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 
-  # Data Append Options (Memory-based)
+  # Deterministic combined-file options
   sme_append_to_eq: true      # Append NSE SME data to NSE EQ files
   index_append_to_eq: true    # Append NSE Index data to NSE EQ files
   bse_index_append_to_eq: true # Append BSE Index data to BSE EQ files
+
+# Retention for the diagnostic copies under `<data folder>/.state`.  These
+# trees are kept so a human can inspect what went wrong after a failed run;
+# nothing in the application reads them back, and they grow without limit
+# during a multi-year backfill.  `.state/raw` -- the checksummed snapshots the
+# `--rebuild-*` commands read -- is never pruned.  A negative value disables
+# the rule it belongs to.
+state_retention:
+  quarantine_days: 30            # per category, e.g. source_reports, history
+  quarantine_max_files: 100      # newest kept per category
+  raw_revision_days: 90          # superseded raw snapshots
+  raw_revision_max_per_date: 5   # newest kept per exchange/segment/date
+  # `.state/backups/history` held a copy of every symbol file, written before
+  # every write and read by nothing.  v1.1.0 stopped writing it; 0 clears out
+  # what an earlier version left behind.  Raise it to keep that tree instead.
+  legacy_backup_days: 0
 
 # Date settings
 date_settings:
@@ -41,11 +99,11 @@ date_settings:
 
 # GUI settings
 gui_settings:
-  window_title: "NSE/BSE Data Downloader"
-  window_width: 648
+  window_title: "NSE BSE Data Downloader"
+  window_width: 720
   window_height: 960
-  default_exchanges: 
-    - "NSE_EQ"    
+  default_exchanges:
+    - "NSE_EQ"
   progress_update_interval: 100  # milliseconds
 
 # Exchange URLs and patterns

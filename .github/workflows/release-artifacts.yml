@@ -1,0 +1,107 @@
+name: Release Artifact Builds
+
+# A full three-platform Nuitka compile takes about 27 minutes, so it is tied to a
+# version rather than to every commit.  Quality Gates validates the packaging
+# command for all three targets on each change, which is what catches packaging
+# configuration errors; only a real release needs the compiled artifacts.
+# Use workflow_dispatch to build a candidate from any branch on demand.
+"on":
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-artifacts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS 15 ARM64
+            runner: macos-15
+            target: darwin
+            architecture: arm64
+          - label: Windows 2022 x64
+            runner: windows-2022
+            target: windows
+            architecture: x64
+          - label: Ubuntu 24.04 x64
+            runner: ubuntu-24.04
+            target: linux
+            architecture: x64
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --yes libegl1 patchelf ccache
+
+      - name: Install runtime-only release dependencies
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          -r requirements.txt
+          -r requirements-build.txt
+
+      - name: Confirm clean release dependency boundary
+        shell: bash
+        run: |
+          python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
+          python -c "import importlib.util; assert importlib.util.find_spec('mypy') is None"
+
+      - name: Build Nuitka package
+        run: >-
+          python build_nuitka_cross_platform.py
+          --target-platform=${{ matrix.target }}
+          --build
+          --clean
+          --output-dir=build-output
+
+      - name: Smoke-test and package release ZIP
+        run: >-
+          python package_release_artifact.py
+          --target-platform=${{ matrix.target }}
+          --architecture=${{ matrix.architecture }}
+          --build-dir=build-output
+          --output-dir=release-output
+
+      - name: Upload release candidate and build report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.target }}-${{ matrix.architecture }}-release-candidate
+          path: |
+            release-output/*.zip
+            release-output/*.sha256
+            build-output/nuitka-compilation-report.xml
+          if-no-files-found: error
+          retention-days: 14

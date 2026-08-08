@@ -307,7 +307,8 @@ class MemoryOptimizer:
                             output_path,
                             mode=mode,
                             header=header,
-                            index=False
+                            index=False,
+                            lineterminator="\n",
                         )
 
                         # Update statistics

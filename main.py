@@ -136,8 +136,23 @@ Examples:
 def run_rebuild_mode(config_path: str, args) -> int:
     """Run an explicit fail-closed symbol-history repair command."""
 
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
     try:
         config = Config(config_path)
+    except Exception as error:
+        print(f"Repair failed; existing data was left in place: {error}")
+        return 1
+
+    # A rebuild rewrites the same histories a running download appends to, so
+    # it takes the same lock the application holds.
+    try:
+        lock = SingleInstanceLock(config.base_data_path).acquire()
+    except InstanceLockError as error:
+        print(f"Repair not started: {error}")
+        return 1
+
+    try:
         if args.rebuild_combined:
             from datetime import date
             from src.services.combined_file_builder import CombinedFileBuilder
@@ -194,6 +209,8 @@ def run_rebuild_mode(config_path: str, args) -> int:
     except Exception as error:
         print(f"Repair failed; existing data was left in place: {error}")
         return 1
+    finally:
+        lock.release()
 
 
 def run_gui_mode(config_path: str, *, smoke_test: bool = False):
@@ -231,9 +248,24 @@ def run_gui_mode(config_path: str, *, smoke_test: bool = False):
     # Set application style
     app.setStyle("Fusion")
 
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
+    lock = None
     try:
         # Initialize configuration
         config = Config(config_path)
+
+        # Two copies writing one data root destroy each other's histories
+        # silently, so the second copy stops here rather than at the first
+        # damaged file.
+        try:
+            lock = SingleInstanceLock(config.base_data_path).acquire()
+        except InstanceLockError as error:
+            print(f"Error starting GUI: {error}")
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(None, "Already running", str(error))
+            return 1
 
         # Create and show main window
         main_window = MainWindow(config)
@@ -255,6 +287,9 @@ def run_gui_mode(config_path: str, *, smoke_test: bool = False):
     except Exception as e:
         print(f"Error starting GUI: {e}")
         return 1
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 

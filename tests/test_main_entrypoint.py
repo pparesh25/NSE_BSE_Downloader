@@ -31,9 +31,13 @@ def test_argument_parser_exposes_gui_and_repair_modes():
     ).rebuild_combined == ["BSE", "2026-07-31"]
 
 
-def test_rebuild_service_modes_report_completed_work(monkeypatch, capsys):
-    monkeypatch.setattr(main, "Config", lambda path: SimpleNamespace(
-        base_data_path=Path(path).parent
+def test_rebuild_service_modes_report_completed_work(
+    tmp_path, monkeypatch, capsys
+):
+    # A real data root, not the working directory: the repair path now takes
+    # the data-root lock, and ``Path("config.yaml").parent`` is the repo.
+    monkeypatch.setattr(main, "Config", lambda _path: SimpleNamespace(
+        base_data_path=tmp_path
     ))
     calls = []
 
@@ -74,8 +78,8 @@ def test_rebuild_service_modes_report_completed_work(monkeypatch, capsys):
     assert ("symbol", "NSE", "RELIANCE") in calls
 
 
-def test_combined_rebuild_and_fail_closed_error(monkeypatch, capsys):
-    config = SimpleNamespace()
+def test_combined_rebuild_and_fail_closed_error(tmp_path, monkeypatch, capsys):
+    config = SimpleNamespace(base_data_path=tmp_path)
     monkeypatch.setattr(main, "Config", lambda _path: config)
 
     class Builder:

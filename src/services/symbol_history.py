@@ -500,7 +500,7 @@ class SymbolHistoryStore:
         normalized = self._deduplicate(frame)
         self._validate_history(normalized)
         try:
-            normalized.to_csv(temporary, index=False)
+            normalized.to_csv(temporary, index=False, lineterminator="\n")
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -534,7 +534,7 @@ class SymbolHistoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".txt.tmp")
         try:
-            frame.to_csv(temporary, index=False)
+            frame.to_csv(temporary, index=False, lineterminator="\n")
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -762,7 +762,7 @@ class SymbolHistoryStore:
                 snapshot[column] = pd.NA
         snapshot = snapshot.loc[:, INTERNAL_EQUITY_COLUMNS]
         try:
-            snapshot.to_csv(temporary, index=False)
+            snapshot.to_csv(temporary, index=False, lineterminator="\n")
             new_digest = file_sha256(temporary)
             old_digest = file_sha256(path) if path.exists() else None
 

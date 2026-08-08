@@ -369,6 +369,80 @@ class PipelineManifest:
         with self._lock:
             return self._state.incomplete_dates(exchange, segment)
 
+    def published_row_counts(
+        self, exchange: str, segment: str
+    ) -> dict[date, int]:
+        """Rows in the daily file this pipeline actually published, per date.
+
+        The combined stage is authoritative where it runs, because the file on
+        disk is the one *it* wrote -- the EQ frame plus whatever components the
+        recipe appended -- while the daily stage counted only its own segment
+        and, when publication is deferred, wrote no file at all.
+        """
+
+        with self._lock:
+            records = self._state.segment_records(exchange, segment)
+        counts: dict[date, int] = {}
+        for record in records:
+            try:
+                record_date = date.fromisoformat(str(record.get("date", "")))
+            except ValueError:
+                continue
+            stages = record.get("stages", {})
+            combined = stages.get("combined", {})
+            daily = stages.get("daily", {})
+            if combined.get("status") == "complete" and isinstance(
+                combined.get("rows"), int
+            ):
+                counts[record_date] = combined["rows"]
+            elif (
+                daily.get("status") == "complete"
+                and not daily.get("publication_deferred")
+                and isinstance(daily.get("rows"), int)
+            ):
+                counts[record_date] = daily["rows"]
+        return counts
+
+    def neighbouring_row_counts(
+        self,
+        exchange: str,
+        segment: str,
+        target_date: date,
+        *,
+        stage: str = "daily",
+        limit: int = 20,
+        max_distance_days: int = 180,
+    ) -> list[int]:
+        """Row counts of the nearest sessions that completed ``stage``.
+
+        ``max_distance_days`` keeps the comparison local in time.  A market
+        grows over decades, so a 1995 session must never be judged against a
+        2026 one merely because nothing closer has been downloaded yet; a gap
+        that wide simply leaves the caller without a band.
+        """
+
+        with self._lock:
+            records = self._state.neighbouring_records(
+                exchange, segment, target_date, limit
+            )
+        counts: list[tuple[int, int]] = []
+        for record in records:
+            try:
+                record_date = date.fromisoformat(str(record.get("date", "")))
+            except ValueError:
+                continue
+            distance = abs((record_date - target_date).days)
+            if distance > max_distance_days:
+                continue
+            stage_record = record.get("stages", {}).get(stage, {})
+            if stage_record.get("status") != "complete":
+                continue
+            rows = stage_record.get("rows")
+            if isinstance(rows, int) and rows > 0:
+                counts.append((distance, rows))
+        counts.sort(key=lambda item: item[0])
+        return [rows for _distance, rows in counts[:limit]]
+
     def date_result(
         self, exchange: str, segment: str, target_date: date
     ) -> DateResult:

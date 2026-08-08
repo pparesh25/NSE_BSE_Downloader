@@ -493,7 +493,7 @@ class CorporateActionEngine:
         normalized = self.histories._deduplicate(adjusted)
         self.histories._validate_history(normalized)
         try:
-            normalized.to_csv(temporary, index=False)
+            normalized.to_csv(temporary, index=False, lineterminator="\n")
             digest = file_sha256(temporary)
             temporary.replace(stage)
             return stage, digest

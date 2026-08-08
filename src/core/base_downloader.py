@@ -383,6 +383,34 @@ class BaseDownloader(ABC):
             self.pipeline_manifest = manifest
         return manifest
 
+    def _check_row_count_band(self, target_date: date, rows: int) -> None:
+        """Refuse a day whose size is implausible beside its neighbours.
+
+        A placeholder or truncated report parses cleanly and publishes as a
+        complete trading day, after which nothing ever downloads it again.
+        Raising here marks the date failed, so it returns through the ordinary
+        repair path instead.  A store that cannot answer must never block a
+        download: the band is a plausibility check, not a source of truth.
+        """
+
+        from ..services.canonical_data import BAND_SESSIONS, row_count_band_error
+
+        try:
+            neighbours = self._pipeline().neighbouring_row_counts(
+                self.exchange, self.segment, target_date, limit=BAND_SESSIONS
+            )
+        except Exception as error:  # pragma: no cover - defensive
+            self.logger.warning(
+                "Row-count band unavailable for %s %s: %s",
+                self.exchange_segment, target_date, error,
+            )
+            return
+        reason = row_count_band_error(rows, neighbours)
+        if reason is not None:
+            raise DataProcessingError(
+                f"{self.exchange_segment} {target_date} rejected: {reason}"
+            )
+
     def _combined_builder(self) -> CombinedFileBuilder:
         """Return the persisted-component builder for lightweight subclasses."""
 
@@ -525,6 +553,7 @@ class BaseDownloader(ABC):
         current_stage = "daily"
         output_path: Optional[Path] = None
         try:
+            self._check_row_count_band(target_date, len(df))
             filename = self.build_filename(target_date)
             output_path = self.data_path / filename
             component = None
@@ -542,7 +571,10 @@ class BaseDownloader(ABC):
                 # never expose a partially-written file if interrupted.
                 temporary = output_path.with_suffix(output_path.suffix + ".tmp")
                 try:
-                    df.to_csv(temporary, index=False, header=False)
+                    df.to_csv(
+                        temporary, index=False, header=False,
+                        lineterminator="\n",
+                    )
                     temporary.replace(output_path)
                 finally:
                     temporary.unlink(missing_ok=True)

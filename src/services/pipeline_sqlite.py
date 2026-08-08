@@ -298,6 +298,63 @@ class SQLitePipelineStore:
         except (json.JSONDecodeError, sqlite3.DatabaseError, ValueError) as error:
             self._raise_corruption(error)
 
+    def segment_records(
+        self, exchange: str, segment: str
+    ) -> list[dict[str, Any]]:
+        """Return every record for one exchange/segment, oldest first."""
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT record_json FROM pipeline_dates
+                    WHERE exchange=? AND segment=?
+                    ORDER BY target_date
+                    """,
+                    (exchange.upper(), segment.upper()),
+                ).fetchall()
+            return [json.loads(row["record_json"]) for row in rows]
+        except (json.JSONDecodeError, sqlite3.DatabaseError, ValueError) as error:
+            self._raise_corruption(error)
+
+    def neighbouring_records(
+        self,
+        exchange: str,
+        segment: str,
+        target_date: date,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return records for the sessions closest in date to ``target_date``.
+
+        Nearest in *either* direction, because a backfill walks backwards: for
+        1995 the only comparable sessions are the ones already fetched around
+        it, and comparing 1995 against 2026 would reject the whole era.
+        """
+
+        query = """
+            SELECT record_json FROM pipeline_dates
+            WHERE exchange=? AND segment=? AND target_date{operator}?
+            ORDER BY target_date {order}
+            LIMIT ?
+        """
+        try:
+            with self._connect() as connection:
+                rows = [
+                    *connection.execute(
+                        query.format(operator="<", order="DESC"),
+                        (exchange.upper(), segment.upper(),
+                         target_date.isoformat(), limit),
+                    ).fetchall(),
+                    *connection.execute(
+                        query.format(operator=">", order="ASC"),
+                        (exchange.upper(), segment.upper(),
+                         target_date.isoformat(), limit),
+                    ).fetchall(),
+                ]
+            return [json.loads(row["record_json"]) for row in rows]
+        except (json.JSONDecodeError, sqlite3.DatabaseError, ValueError) as error:
+            self._raise_corruption(error)
+
     def incomplete_dates(self, exchange: str, segment: str) -> list[date]:
         try:
             with self._connect() as connection:

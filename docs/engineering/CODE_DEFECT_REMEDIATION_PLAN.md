@@ -1265,14 +1265,16 @@ Both interpreters: pytest green, coverage 76.8% (3.13), Ruff and mypy clean,
 
 ### 3.4 Row-count and value gates — effort S
 
+**Done 2026-08-08.** Notes below the checklist.
+
 `validate_canonical_data` requires only `not frame.empty`, and `validate_daily_output`
 parses only the first and last lines. A 5-row placeholder bhavcopy is accepted as a
 complete trading day and never re-downloaded.
 
-- [ ] Per-(exchange, segment) row-count band from the trailing-20-session median;
+- [x] Per-(exchange, segment) row-count band from the trailing-20-session median;
       reject and re-queue outside 50–150%
-- [ ] Make `validate_daily_output` count lines
-- [ ] Reject all-zero OHLC rows and add an `LOW <= min(O,C) <= max(O,C) <= HIGH` check —
+- [x] Make `validate_daily_output` count lines
+- [x] Reject all-zero OHLC rows and add an `LOW <= min(O,C) <= max(O,C) <= HIGH` check —
       currently only NaN and negative are rejected, so `0,0,0,0,0` publishes and reads
       downstream as a genuine −100% day
 - [x] Prefer the *newer* row in `_deduplicate`, not the higher-volume one. Exchanges
@@ -1281,15 +1283,82 @@ complete trading day and never re-downloaded.
       **Done in 3.2**, which is what made it urgent: once a corporate action scaled
       volume, the higher-volume rank became a value comparison a stale row could win, so
       a delivery repair was silently discarded on any upgraded install
-- [ ] Explicit `lineterminator="\n"` on `to_csv` — output is currently `os.linesep`, so
+- [x] Explicit `lineterminator="\n"` on `to_csv` — output is currently `os.linesep`, so
       a cloud-synced or cross-platform data root produces byte-different files and
       breaks the sha256-based corporate-action ledger
 
+#### How 3.4 was closed
+
+**The planned OHLC check was wrong as written, and sampling is what showed it.**
+`LOW <= min(O,C) <= max(O,C) <= HIGH` applied literally rejects **every single NSE
+FO day**: 1,515 of 91,870 real futures rows carry `0,0,0` OHL with a real
+settlement CLOSE, because a far-month contract that did not trade still has a
+settlement price. Rejecting a whole day for that would have blocked the entire FO
+segment forever. Two further real rows fail even the refined rule — BSE publishes
+`NCC#` (2026-01-27) and `IRFC#` (2026-02-23) with a settlement close above the
+day's high on a one-share trade — and 58 NSE FO rows do the same, because a thin
+contract's settlement price is modelled rather than traded.
+
+So the rule that shipped is: judge a row only where a **traded range exists**
+(HIGH and LOW both above zero), read a zero OPEN/CLOSE inside such a row as
+*absent* rather than as a price of zero, and fail the day only when violations
+exceed `max(5 rows, 5%)`. The worst real day measured is 0.47% (3 of 640 NSE FO
+rows) while a misaligned or shifted source file violates in nearly every row, so
+the threshold separates the two cases with an order of magnitude to spare.
+
+**All-zero rows are dropped, not failed.** A row with `0,0,0,0` carries no price
+at all and reads downstream as a −100% bar. It never occurs in the owner's tree
+(0 of 1,057,349 equity, 91,870 FO and 31,874 index rows), but older bhavcopy eras
+are not yet downloaded, so the row is dropped with a logged count instead of
+failing a day that is otherwise fine. A report where *every* row is unpriced is
+refused outright.
+
+**The band compares against the nearest sessions, not strictly earlier ones.**
+"Trailing-20" assumes a forward-only run; a backfill walks *backwards*, so for an
+older date the only comparable sessions are the ones just fetched after it. The
+query takes the nearest completed sessions in either direction, capped at 180
+days so a 1995 session is never judged against a 2026 one — a market that grew
+2.7× in between would fail the band on era alone. The check runs before anything
+is written, so a rejected date is marked failed and returns through the ordinary
+repair path. A manifest that cannot answer never blocks a download.
+
+**The read side counts lines against what the writer recorded.** `rows` is
+already in the manifest for every published date, and the combined stage is
+authoritative where it runs (the file on disk is the one *it* wrote). Verified
+against the real tree: recorded counts match the bytes on disk for all 864 files,
+6 of 6 segments, zero mismatches. A data root written by an older build has no
+recorded expectation, so nothing is invented for it and the structural checks
+stand alone.
+
+**Whole-tree replay.** The shipped gate functions were run over every one of the
+864 real published day-files: **0 days rejected, 0 rows dropped**. The band was
+replayed the way a download would see it, per segment, over all 144 sessions each
+— also 0 rejections.
+
+`lineterminator="\n"` is now explicit at all nine `to_csv` call sites; the two
+tests that pin it patch `os.linesep` to `\r\n` and fail without the fix.
+
 ### 3.5 Single-instance lock — effort M
+
+**Done 2026-08-08.**
 
 Two concurrent copies silently destroy symbol histories and the registry.
 
-- [ ] `fcntl.flock` on `<base>/.state/app.lock`, keyed on the resolved data root
+- [x] `fcntl.flock` on `<base>/.state/app.lock`, keyed on the resolved data root
+
+`SingleInstanceLock` holds an advisory whole-file lock for the lifetime of the
+process. The lock file lives *inside* the data root, so two copies configured
+with different roots never contend and two paths reaching one root through a
+symlink share one inode and therefore one lock. The holder writes its pid, host
+and start time into the file, so the second copy's message names what is holding
+it rather than saying only "in use"; the note is cleared on release, and a hard
+kill still frees the lock because the OS drops it with the file descriptor.
+
+Both entry points take it: the GUI (with a message box, since a second copy is
+usually started by double-clicking) and `--rebuild-*`, which rewrites the very
+histories a running download appends to. A filesystem that cannot lock at all —
+some network shares — logs a warning and continues, because failing there would
+break a setup that works today; only a genuine `EACCES`/`EAGAIN` means "held".
 
 ---
 
@@ -1359,7 +1428,8 @@ what they read today.
 
 **Do not start this until Phases 1–3 are done.** Phase 2.1 buys enough headroom to
 finish a backfill; this is the durable fix, and it should be built against a codebase
-whose correctness defects are already closed.
+whose correctness defects are already closed. **That precondition was met on
+2026-08-08**, when 3.5 closed Phase 3.
 
 ---
 
@@ -1375,7 +1445,8 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
                                    offline and absent reports retire; 2.4 delivery
                                    retries bounded
    ↓
-Phase 3  stop writing wrong data ← 3.1, 3.2 and 3.3 done; 3.4-3.5 open
+Phase 3  stop writing wrong data ← done.  3.1 parser, 3.2 volume, 3.3 identity,
+                                   3.4 size/value gates, 3.5 one writer per root
    ↓
 Phase 4  verifiability           ← --audit answers "can I trust this?"
    ↓

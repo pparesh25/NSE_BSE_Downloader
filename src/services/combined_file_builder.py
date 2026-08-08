@@ -108,7 +108,7 @@ class CombinedFileBuilder:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         try:
-            frame.to_csv(temporary, index=False)
+            frame.to_csv(temporary, index=False, lineterminator="\n")
             temporary.replace(path)
         except Exception as error:
             raise FileOperationError(
@@ -177,7 +177,7 @@ class CombinedFileBuilder:
         """Match the lexical representation produced by component reload."""
 
         stream = StringIO()
-        frame.to_csv(stream, index=False)
+        frame.to_csv(stream, index=False, lineterminator="\n")
         stream.seek(0)
         return pd.read_csv(stream, dtype=str, keep_default_na=False)
 
@@ -435,7 +435,10 @@ class CombinedFileBuilder:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = output_path.with_suffix(output_path.suffix + ".tmp")
             try:
-                combined.to_csv(temporary, index=False, header=False)
+                combined.to_csv(
+                    temporary, index=False, header=False,
+                    lineterminator="\n",
+                )
                 digest = self._sha256(temporary)
                 temporary.replace(output_path)
             finally:

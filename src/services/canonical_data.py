@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
+import logging
 import re
+import statistics
 import zipfile
 from typing import Any, Iterable, Optional, Sequence
 
 import pandas as pd
 
 from ..core.exceptions import DataProcessingError
+
+
+logger = logging.getLogger(__name__)
 
 
 EQUITY_DAILY_COLUMNS = [
@@ -300,6 +305,107 @@ def _date_values(values: pd.Series, target_date: date) -> pd.Series:
     return parsed.dt.strftime("%Y%m%d")
 
 
+#: A row whose whole OHLC is zero carries no price at all and reads downstream
+#: as a genuine -100% bar.  Measured across the owner's real tree -- 1,057,349
+#: equity rows, 91,870 futures rows and 31,874 index rows -- it never occurs,
+#: so dropping it removes no real market data.
+#:
+#: Zero *within* a row is a different thing and must survive: 1,515 real NSE
+#: futures rows carry ``0,0,0`` OHL with a real settlement CLOSE, because a
+#: far-month contract that did not trade still has a settlement price.  That is
+#: also why the coherence rule below only applies where a traded range exists.
+def drop_unpriced_rows(frame: pd.DataFrame, era: str) -> pd.DataFrame:
+    """Remove rows with no price at all, or fail if that is every row."""
+
+    if frame.empty:
+        return frame
+    values = [_number(frame[column]) for column in ("OPEN", "HIGH", "LOW", "CLOSE")]
+    unpriced = values[0].eq(0)
+    for series in values[1:]:
+        unpriced &= series.eq(0)
+    unpriced = unpriced.fillna(False)
+    dropped = int(unpriced.sum())
+    if not dropped:
+        return frame
+    if dropped == len(frame):
+        raise DataProcessingError(
+            f"{era} report contains no priced rows: every row is 0,0,0,0"
+        )
+    logger.warning(
+        "%s: dropped %d row(s) with an all-zero OHLC", era, dropped
+    )
+    return frame.loc[~unpriced].copy()
+
+
+#: Share of rows allowed to fall outside their own traded range before the
+#: report is treated as malformed rather than merely odd.  Both exchanges
+#: publish a few genuinely inconsistent rows: a BSE settlement close above the
+#: day's high on a 1-share trade, and NSE futures whose theoretical settlement
+#: price sits outside a thin contract's range.  The worst real day measured is
+#: 0.47% (3 of 640 NSE FO rows), while a misaligned or truncated source file
+#: violates in nearly every row, so 5% separates the two cases with an order of
+#: magnitude to spare.
+MAX_INCOHERENT_ROW_SHARE = 0.05
+MIN_INCOHERENT_ROWS = 5
+
+
+def incoherent_ohlc(frame: pd.DataFrame) -> "pd.Series[bool]":
+    """Flag rows whose own OPEN/CLOSE fall outside their traded range.
+
+    Only rows with a real range (HIGH and LOW both above zero) are judged, and
+    a zero OPEN or CLOSE inside such a row is read as "not traded", not as a
+    price of zero -- that is how both exchanges spell an absent value.
+    """
+
+    if frame.empty:
+        return pd.Series(dtype=bool)
+    opens, highs, lows, closes = (
+        _number(frame[column]) for column in ("OPEN", "HIGH", "LOW", "CLOSE")
+    )
+    ranged = highs.gt(0) & lows.gt(0)
+
+    def outside(values: pd.Series) -> pd.Series:
+        return values.gt(0) & (values.lt(lows) | values.gt(highs))
+
+    return (
+        ranged & (lows.gt(highs) | outside(opens) | outside(closes))
+    ).fillna(False)
+
+
+#: A published day must be roughly the size of the days around it.  The band is
+#: deliberately wide -- across 864 real day-files (six exchange/segment pairs,
+#: 144 sessions each) not one falls outside it -- because it exists to catch a
+#: placeholder or truncated report, not to police ordinary listing churn.
+MIN_BAND_SESSIONS = 5
+BAND_SESSIONS = 20
+BAND_LOW = 0.5
+BAND_HIGH = 1.5
+
+
+def row_count_band_error(rows: int, neighbours: Sequence[int]) -> Optional[str]:
+    """Return why ``rows`` is implausible beside its neighbouring sessions.
+
+    ``None`` means "publish it": too few neighbours to judge, or a count
+    within the band.  The comparison is against the median rather than the
+    mean so one bad session already on disk cannot drag the band with it.
+    """
+
+    sample = [value for value in neighbours if value > 0]
+    if len(sample) < MIN_BAND_SESSIONS:
+        return None
+    median = statistics.median(sample)
+    if median <= 0:
+        return None
+    ratio = rows / median
+    if BAND_LOW <= ratio <= BAND_HIGH:
+        return None
+    return (
+        f"{rows} rows is {ratio:.0%} of the {median:.0f}-row median of the "
+        f"{len(sample)} nearest sessions, outside the "
+        f"{BAND_LOW:.0%}-{BAND_HIGH:.0%} band"
+    )
+
+
 def validate_canonical_data(
     frame: pd.DataFrame,
     target_date: date,
@@ -347,8 +453,21 @@ def validate_canonical_data(
                 f"Normalized report contains negative {column}"
             )
 
+    incoherent = incoherent_ohlc(frame)
+    offenders = int(incoherent.sum())
+    if offenders > max(
+        MIN_INCOHERENT_ROWS, MAX_INCOHERENT_ROW_SHARE * len(frame)
+    ):
+        named = ", ".join(
+            str(value) for value in frame.loc[incoherent, key_columns[0]].head(3)
+        )
+        raise DataProcessingError(
+            f"Normalized report has {offenders} of {len(frame)} rows whose "
+            f"OPEN/CLOSE fall outside their own HIGH/LOW range ({named})"
+        )
 
-def _finalize_equity(frame: pd.DataFrame) -> pd.DataFrame:
+
+def _finalize_equity(frame: pd.DataFrame, era: str = "equity") -> pd.DataFrame:
     for column in INTERNAL_EQUITY_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
@@ -362,6 +481,7 @@ def _finalize_equity(frame: pd.DataFrame) -> pd.DataFrame:
     ):
         frame[column] = _number(frame[column])
     frame = frame[frame["SYMBOL"].ne("")].copy()
+    frame = drop_unpriced_rows(frame, era)
     return frame.loc[:, INTERNAL_EQUITY_COLUMNS].sort_values("SYMBOL").reset_index(drop=True)
 
 
@@ -413,7 +533,7 @@ def normalize_nse_equity(
     normalized = normalized[normalized["SERIES"].isin(wanted)].copy()
     if add_sme_suffix:
         normalized["SYMBOL"] = _clean_text(normalized["SYMBOL"]) + "_SME"
-    result = _finalize_equity(normalized)
+    result = _finalize_equity(normalized, era)
     validate_canonical_data(
         result, target_date, INTERNAL_EQUITY_COLUMNS,
         key_columns=("SYMBOL", "SERIES"),
@@ -447,7 +567,7 @@ def normalize_nse_sme(
     normalized = normalized[normalized["SERIES"].isin(NSE_SME_SERIES)].copy()
     if add_suffix:
         normalized["SYMBOL"] = _clean_text(normalized["SYMBOL"]) + "_SME"
-    result = _finalize_equity(normalized)
+    result = _finalize_equity(normalized, era)
     validate_canonical_data(
         result, target_date, INTERNAL_EQUITY_COLUMNS,
         key_columns=("SYMBOL", "SERIES"),
@@ -552,7 +672,7 @@ def normalize_bse_equity(
     normalized["SERIES"] = _clean_text(normalized["SERIES"]).str.upper()
     normalized = normalized[normalized["SERIES"].isin(BSE_EQUITY_SERIES)].copy()
     normalized = _resolve_truncated_bse_symbols(normalized, full_names)
-    result = _finalize_equity(normalized)
+    result = _finalize_equity(normalized, era)
     validate_canonical_data(
         result, target_date, INTERNAL_EQUITY_COLUMNS,
         key_columns=("SYMBOL", "SERIES"),

@@ -38,6 +38,7 @@ class DataManager:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self._validation_cache: Dict[Path, tuple[int, int, bool]] = {}
+        self._expected_row_cache: Dict[tuple[str, str], Dict[date, int]] = {}
 
         # Date patterns for different exchanges
         self.date_patterns = {
@@ -167,10 +168,52 @@ class DataManager:
             result[target_date] = path
         return result
 
+    @staticmethod
+    def _count_rows(path: Path) -> int:
+        """Count non-empty lines without holding the file in memory."""
+
+        count = 0
+        trailing_newline = True
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                count += block.count(b"\n")
+                trailing_newline = block.endswith(b"\n")
+        # A final line without its newline is still a row.
+        return count if trailing_newline else count + 1
+
+    def _expected_rows(
+        self, exchange: str, segment: str, target_date: date
+    ) -> Optional[int]:
+        """Rows the pipeline recorded for the file it published that day.
+
+        Only a value the writer itself recorded is used, so this cannot
+        invent an expectation for a data root written by an older build --
+        there the structural checks stand alone.
+        """
+
+        key = (exchange.upper(), segment.upper())
+        recorded = self._expected_row_cache.get(key)
+        if recorded is None:
+            try:
+                from ..services.pipeline_state import PipelineManifest
+
+                manifest = PipelineManifest(self.config.base_data_path)
+                recorded = manifest.published_row_counts(*key)
+            except Exception as error:
+                # A manifest that cannot be read must not invalidate every
+                # file on disk; the structural checks still apply.
+                self.logger.warning(
+                    "Row-count expectations unavailable for %s_%s: %s",
+                    *key, error,
+                )
+                recorded = {}
+            self._expected_row_cache[key] = recorded
+        return recorded.get(target_date)
+
     def validate_daily_output(
         self, exchange: str, segment: str, target_date: date, path: Path
     ) -> bool:
-        """Check boundary rows, column contract, date and required numbers."""
+        """Check boundary rows, row count, column contract, date and numbers."""
 
         try:
             import csv
@@ -182,6 +225,19 @@ class DataManager:
             cached = self._validation_cache.get(path)
             if cached and cached[:2] == cache_key:
                 return cached[2]
+
+            # Boundary rows alone accepted a truncated file: a five-row
+            # placeholder parses perfectly at both ends and then counts as a
+            # complete trading day that nothing ever downloads again.
+            rows_on_disk = self._count_rows(path)
+            expected_rows = self._expected_rows(exchange, segment, target_date)
+            if expected_rows is not None and rows_on_disk != expected_rows:
+                self.logger.warning(
+                    "Daily output %s has %d rows; %d were published",
+                    path, rows_on_disk, expected_rows,
+                )
+                self._validation_cache[path] = (*cache_key, False)
+                return False
 
             with path.open("rb") as handle:
                 first = handle.readline()

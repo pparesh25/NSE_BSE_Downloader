@@ -5,7 +5,7 @@ import pandas as pd
 from src.services.symbol_history import SymbolHistoryStore
 
 
-def _row(day, symbol="OLDNAME", close=100, volume=100, isin="INE1"):
+def _row(day, symbol="OLDNAME", close=100, volume=100, isin="INE111111111"):
     return pd.DataFrame([{
         "SYMBOL": symbol,
         "DATE": day,
@@ -60,5 +60,5 @@ def test_isin_symbol_rename_merges_history_and_prefers_liquid_collision(tmp_path
 def test_registry_keeps_isin_and_security_code(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("BSE", "EQ", date(2025, 1, 1), _row("20250101"))
-    assert store.resolve_symbol("BSE", "INE1") == "OLDNAME"
+    assert store.resolve_symbol("BSE", "INE111111111") == "OLDNAME"
     assert store.resolve_symbol("BSE", "123") == "OLDNAME"

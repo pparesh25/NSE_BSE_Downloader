@@ -14,6 +14,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 import aiohttp
 import pandas as pd
 
+from .canonical_data import valid_isin, valid_security_id
 from .symbol_history import SymbolHistoryStore
 from .state_store import (
     StateStoreError,
@@ -252,7 +253,11 @@ def normalize_nse_actions(
         symbol = str(record.get("symbol", "")).strip().upper()
         if add_sme_suffix and series in {"SM", "ST"}:
             symbol += "_SME"
-        stable_id = str(record.get("isin") or symbol).strip().upper()
+        # The stable_id is the audit key and the match key.  A malformed ISIN
+        # would collide across unrelated announcements, so it falls back to
+        # the ticker exactly as a missing one does.
+        isin = str(record.get("isin") or "").strip().upper()
+        stable_id = isin if valid_isin(isin) else symbol
         result.extend(
             CorporateAction(
                 "NSE", symbol, stable_id, ex_date.date(), action.action_type,
@@ -276,7 +281,9 @@ def normalize_bse_actions(frame: pd.DataFrame) -> List[CorporateAction]:
         if not parsed.actions or pd.isna(ex_date):
             continue
         symbol = str(record.get("Security Name", "")).strip().upper()
-        stable_id = str(record.get("Security Code") or symbol).strip().upper()
+        code = str(record.get("Security Code") or "").strip().upper()
+        code = code.removesuffix(".0")
+        stable_id = code if valid_security_id(code) else symbol
         result.extend(
             CorporateAction(
                 "BSE", symbol, stable_id, ex_date.date(), action.action_type,
@@ -552,7 +559,10 @@ class CorporateActionEngine:
             current_hash = file_sha256(target) if target.exists() else None
             if current_hash == transaction.get("before_sha256"):
                 try:
-                    staged_history = pd.read_csv(stage, dtype=str)
+                    staged_raw = pd.read_csv(stage, dtype=str)
+                    staged_history = self.histories._upgrade_legacy_history(
+                        staged_raw
+                    )
                     self.histories._validate_history(staged_history)
                 except Exception as error:
                     quarantine_path = quarantine_copy(
@@ -573,6 +583,12 @@ class CorporateActionEngine:
                     staged_history,
                 )
                 current_hash = file_sha256(target)
+                if staged_history is not staged_raw:
+                    # The stage was written by a pre-ISIN build and its bytes
+                    # were already verified against ``after_sha256`` above;
+                    # replaying it through the current schema changes the
+                    # serialization, so the expected digest moves with it.
+                    transaction["after_sha256"] = current_hash
             if current_hash != transaction.get("after_sha256"):
                 if target.exists():
                     self.histories._read_history(target)

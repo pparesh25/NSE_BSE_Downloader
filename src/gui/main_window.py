@@ -580,6 +580,22 @@ class DownloadWorker(QThread):
                     f"published and their dates are queued for repair "
                     f"({named})",
                 )
+            if result.refused_merges:
+                named = "; ".join(
+                    f"{refusal.old_path} + {refusal.new_path}"
+                    for refusal in result.refused_merges[:3]
+                )
+                if len(result.refused_merges) > 3:
+                    named += (
+                        f"; and {len(result.refused_merges) - 3} more"
+                    )
+                self.error_occurred.emit(
+                    "Symbol histories",
+                    f"{len(result.refused_merges)} history merges were "
+                    f"refused: the files share trading dates, so they are "
+                    f"two securities, not one renamed security. Both files "
+                    f"were kept unchanged ({named})",
+                )
 
         windows = coordinator.action_windows()
         if not windows:

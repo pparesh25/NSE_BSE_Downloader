@@ -18,7 +18,7 @@ def _rows(day="20250101"):
         "SYMBOL": "ABC", "DATE": day, "OPEN": 100, "HIGH": 100, "LOW": 100,
         "CLOSE": 100, "VOLUME": 10, "DELIVERY_QTY": 5, "DELIVERY_PERCENT": 50,
         "SERIES": "EQ", "TOTAL_TRADES": 1, "QTY_PER_TRADE": 10,
-        "ISIN": "INE1", "SECURITY_ID": "500001",
+        "ISIN": "INE111111111", "SECURITY_ID": "500001",
     }])
 
 

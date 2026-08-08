@@ -49,7 +49,7 @@ def _rows(day: date, renamed: bool = False) -> pd.DataFrame:
             "SERIES": "EQ",
             "TOTAL_TRADES": 10,
             "QTY_PER_TRADE": 100,
-            "ISIN": f"INE{index}",
+            "ISIN": f"INE{index:03d}000{index:03d}",
             "SECURITY_ID": f"50000{index}",
         })
     return pd.DataFrame(values)
@@ -129,7 +129,7 @@ def test_batch_raises_once_failures_stop_looking_per_symbol(tmp_path):
         [
             template.assign(
                 SYMBOL=f"SYM{index:04d}",
-                ISIN=f"INE{index:04d}",
+                ISIN=f"INE{index:04d}0{index:04d}",
                 SECURITY_ID=f"6{index:05d}",
                 CLOSE="invalid",
             )
@@ -153,7 +153,7 @@ def test_batch_isolates_up_to_the_cap_before_failing_closed(tmp_path):
     for index in range(MAX_ISOLATED_SYMBOL_FAILURES + 1):
         frames.append(template.assign(
             SYMBOL=f"SYM{index:04d}",
-            ISIN=f"INE{index:04d}",
+            ISIN=f"INE{index:04d}0{index:04d}",
             SECURITY_ID=f"6{index:05d}",
             # One good symbol past the last tolerated failure proves the batch
             # kept going rather than stopping at the first bad row.
@@ -512,7 +512,7 @@ def test_a_failed_symbol_fails_only_the_dates_it_holds_back(tmp_path):
     # DDD trades only on the second day, so only that day is held back.
     second = _rows(bad_day).astype(object)
     broken = second.iloc[[0]].copy()
-    broken.loc[:, ["SYMBOL", "ISIN", "SECURITY_ID"]] = ["DDD", "INE9", "509"]
+    broken.loc[:, ["SYMBOL", "ISIN", "SECURITY_ID"]] = ["DDD", "INE999999999", "509"]
     broken.loc[:, "CLOSE"] = "invalid"
     coordinator.offer(
         "NSE", "EQ", bad_day, pd.concat([second, broken], ignore_index=True)
@@ -636,7 +636,7 @@ def test_batch_delivery_revision_reapplies_audited_action_once(tmp_path):
         HistoryBatchItem("NSE", "EQ", date(2025, 1, 2), second),
     ])
     action = CorporateAction(
-        "NSE", "AAA", "INE0", date(2025, 1, 2),
+        "NSE", "AAA", "INE000000000", date(2025, 1, 2),
         "bonus", 2.0, "Bonus 1:1", "EQ",
     )
     assert CorporateActionEngine(tmp_path).apply([action])["applied"] == 1
@@ -690,7 +690,7 @@ def test_staged_worker_applies_actions_only_after_history_commit(
     )
     config.history_batch_coordinator = coordinator
     action = CorporateAction(
-        "NSE", "AAA", "INE0", day_two,
+        "NSE", "AAA", "INE000000000", day_two,
         "bonus", 2.0, "Bonus 1:1", "EQ",
     )
 

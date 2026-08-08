@@ -51,7 +51,7 @@ def _row(day: str, close: int = 100) -> pd.DataFrame:
         "SERIES": "EQ",
         "TOTAL_TRADES": 10,
         "QTY_PER_TRADE": 10,
-        "ISIN": "INE0",
+        "ISIN": "INE000000000",
         "SECURITY_ID": "123",
     }])
 

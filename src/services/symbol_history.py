@@ -13,7 +13,14 @@ from typing import Any, Callable, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
-from .canonical_data import INTERNAL_EQUITY_COLUMNS, SYMBOL_HISTORY_COLUMNS
+from .canonical_data import (
+    INTERNAL_EQUITY_COLUMNS,
+    ISIN_PATTERN,
+    LEGACY_SYMBOL_HISTORY_COLUMNS,
+    SYMBOL_HISTORY_COLUMNS,
+    valid_isin,
+    valid_security_id,
+)
 from .state_store import (
     StateCorruptionError,
     StateStoreError,
@@ -22,6 +29,7 @@ from .state_store import (
     file_sha256,
     migrate_corporate_ledger,
     quarantine_copy,
+    quarantine_move,
     validate_corporate_ledger,
 )
 
@@ -74,6 +82,25 @@ class HistorySymbolFailure:
 
 
 @dataclass(frozen=True)
+class MergeRefusal:
+    """A rename-driven merge that was refused because histories overlap.
+
+    A genuine rename retires one ticker before the next one trades, so two
+    files claiming the same dates are two different securities -- merging
+    them would let deduplication destroy one row per shared date.  Both
+    files are left untouched and the refusal is surfaced to the caller.
+    """
+
+    exchange: str
+    old_symbol: str
+    new_symbol: str
+    old_path: str
+    new_path: str
+    overlapping_dates: int
+    sample_dates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class HistoryBatchResult:
     """Observable I/O outcome for one symbol-history batch."""
 
@@ -83,6 +110,7 @@ class HistoryBatchResult:
     history_reads: int
     history_writes: int
     failures: tuple[HistorySymbolFailure, ...] = ()
+    refused_merges: tuple[MergeRefusal, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -144,6 +172,7 @@ class _BatchPlan:
     merge_sources: dict[Path, list[Path]]
     retired: set[Path]
     rows_seen: int
+    refusals: tuple[MergeRefusal, ...] = ()
 
 
 class SymbolHistoryStore:
@@ -167,30 +196,81 @@ class SymbolHistoryStore:
 
     @staticmethod
     def _empty_registry() -> dict[str, Any]:
-        return {"version": 2, "exchanges": {}, "files": {}}
+        return {"version": 3, "exchanges": {}, "files": {}, "identities": {}}
 
     @staticmethod
-    def _migrate_registry(data: dict[str, Any]) -> dict[str, Any]:
+    def _valid_stable_key(key: Any) -> bool:
+        if not isinstance(key, str) or ":" not in key:
+            return False
+        kind, value = key.split(":", 1)
+        if kind == "ISIN":
+            return valid_isin(value)
+        if kind == "ID":
+            return valid_security_id(value)
+        return False
+
+    @classmethod
+    def _migrate_registry(cls, data: dict[str, Any]) -> dict[str, Any]:
         if "version" not in data:
             is_legacy = all(
                 isinstance(exchange, str) and isinstance(values, dict)
                 for exchange, values in data.items()
             )
             if is_legacy:
-                return {
+                data = {
                     "version": 2,
                     "exchanges": data,
                     "files": {},
                 }
+        if data.get("version") == 2:
+            # v3 records which identity owns each filename.  Invert the
+            # existing key->symbol mappings through the filename mappings so
+            # every previously written file keeps its owner, and drop keys a
+            # malformed identifier smuggled in before keys were validated --
+            # such a key is shared by unrelated symbols and must not merge
+            # them, which is the very defect identity keying exists to stop.
+            exchanges = data.get("exchanges")
+            files = data.get("files")
+            if isinstance(exchanges, dict) and isinstance(files, dict):
+                identities: dict[str, dict[str, list[str]]] = {}
+                for exchange, mappings in exchanges.items():
+                    if not isinstance(mappings, dict):
+                        continue
+                    for key in [key for key in mappings if not cls._valid_stable_key(key)]:
+                        del mappings[key]
+                    file_mappings = files.get(exchange)
+                    if not isinstance(file_mappings, dict):
+                        continue
+                    owners = identities.setdefault(exchange, {})
+                    for key, symbol in mappings.items():
+                        filename = file_mappings.get(symbol)
+                        if isinstance(filename, str):
+                            owned = owners.setdefault(filename, [])
+                            if key not in owned:
+                                owned.append(key)
+                for owners in identities.values():
+                    for owned in owners.values():
+                        owned.sort()
+                data = {
+                    "version": 3,
+                    "exchanges": exchanges,
+                    "files": files,
+                    "identities": identities,
+                }
         return data
 
-    @staticmethod
-    def _validate_registry(data: dict[str, Any]) -> None:
-        if data.get("version") != 2:
+    @classmethod
+    def _validate_registry(cls, data: dict[str, Any]) -> None:
+        if data.get("version") != 3:
             raise ValueError("unsupported symbol-registry version")
         exchanges = data.get("exchanges")
         files = data.get("files")
-        if not isinstance(exchanges, dict) or not isinstance(files, dict):
+        identities = data.get("identities")
+        if (
+            not isinstance(exchanges, dict)
+            or not isinstance(files, dict)
+            or not isinstance(identities, dict)
+        ):
             raise ValueError("symbol registry sections must be objects")
         for exchange, mappings in exchanges.items():
             if not isinstance(exchange, str) or not isinstance(mappings, dict):
@@ -214,6 +294,16 @@ class SymbolHistoryStore:
                 raise ValueError("invalid symbol filename mapping")
             if len(filenames) != len(set(filenames)):
                 raise ValueError("symbol filename mappings must be unique")
+        for exchange, owners in identities.items():
+            if not isinstance(exchange, str) or not isinstance(owners, dict):
+                raise ValueError("invalid filename identity exchange")
+            for filename, keys in owners.items():
+                if (
+                    not isinstance(filename, str)
+                    or not isinstance(keys, list)
+                    or not all(isinstance(key, str) for key in keys)
+                ):
+                    raise ValueError("invalid filename identity mapping")
 
     @staticmethod
     def safe_filename(symbol: str) -> str:
@@ -265,26 +355,52 @@ class SymbolHistoryStore:
         symbol: str,
         stable_keys: List[str],
     ) -> str:
+        """Resolve the file a symbol's rows belong in, keyed on identity.
+
+        A ticker is not an identity: exchanges reassign a delisted ticker to a
+        new company, and before identity keying the new company's rows were
+        appended into the delisted company's file, where deduplication then
+        destroyed one row per shared date.  Each filename therefore remembers
+        the stable keys of the security it was created for, and a security
+        with disjoint keys is given a fresh digest-suffixed file instead.
+        The entry outlives the file itself, so a name retired by a rename in
+        the same batch cannot be handed to a different security either.
+        """
+
         exchange = exchange.upper()
         symbol = str(symbol).strip().upper()
         mappings = registry["files"].setdefault(exchange, {})
+        owners = registry["identities"].setdefault(exchange, {})
+        keys = set(stable_keys)
+
+        def claims(filename: str) -> bool:
+            owned = set(owners.get(filename, ()))
+            return not owned or not keys or bool(owned & keys)
+
+        def claim(filename: str) -> str:
+            if keys:
+                owned = owners.get(filename)
+                if owned is None or not keys.issubset(owned):
+                    owners[filename] = sorted(set(owned or ()) | keys)
+            mappings[symbol] = filename
+            return filename
+
         existing = mappings.get(symbol)
-        if existing:
-            return existing
+        if existing and claims(existing):
+            return claim(existing)
 
         base = self.safe_filename(symbol)
         candidate = f"{base}.txt"
         used = {filename: owner for owner, filename in mappings.items()}
-        if candidate in used and used[candidate] != symbol:
-            identity = stable_keys[0] if stable_keys else symbol
-            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-            width = 8
+        identity = stable_keys[0] if stable_keys else symbol
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        width = 8
+        while (
+            candidate in used and used[candidate] != symbol
+        ) or not claims(candidate):
             candidate = f"{base}--{digest[:width]}.txt"
-            while candidate in used and used[candidate] != symbol:
-                width += 2
-                candidate = f"{base}--{digest[:width]}.txt"
-        mappings[symbol] = candidate
-        return candidate
+            width += 2
+        return claim(candidate)
 
     @staticmethod
     def _history_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -295,7 +411,20 @@ class SymbolHistoryStore:
         frame["DATE"] = pd.to_datetime(
             frame["DATE"].astype(str), format="%Y%m%d", errors="coerce"
         ).dt.strftime("%Y%m%d")
+        # The published ISIN column asserts identity, so only a value with
+        # the identifier's shape is written; anything else becomes blank.
+        isin = frame["ISIN"].fillna("").astype(str).str.strip().str.upper()
+        frame["ISIN"] = isin.where(isin.str.fullmatch(ISIN_PATTERN), "")
         return frame.loc[:, SYMBOL_HISTORY_COLUMNS]
+
+    @staticmethod
+    def _upgrade_legacy_history(frame: pd.DataFrame) -> pd.DataFrame:
+        """Bring a pre-ISIN 11-column history up to the current schema."""
+
+        if list(frame.columns) == LEGACY_SYMBOL_HISTORY_COLUMNS:
+            frame = frame.copy()
+            frame["ISIN"] = ""
+        return frame
 
     @staticmethod
     def _deduplicate(frame: pd.DataFrame) -> pd.DataFrame:
@@ -321,7 +450,7 @@ class SymbolHistoryStore:
         if not path.exists():
             return pd.DataFrame(columns=SYMBOL_HISTORY_COLUMNS)
         try:
-            frame = pd.read_csv(path, dtype=str)
+            frame = self._upgrade_legacy_history(pd.read_csv(path, dtype=str))
             self._validate_history(frame)
             return frame.loc[:, SYMBOL_HISTORY_COLUMNS]
         except HistoryCorruptionError:
@@ -353,6 +482,9 @@ class SymbolHistoryStore:
         for column in ("OPEN", "HIGH", "LOW", "CLOSE"):
             if pd.to_numeric(frame[column], errors="coerce").isna().any():
                 raise ValueError(f"history contains invalid {column} values")
+        isin = frame["ISIN"].fillna("").astype(str)
+        if not (isin.eq("") | isin.str.fullmatch(ISIN_PATTERN)).all():
+            raise ValueError("history contains an invalid ISIN value")
 
     def _write_history(self, path: Path, frame: pd.DataFrame) -> None:
         # Deliberately no ``.state/backups/history`` copy.  Until v1.1.0 every
@@ -395,6 +527,9 @@ class SymbolHistoryStore:
         for column in ("OPEN", "HIGH", "LOW", "CLOSE"):
             if pd.isna(pd.to_numeric(row[column], errors="coerce")):
                 raise ValueError(f"history contains invalid {column} values")
+        isin_text = "" if pd.isna(row["ISIN"]) else str(row["ISIN"]).strip()
+        if isin_text and not valid_isin(isin_text):
+            raise ValueError("history contains an invalid ISIN value")
 
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".txt.tmp")
@@ -404,27 +539,88 @@ class SymbolHistoryStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _history_dates(self, path: Path) -> Optional[set[str]]:
+        """Return the dates stored in one history, or ``None`` if unreadable.
+
+        ``None`` means "cannot check": the caller proceeds and lets the full
+        read raise its ordinary corruption error, which quarantines the bytes.
+        """
+
+        if not path.exists():
+            return set()
+        try:
+            frame = pd.read_csv(path, usecols=["DATE"], dtype=str)
+            return set(frame["DATE"].astype(str))
+        except Exception:
+            return None
+
+    def _refusal(
+        self,
+        exchange: str,
+        old_symbol: str,
+        new_symbol: str,
+        old_path: Path,
+        new_path: Path,
+        overlap: set[str],
+    ) -> MergeRefusal:
+        def relative(path: Path) -> str:
+            try:
+                return str(path.relative_to(self.base_path))
+            except ValueError:
+                return str(path)
+
+        return MergeRefusal(
+            exchange=exchange.upper(),
+            old_symbol=old_symbol.upper(),
+            new_symbol=new_symbol.upper(),
+            old_path=relative(old_path),
+            new_path=relative(new_path),
+            overlapping_dates=len(overlap),
+            sample_dates=tuple(sorted(overlap)[:3]),
+        )
+
+    def _quarantine_superseded(self, path: Path) -> None:
+        """Retire a merged-away file into quarantine rather than deleting it.
+
+        After a successful merge its rows live on in the merged file, so the
+        copy is a recovery point for a wrong merge, not the data itself.
+        """
+
+        quarantine_move(path, self.state_path / "quarantine", "merged")
+
     def _merge_renamed_file(
         self,
         registry: dict[str, Any],
         exchange: str,
         old_symbol: str,
         new_symbol: str,
-    ) -> None:
+    ) -> Optional[MergeRefusal]:
         old_path = self._path_from_registry(registry, exchange, old_symbol)
         new_path = self._path_from_registry(registry, exchange, new_symbol)
         if old_path == new_path or not old_path.exists():
-            return
+            return None
+        old_dates = self._history_dates(old_path)
+        new_dates = self._history_dates(new_path)
+        if old_dates and new_dates:
+            overlap = old_dates & new_dates
+            if overlap:
+                # Two files claiming the same dates are two securities, not a
+                # rename.  Keep both files and both registry mappings.
+                return self._refusal(
+                    exchange, old_symbol, new_symbol, old_path, new_path,
+                    overlap,
+                )
         combined = self._read_history(old_path)
         if new_path.exists():
             combined = pd.concat(
                 [combined, self._read_history(new_path)], ignore_index=True
             )
         self._write_history(new_path, combined)
-        old_path.unlink()
+        self._quarantine_superseded(old_path)
         registry["files"].setdefault(exchange.upper(), {}).pop(
             old_symbol.upper(), None
         )
+        return None
 
     @staticmethod
     def _identifier(value: Any) -> str:
@@ -440,14 +636,19 @@ class SymbolHistoryStore:
         BSE corporate actions are keyed by security code while its price files
         also contain an ISIN.  Registering both avoids losing rename/action
         resolution by always preferring only one identifier.
+
+        A value that does not have the identifier's shape is dropped rather
+        than registered: stable keys are merge keys, and one malformed value
+        repeated across unrelated rows would register them all as the same
+        security and fold their histories together.
         """
 
         keys = []
         value = cls._identifier(isin)
-        if value:
+        if value and valid_isin(value):
             keys.append(f"ISIN:{value}")
         value = cls._identifier(security_id)
-        if value:
+        if value and valid_security_id(value):
             keys.append(f"ID:{value}")
         return keys
 
@@ -475,7 +676,7 @@ class SymbolHistoryStore:
     def _apply_recorded_actions(
         self,
         exchange: str,
-        symbol: str,
+        symbols: str | Iterable[str],
         row: pd.Series,
         action_records: Sequence[dict],
     ) -> pd.Series:
@@ -484,11 +685,23 @@ class SymbolHistoryStore:
         Without this step, retrying delivery or repairing an old daily report
         could replace an already adjusted symbol-history row with raw OHLC.
         Only actions recorded as successfully applied are considered.
+
+        ``symbols`` names every ticker the security is known by, not only the
+        one on the row.  An action whose ``stable_id`` fell back to a ticker
+        matches by name alone, and after a rename that name is not the one on
+        a re-downloaded historical row -- the engine applied it to the whole
+        merged file, so the replay must recognize both names or it silently
+        reverts the adjustment.
         """
 
         if not action_records:
             return row
 
+        known = (
+            {symbols.strip().upper()}
+            if isinstance(symbols, str)
+            else {str(value).strip().upper() for value in symbols}
+        )
         identifiers = {
             key.split(":", 1)[1] for key in self._stable_keys(row)
         }
@@ -505,7 +718,7 @@ class SymbolHistoryStore:
                 continue
             stable_id = str(record.get("stable_id", "")).strip().upper()
             action_symbol = str(record.get("symbol", "")).strip().upper()
-            if stable_id not in identifiers and action_symbol != symbol.upper():
+            if stable_id not in identifiers and action_symbol not in known:
                 continue
             try:
                 ex_date = date.fromisoformat(str(record["ex_date"]))
@@ -707,6 +920,15 @@ class SymbolHistoryStore:
                 self._ensure_symbol_filename(
                     registry, exchange, symbol, stable_keys
                 )
+                # The names this security was known by, captured before the
+                # registry is re-pointed at today's name, so the action
+                # replay can still match a ticker-keyed action recorded
+                # under the other name.
+                known = {symbol}
+                for stable_key in stable_keys:
+                    mapped = exchange_registry.get(stable_key)
+                    if mapped:
+                        known.add(mapped)
                 for stable_key in stable_keys:
                     old_symbol = exchange_registry.get(stable_key)
                     if old_symbol and old_symbol != symbol:
@@ -717,7 +939,7 @@ class SymbolHistoryStore:
 
                 path = self._path_from_registry(registry, exchange, symbol)
                 adjusted_row = self._apply_recorded_actions(
-                    exchange, symbol, row, action_records
+                    exchange, known, row, action_records
                 )
                 incoming = self._history_rows(pd.DataFrame([adjusted_row]))
                 existing = self._read_history(path)
@@ -776,7 +998,32 @@ class SymbolHistoryStore:
         merge_sources: dict[Path, list[Path]] = {}
         retired: set[Path] = set()
         interned: dict[str, str] = {}
+        refusals: list[MergeRefusal] = []
+        dates_cache: dict[Path, Optional[set[str]]] = {}
         rows_seen = 0
+
+        def stored_dates(path: Path) -> Optional[set[str]]:
+            if path not in dates_cache:
+                dates_cache[path] = self._history_dates(path)
+            return dates_cache[path]
+
+        def merge_overlap(*paths: Path) -> set[str]:
+            """Dates claimed by more than one of the files a merge would fold.
+
+            Only stored files count: the batch's own pending rows deduplicate
+            against them by design.  An unreadable file contributes nothing
+            here and fails loudly in the publish pass instead.
+            """
+
+            overlap: set[str] = set()
+            union: set[str] = set()
+            for member in dict.fromkeys(paths):
+                dates = stored_dates(member)
+                if not dates:
+                    continue
+                overlap |= union & dates
+                union |= dates
+            return overlap
 
         for index, item in enumerate(batch):
             exchange = item.exchange.upper()
@@ -806,7 +1053,22 @@ class SymbolHistoryStore:
                         old_path = self._path_from_registry(
                             registry, exchange, old_symbol
                         )
-                        if old_path != new_path:
+                        overlap = merge_overlap(
+                            old_path,
+                            *merge_sources.get(old_path, []),
+                            new_path,
+                            *merge_sources.get(new_path, []),
+                        ) if old_path != new_path else set()
+                        if overlap:
+                            # Not a rename: both histories stay, both keep
+                            # their files and mappings, and the stable key
+                            # follows the row that carries it today so the
+                            # same merge is not re-attempted every batch.
+                            refusals.append(self._refusal(
+                                exchange, old_symbol, symbol,
+                                old_path, new_path, overlap,
+                            ))
+                        elif old_path != new_path:
                             # The retired file's rows and its own pending
                             # merges lead, exactly as an incremental rename
                             # would have folded them in.
@@ -832,7 +1094,13 @@ class SymbolHistoryStore:
                     (index, position, symbol)
                 )
 
-        return _BatchPlan(contributions, merge_sources, retired, rows_seen)
+        return _BatchPlan(
+            contributions,
+            merge_sources,
+            retired,
+            rows_seen,
+            tuple(dict.fromkeys(refusals)),
+        )
 
     @staticmethod
     def _contributing_entries(
@@ -855,6 +1123,7 @@ class SymbolHistoryStore:
         batch: List[HistoryBatchItem],
         pairs: Sequence[tuple[int, int, str]],
         actions: _ActionIndex,
+        aliases: dict[str, dict[str, str]],
     ) -> Optional[pd.DataFrame]:
         """Materialize one symbol's batched rows in canonical order."""
 
@@ -875,8 +1144,23 @@ class SymbolHistoryStore:
             else pd.concat(frames, ignore_index=True)
         )
         return self._history_rows(
-            self._replay_actions(batch, pairs, gathered, actions)
+            self._replay_actions(batch, pairs, gathered, actions, aliases)
         )
+
+    @staticmethod
+    def _alias_names(
+        identifiers: Iterable[str],
+        exchange_aliases: dict[str, str],
+    ) -> set[str]:
+        """Tickers the registry knew these identifiers by before this batch."""
+
+        names = set()
+        for value in identifiers:
+            for key in (f"ISIN:{value}", f"ID:{value}"):
+                mapped = exchange_aliases.get(key)
+                if mapped:
+                    names.add(mapped)
+        return names
 
     def _replay_actions(
         self,
@@ -884,15 +1168,20 @@ class SymbolHistoryStore:
         pairs: Sequence[tuple[int, int, str]],
         gathered: pd.DataFrame,
         actions: _ActionIndex,
+        aliases: dict[str, dict[str, str]],
     ) -> pd.DataFrame:
         """Re-apply audited actions to re-downloaded rows.
 
         Skipped whole-symbol unless an audited action actually names this
-        symbol or one of its identifiers, because the replay is per row and
-        reaches almost nothing.
+        symbol, one of its identifiers, or the ticker its identifiers
+        resolved to before this batch, because the replay is per row and
+        reaches almost nothing.  ``aliases`` is the registry as it stood
+        before this batch re-pointed it, so a re-downloaded pre-rename row
+        still matches an action recorded under the current name.
         """
 
         exchange = batch[pairs[0][0]].exchange.upper()
+        exchange_aliases = aliases.get(exchange, {})
         identifiers = {
             self._identifier(value)
             for column in ("ISIN", "SECURITY_ID")
@@ -900,14 +1189,27 @@ class SymbolHistoryStore:
             for value in gathered[column].unique()
         }
         identifiers.discard("")
+        symbols = {symbol for _i, _p, symbol in pairs}
         if not actions.touches(
-            exchange, {symbol for _i, _p, symbol in pairs}, identifiers
+            exchange,
+            symbols | self._alias_names(identifiers, exchange_aliases),
+            identifiers,
         ):
             return gathered
+
+        def known_names(offset: int, symbol: str) -> set[str]:
+            row = gathered.iloc[offset]
+            row_identifiers = {
+                key.split(":", 1)[1] for key in self._stable_keys(row)
+            }
+            return {symbol} | self._alias_names(
+                row_identifiers, exchange_aliases
+            )
+
         return pd.DataFrame([
             self._apply_recorded_actions(
                 batch[index].exchange.upper(),
-                symbol,
+                known_names(offset, symbol),
                 gathered.iloc[offset],
                 actions.records,
             )
@@ -983,6 +1285,12 @@ class SymbolHistoryStore:
 
             registry = self._read_registry()
             actions = _ActionIndex.build(self._read_applied_actions())
+            # Ticker aliases as they stood before this batch re-points the
+            # registry, for the action replay only.
+            aliases = {
+                exchange: dict(mapping)
+                for exchange, mapping in registry["exchanges"].items()
+            } if actions.records else {}
             plan = self._plan_batch(registry, batch)
 
             def read_history(path: Path) -> pd.DataFrame:
@@ -1006,7 +1314,9 @@ class SymbolHistoryStore:
                         frames[0] if len(frames) == 1
                         else pd.concat(frames, ignore_index=True)
                     )
-                    incoming = self._batch_incoming(batch, pairs, actions)
+                    incoming = self._batch_incoming(
+                        batch, pairs, actions, aliases
+                    )
                     if incoming is None:
                         history = existing
                     elif existing.empty:
@@ -1035,7 +1345,7 @@ class SymbolHistoryStore:
             for old_path in sorted(
                 plan.retired.difference(final_paths), key=str
             ):
-                old_path.unlink(missing_ok=True)
+                self._quarantine_superseded(old_path)
             self._write_registry(registry)
 
         if ledger_path.exists():
@@ -1051,6 +1361,7 @@ class SymbolHistoryStore:
             history_reads=history_reads,
             history_writes=history_writes,
             failures=tuple(failures),
+            refused_merges=plan.refusals,
         )
 
     def rewrite_symbol(

@@ -497,6 +497,7 @@ class HistoryBatchCoordinator:
                 batch_id=batch_id,
                 outcome="partial" if result.failures else "success",
                 failed_symbols=len(result.failures),
+                refused_merges=len(result.refused_merges),
                 entries=result.entries,
                 rows=result.rows,
                 symbols=result.symbols,

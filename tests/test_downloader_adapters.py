@@ -45,7 +45,7 @@ def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     nse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
         "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC,123\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123\n"
     ).encode()
     nse_delivery = (
         "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
@@ -67,7 +67,7 @@ def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     bse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
         "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABB,A,10,12,9,11,100,5,INE1,500002\n"
+        "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002\n"
     ).encode()
     bse_delivery = (
         "SCRIP CODE|DELIVERY QTY|DELV. PER.\n500002|80|80\n"

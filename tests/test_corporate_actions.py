@@ -27,7 +27,7 @@ def _history_rows(dates=("20250101", "20250102"), closes=(100, 50)):
             "SYMBOL": "ABC", "DATE": day, "OPEN": close,
             "HIGH": close, "LOW": close, "CLOSE": close, "VOLUME": 10,
             "DELIVERY_QTY": 5, "DELIVERY_PERCENT": 50, "SERIES": "EQ",
-            "TOTAL_TRADES": 1, "QTY_PER_TRADE": 10, "ISIN": "INE1",
+            "TOTAL_TRADES": 1, "QTY_PER_TRADE": 10, "ISIN": "INE111111111",
             "SECURITY_ID": "500001",
         }
         for day, close in zip(dates, closes)
@@ -193,7 +193,7 @@ def test_ratio_parsers_and_exchange_normalizers():
     ) == 5
     assert parse_bonus_factor("Bonus 1:1") == 2
     nse = normalize_nse_actions([{
-        "symbol": "ABC", "series": "EQ", "isin": "INE1",
+        "symbol": "ABC", "series": "EQ", "isin": "INE111111111",
         "exDate": "02-Jan-2025", "subject": "Bonus 1:1",
     }])
     assert len(nse) == 1 and nse[0].factor == 2
@@ -212,7 +212,7 @@ def test_one_announcement_yields_one_action_per_adjustment():
         "To Re 1/- Per Share"
     )
     actions = normalize_nse_actions([{
-        "symbol": "SUNILHITEC", "series": "EQ", "isin": "INE1",
+        "symbol": "SUNILHITEC", "series": "EQ", "isin": "INE111111111",
         "exDate": "01-Dec-2016", "subject": subject,
     }])
     assert [(action.action_type, action.factor) for action in actions] == [
@@ -233,7 +233,7 @@ def test_a_combined_bonus_and_split_composes_into_one_adjustment(tmp_path):
         ("20161130", "20161201"), (202.75, 10.65)
     ))
     actions = normalize_nse_actions([{
-        "symbol": "ABC", "series": "EQ", "isin": "INE1",
+        "symbol": "ABC", "series": "EQ", "isin": "INE111111111",
         "exDate": "01-Dec-2016",
         "subject": "Bonus 1:1/Face Value Split (Sub-Division) - From Rs 10/- "
                    "Per Share To Re 1/- Per Share",
@@ -251,22 +251,22 @@ def test_the_audit_key_survives_a_change_of_factor():
 
     def action(factor):
         return CorporateAction(
-            "NSE", "ABC", "INE1", date(2025, 1, 2), "bonus", factor, "Bonus"
+            "NSE", "ABC", "INE111111111", date(2025, 1, 2), "bonus", factor, "Bonus"
         )
 
     assert action(2.0).key == action(20.0).key
     assert action(2.0).key == corporate_action_key(
-        "nse", "ine1", "2025-01-02", "BONUS"
+        "nse", "ine111111111", "2025-01-02", "BONUS"
     )
     # Identity still separates the two adjustments of one announcement.
     assert action(2.0).key != CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "split", 2.0, "Bonus"
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "split", 2.0, "Bonus"
     ).key
 
 
 def test_a_version_two_ledger_is_rekeyed_instead_of_reapplied():
     record = {
-        "exchange": "NSE", "symbol": "ABC", "stable_id": "INE1",
+        "exchange": "NSE", "symbol": "ABC", "stable_id": "INE111111111",
         "ex_date": "2016-12-01", "action_type": "bonus", "factor": 2.0,
         "description": "Bonus 1:1 and split", "series": "EQ",
         "status": "applied", "rows_adjusted": 141, "note": "",
@@ -288,7 +288,7 @@ def test_a_version_two_ledger_is_rekeyed_instead_of_reapplied():
     migrated = migrate_corporate_ledger(legacy)
     validate_corporate_ledger(migrated)
 
-    new_key = corporate_action_key("NSE", "INE1", "2016-12-01", "bonus")
+    new_key = corporate_action_key("NSE", "INE111111111", "2016-12-01", "bonus")
     assert migrated["version"] == 3
     assert set(migrated["actions"]) == {new_key}
     assert migrated["actions"][new_key]["status"] == "applied"
@@ -298,7 +298,7 @@ def test_a_version_two_ledger_is_rekeyed_instead_of_reapplied():
 
     # The corrected reading of the same announcement now finds its record.
     corrected = CorporateAction(
-        "NSE", "ABC", "INE1", date(2016, 12, 1), "bonus", 20.0, "Bonus 1:1"
+        "NSE", "ABC", "INE111111111", date(2016, 12, 1), "bonus", 20.0, "Bonus 1:1"
     )
     assert corrected.key == new_key
 
@@ -306,7 +306,7 @@ def test_a_version_two_ledger_is_rekeyed_instead_of_reapplied():
 def test_a_v2_ledger_keeps_the_applied_record_when_keys_collide():
     def record(factor, status, updated):
         return {
-            "exchange": "NSE", "symbol": "ABC", "stable_id": "INE1",
+            "exchange": "NSE", "symbol": "ABC", "stable_id": "INE111111111",
             "ex_date": "2016-12-01", "action_type": "bonus", "factor": factor,
             "description": "Bonus", "series": "EQ", "status": status,
             "rows_adjusted": 1, "note": "", "updated_at": updated,
@@ -330,14 +330,14 @@ def test_a_new_reading_of_an_applied_action_is_reported_not_reapplied(tmp_path):
     store.upsert("NSE", "EQ", date(2025, 1, 2), _history_rows())
     engine = CorporateActionEngine(tmp_path)
     applied = CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "bonus", 2.0, "Bonus 1:1", "EQ"
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "bonus", 2.0, "Bonus 1:1", "EQ"
     )
     assert engine.apply([applied])["applied"] == 1
     path = tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
     assert float(pd.read_csv(path).loc[0, "CLOSE"]) == 50.0
 
     corrected = CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "bonus", 20.0, "Bonus 1:1", "EQ"
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "bonus", 20.0, "Bonus 1:1", "EQ"
     )
     summary = engine.apply([corrected])
     assert summary["applied"] == 0 and summary["factor_conflicts"] == 1
@@ -359,7 +359,7 @@ def test_an_action_waits_until_the_ex_date_bar_exists(tmp_path):
         ("20161129", "20161130"), (202.75, 202.75)
     ))
     action = CorporateAction(
-        "NSE", "ABC", "INE1", date(2016, 12, 1), "bonus", 2.0, "Bonus 1:1", "EQ"
+        "NSE", "ABC", "INE111111111", date(2016, 12, 1), "bonus", 2.0, "Bonus 1:1", "EQ"
     )
     engine = CorporateActionEngine(tmp_path)
     summary = engine.apply([action])
@@ -387,7 +387,7 @@ def test_corporate_action_applies_once_and_scales_the_share_counts(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     action = CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2),
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2),
         "bonus", 2.0, "Bonus 1:1", "EQ",
     )
     engine = CorporateActionEngine(tmp_path)
@@ -438,7 +438,7 @@ def test_an_adjustment_keeps_turnover_continuous_across_the_ex_date(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2026, 7, 10), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2026, 7, 10), "split", 10.0,
+        "NSE", "ABC", "INE111111111", date(2026, 7, 10), "split", 10.0,
         "Face Value Split (Sub-Division) - From Rs 10/- Per Share To "
         "Re 1/- Per Share", "EQ",
     )])
@@ -466,7 +466,7 @@ def test_a_consolidation_reduces_the_share_counts(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "consolidation", 0.1,
         "Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share",
         "EQ",
     )])
@@ -489,7 +489,7 @@ def test_a_consolidation_never_rewrites_a_traded_day_as_untraded(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("BSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "BSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "BSE", "ABC", "INE111111111", date(2025, 1, 2), "consolidation", 0.1,
         "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
     )])
     adjusted = pd.read_csv(tmp_path / "BSE" / "SYMBOLS" / "abc.txt")
@@ -507,7 +507,7 @@ def test_a_day_that_did_not_trade_stays_at_zero(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("BSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "BSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "BSE", "ABC", "INE111111111", date(2025, 1, 2), "consolidation", 0.1,
         "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
     )])
     adjusted = pd.read_csv(tmp_path / "BSE" / "SYMBOLS" / "abc.txt")
@@ -528,7 +528,7 @@ def test_a_repair_is_never_outranked_by_the_row_it_replaces(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "consolidation", 0.1,
         "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
     )])
     path = tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
@@ -557,9 +557,9 @@ def test_adjusted_prices_are_no_longer_snapped_to_a_tick_grid(tmp_path):
         ("20161130", "20161201"), (202.75, 10.14)
     ))
     CorporateActionEngine(tmp_path).apply([
-        CorporateAction("NSE", "ABC", "INE1", date(2016, 12, 1), "bonus",
+        CorporateAction("NSE", "ABC", "INE111111111", date(2016, 12, 1), "bonus",
                         2.0, "Bonus 1:1 and split", "EQ"),
-        CorporateAction("NSE", "ABC", "INE1", date(2016, 12, 1), "split",
+        CorporateAction("NSE", "ABC", "INE111111111", date(2016, 12, 1), "split",
                         10.0, "Bonus 1:1 and split", "EQ"),
     ])
     adjusted = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "abc.txt")
@@ -574,14 +574,14 @@ def test_a_blank_delivery_field_stays_blank_through_an_adjustment(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "bonus", 2.0, "Bonus 1:1", "EQ"
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "bonus", 2.0, "Bonus 1:1", "EQ"
     )])
     adjusted = (
         tmp_path / "NSE" / "SYMBOLS" / "abc.txt"
     ).read_text().splitlines()[1]
     # Delivery is legitimately absent for many dates; scaling must not turn a
     # blank into a number, and a share count must not acquire a decimal point.
-    assert adjusted.endswith(",,")
+    assert adjusted.endswith(",,INE111111111")
     assert adjusted.split(",")[5] == "20"
 
 
@@ -598,7 +598,7 @@ def test_the_raw_replay_agrees_with_the_engine_column_for_column(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "split", 3.0,
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "split", 3.0,
         "Face Value Split From Rs 3 To Re 1", "EQ",
     )])
     published = pd.read_csv(
@@ -630,7 +630,7 @@ def test_a_consolidation_replay_does_not_revert_the_adjustment(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     CorporateActionEngine(tmp_path).apply([CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2), "consolidation", 0.1,
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2), "consolidation", 0.1,
         "Consolidation Of Equity Shares From Re 1 To Rs 10", "EQ",
     )])
     store.upsert("NSE", "EQ", date(2025, 1, 1), rows.iloc[[0]].copy())
@@ -647,7 +647,7 @@ def test_continuity_failure_does_not_replace_symbol_file(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), rows)
     action = CorporateAction(
-        "NSE", "ABC", "INE1", date(2025, 1, 2),
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2),
         "bonus", 2.0, "Bonus 1:1", "EQ",
     )
     summary = CorporateActionEngine(tmp_path).apply([action])
@@ -663,3 +663,73 @@ def test_the_shipped_ledger_document_is_version_three(tmp_path):
         (tmp_path / ".state" / "corporate_actions.json").read_text()
     )
     assert document["version"] == 3
+
+
+def test_recovery_replays_a_stage_prepared_by_a_pre_isin_build(tmp_path):
+    """A crash can leave a prepared transaction whose staged history was
+    written under the 11-column schema.  Recovery must replay it through the
+    current schema instead of failing closed on the column mismatch, and the
+    audit record must follow the bytes it actually published."""
+
+    from src.services.state_store import file_sha256
+
+    symbols_dir = tmp_path / "NSE" / "SYMBOLS"
+    symbols_dir.mkdir(parents=True)
+    legacy_header = (
+        "DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,"
+        "TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,DELIVERY_PERCENT"
+    )
+    target = symbols_dir / "abc.txt"
+    target.write_text(
+        f"{legacy_header}\n"
+        "20250101,100.0,100.0,100.0,100.0,10,EQ,1,10.0,5,50.0\n"
+        "20250102,50.0,50.0,50.0,50.0,10,EQ,1,10.0,5,50.0\n"
+    )
+
+    engine = CorporateActionEngine(tmp_path)
+    action = CorporateAction(
+        "NSE", "ABC", "INE111111111", date(2025, 1, 2),
+        "split", 2.0, "Fv Split Rs.10 To Rs.5", "EQ",
+    )
+    transaction_id = engine._transaction_id([action])
+    stage = engine._transaction_stage(transaction_id)
+    stage.parent.mkdir(parents=True)
+    stage.write_text(
+        f"{legacy_header}\n"
+        "20250101,50.0,50.0,50.0,50.0,20,EQ,1,10.0,10,50.0\n"
+        "20250102,50.0,50.0,50.0,50.0,10,EQ,1,10.0,5,50.0\n"
+    )
+    ledger = engine._read_ledger()
+    ledger["actions"][action.key] = engine._ledger_record(
+        action, "prepared", 1, f"Transaction {transaction_id}"
+    )
+    ledger["transactions"][transaction_id] = {
+        "status": "prepared",
+        "exchange": "NSE",
+        "symbol": "ABC",
+        "action_keys": [action.key],
+        "before_sha256": file_sha256(target),
+        "after_sha256": file_sha256(stage),
+        "final_action_records": {
+            action.key: engine._ledger_record(
+                action, "applied", 1, "Combined factor 2"
+            )
+        },
+        "prepared_at": "2025-01-03T00:00:00+05:30",
+    }
+    engine._write_ledger(ledger)
+
+    recovered = engine.recover_incomplete_transactions()
+
+    assert recovered == 1
+    published = pd.read_csv(target, dtype=str)
+    assert list(published.columns)[-1] == "ISIN"
+    assert published["CLOSE"].tolist() == ["50.0", "50.0"]
+    document = json.loads(
+        (tmp_path / ".state" / "corporate_actions.json").read_text()
+    )
+    transaction = document["transactions"][transaction_id]
+    assert transaction["status"] == "committed"
+    assert transaction["after_sha256"] == file_sha256(target)
+    assert document["actions"][action.key]["status"] == "applied"
+    assert not stage.exists()

@@ -31,7 +31,7 @@ def _rows():
             "SERIES": "EQ",
             "TOTAL_TRADES": 1,
             "QTY_PER_TRADE": 10,
-            "ISIN": "INE1",
+            "ISIN": "INE111111111",
             "SECURITY_ID": "500001",
         },
         {
@@ -47,7 +47,7 @@ def _rows():
             "SERIES": "EQ",
             "TOTAL_TRADES": 2,
             "QTY_PER_TRADE": 10,
-            "ISIN": "INE1",
+            "ISIN": "INE111111111",
             "SECURITY_ID": "500001",
         },
     ])
@@ -57,7 +57,7 @@ def _action():
     return CorporateAction(
         "NSE",
         "ABC",
-        "INE1",
+        "INE111111111",
         date(2025, 1, 2),
         "bonus",
         2.0,
@@ -100,7 +100,7 @@ def test_corrupt_registry_ledger_and_delivery_state_fail_closed(tmp_path):
     registry_bytes = b"{broken registry"
     registry.write_bytes(registry_bytes)
     with pytest.raises(StateCorruptionError):
-        store.resolve_symbol("NSE", "INE1")
+        store.resolve_symbol("NSE", "INE111111111")
     assert registry.read_bytes() == registry_bytes
 
     ledger = tmp_path / ".state" / "corporate_actions.json"
@@ -237,30 +237,30 @@ def test_rebuild_registry_from_raw_snapshots(tmp_path):
     count = SymbolHistoryRebuilder(tmp_path).rebuild_registry()
 
     assert count >= 2
-    assert store.resolve_symbol("NSE", "INE1") == "ABC"
+    assert store.resolve_symbol("NSE", "INE111111111") == "ABC"
 
 
 def test_single_exchange_rebuild_preserves_other_exchange_registry(tmp_path):
     store = SymbolHistoryStore(tmp_path)
     store.upsert("NSE", "EQ", date(2025, 1, 2), _rows())
     bse_rows = _rows().assign(
-        SYMBOL="BSEABC", ISIN="INE-BSE", SECURITY_ID="600001"
+        SYMBOL="BSEABC", ISIN="INEBSE000015", SECURITY_ID="600001"
     )
     store.upsert("BSE", "EQ", date(2025, 1, 2), bse_rows)
 
     SymbolHistoryRebuilder(tmp_path).rebuild_symbol("NSE", "ABC")
 
-    assert store.resolve_symbol("NSE", "INE1") == "ABC"
+    assert store.resolve_symbol("NSE", "INE111111111") == "ABC"
     assert store.resolve_symbol("BSE", "600001") == "BSEABC"
 
 
 def test_colliding_symbol_slugs_get_stable_distinct_files(tmp_path):
     rows = pd.concat([
         _rows().iloc[[0]].assign(
-            SYMBOL="A/B", ISIN="INE-A", SECURITY_ID="500001"
+            SYMBOL="A/B", ISIN="INEAAA000013", SECURITY_ID="500001"
         ),
         _rows().iloc[[0]].assign(
-            SYMBOL="A B", ISIN="INE-B", SECURITY_ID="500002"
+            SYMBOL="A B", ISIN="INEBBB000011", SECURITY_ID="500002"
         ),
     ], ignore_index=True)
     store = SymbolHistoryStore(tmp_path)

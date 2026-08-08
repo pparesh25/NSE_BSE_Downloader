@@ -1163,11 +1163,13 @@ both rows tied and the old rule passed it too. Both were rewritten until they fa
 
 ### 3.3 Protect symbol identity — effort S
 
-- [ ] Validate ISIN format before it can act as a stable key
-- [ ] Refuse to merge histories with overlapping dates
-- [ ] Move superseded files to `.state/quarantine/merged/` instead of `unlink()`
+**Done 2026-08-08.** Notes below the checklist.
+
+- [x] Validate ISIN format before it can act as a stable key
+- [x] Refuse to merge histories with overlapping dates
+- [x] Move superseded files to `.state/quarantine/merged/` instead of `unlink()`
       (`symbol_history.py:322-343` — the `unlink()` is unconditional today)
-- [ ] Add ticker-reuse protection: `_ensure_symbol_filename` keys on the ticker string
+- [x] Add ticker-reuse protection: `_ensure_symbol_filename` keys on the ticker string
       alone, so a delisted ticker reassigned to a new company appends into the old file
       and `_deduplicate` then destroys one row per shared date.
 
@@ -1187,8 +1189,79 @@ both rows tied and the old rule passed it too. Both were rewritten until they fa
       Verified byte-identical on `5e15efc` and on the current branch, so 2.1 neither
       caused nor changed it. Fixing it needs the identity model this section is about,
       not another special case in the batch, which is why it is recorded here.
-- [ ] Add an ISIN or `SECURITY_ID` column to `SYMBOL_HISTORY_COLUMNS` so a file is
+- [x] Add an ISIN or `SECURITY_ID` column to `SYMBOL_HISTORY_COLUMNS` so a file is
       self-identifying and merge errors are reversible after the fact
+
+#### How 3.3 was closed
+
+**Identifier shapes were measured before they were enforced.** Across the owner's
+full tree — 1,057,349 raw rows — every non-blank ISIN has the ISO 6166 shape
+(`[A-Z]{2}[A-Z0-9]{9}[0-9]`) and every `SECURITY_ID` is purely numeric, so the
+validators reject nothing real. They are applied at every point a value becomes a
+key: `_stable_keys_from` (price rows), both action normalizers (a malformed
+identifier falls back to the ticker exactly as a missing one does, so two garbage
+announcements can no longer collide on one ledger key), and the registry migration,
+which prunes malformed keys a pre-validation build let in. 64,392 rows (NSE SME)
+carry no identifier at all and keep working by name.
+
+**The registry is now version 3 and each filename remembers its owner.** A new
+`identities` section maps `filename -> stable keys`; `_ensure_symbol_filename`
+refuses a name whose recorded identity is disjoint from the row's and assigns a
+digest-suffixed file instead. The entry outlives the file, so a name retired by a
+rename inside the same batch cannot be handed to a different security either — the
+plan's `aaa.txt` scenario now publishes the day-3 row to `aaa--<digest>.txt` with
+zero rows lost, verified by test. Migration from v2 seeds identities by inverting
+the existing key->symbol mappings through the filename table, so previously
+written files are protected immediately. A relisting company whose keys match
+reclaims its original file. Known trade-off: an NSE security whose ISIN is
+*reassigned* forks into a new file at the change (BSE is bridged by the stable
+numeric code); a fork is visible and mergeable, silent destruction was neither.
+
+**A merge is refused when both stored histories claim the same dates.** A genuine
+rename retires one ticker before the next trades, so overlap means two securities
+holding one identifier. Both files and both mappings are kept, the stable key
+follows the row that carries it today (so the refusal does not repeat every
+batch), and the refusal is surfaced: `HistoryBatchResult.refused_merges`, the
+`history_batch_finished` telemetry event, and a GUI error naming both files.
+Deliberately *not* refused: overlap between a stored file and the batch's own
+incoming rows — that is the ordinary re-download/repair path, which deduplication
+resolves by design; refusing it would break every delivery repair. The residual
+case — two companies erroneously sharing a key with **zero days** between the
+error and the collision, inside one batch — still deduplicates; the cross-batch
+form, which is what an erroneous feed actually produces, is refused.
+
+**Superseded files move to `.state/quarantine/merged/`** (named
+`<stem>.<sha12>.txt`), in both the incremental and the batch path. After a good
+merge the copy is redundant — the rows live in the merged file — so the existing
+quarantine retention (30 days, 100 files per category) applies. If the move
+fails, the file is left in place: stale and visible beats deleted.
+
+**Symbol files are self-identifying.** `ISIN` is appended as the twelfth column —
+trailing, so positional readers of the first eleven keep working — written only
+when it has the identifier's shape and blank otherwise (SME). Legacy 11-column
+files upgrade on read and are rewritten in the new schema on their next write; a
+corporate-action transaction staged by a pre-ISIN build recovers after a crash by
+replaying through the current schema and adopting the digest of the bytes it
+actually published (the stage's own bytes are checksum-verified first).
+
+**The recorded rebuild defect is fixed at both call sites.** The action replay now
+matches every name the security is known by: the rebuild passes the closure's
+symbol set, and the live paths pass the row's name plus the tickers its
+identifiers resolved to in the registry *as it stood before the batch re-pointed
+it*. A ticker-fallback `stable_id` therefore survives the rename in both
+directions — action recorded under the old name replayed onto a renamed history,
+and action recorded under the new name replayed onto a re-downloaded pre-rename
+row. The rebuild closure also stopped following ticker names blindly: a row that
+carries identifiers joins only through them (identifier-less rows still join by
+name), and the closure seeds from the requested name's file identity, so
+rebuilding a renamed security no longer swallows the history of a different
+company that later took over its old ticker.
+
+16 new tests (378 total), and every one was run against the code with its own fix
+reverted and fails there — nine targeted reverts in all. Existing fixtures used
+abbreviated fake ISINs (`INE1`); all were upgraded to shape-valid values.
+Both interpreters: pytest green, coverage 76.8% (3.13), Ruff and mypy clean,
+`--smoke-gui` exits 0.
 
 ### 3.4 Row-count and value gates — effort S
 
@@ -1302,7 +1375,7 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
                                    offline and absent reports retire; 2.4 delivery
                                    retries bounded
    ↓
-Phase 3  stop writing wrong data ← 3.1 and 3.2 done; 3.3-3.5 open
+Phase 3  stop writing wrong data ← 3.1, 3.2 and 3.3 done; 3.4-3.5 open
    ↓
 Phase 4  verifiability           ← --audit answers "can I trust this?"
    ↓

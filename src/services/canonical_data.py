@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
+import re
 import zipfile
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import pandas as pd
 
@@ -22,13 +23,42 @@ FO_DAILY_COLUMNS = [
     "SYMBOL", "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME",
     "OPEN_INTEREST", "CHANGE_IN_OI",
 ]
-SYMBOL_HISTORY_COLUMNS = [
+# The trailing ISIN column makes each symbol file self-identifying: a merge
+# that folded two securities together is detectable and reversible from the
+# file alone.  It is appended last so positional readers of the first eleven
+# columns keep working, and it is blank where the source report carries no
+# identifier (NSE SME).
+LEGACY_SYMBOL_HISTORY_COLUMNS = [
     "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "SERIES",
     "TOTAL_TRADES", "QTY_PER_TRADE", "DELIVERY_QTY", "DELIVERY_PERCENT",
 ]
+SYMBOL_HISTORY_COLUMNS = LEGACY_SYMBOL_HISTORY_COLUMNS + ["ISIN"]
 INTERNAL_EQUITY_COLUMNS = EQUITY_DAILY_COLUMNS + [
     "SERIES", "TOTAL_TRADES", "QTY_PER_TRADE", "ISIN", "SECURITY_ID",
 ]
+
+# Identity values act as merge keys: two symbols that share one stable key are
+# treated as the same security, so a malformed value that repeats across
+# unrelated rows ("-", "NA", a stray number in the ISIN column) must never
+# become a key.  Measured against the owner's full tree (1,057,349 rows):
+# every non-blank ISIN matches the ISO 6166 shape and every SECURITY_ID is
+# purely numeric, so these shapes reject nothing real.
+ISIN_PATTERN = r"[A-Z]{2}[A-Z0-9]{9}[0-9]"
+_ISIN_SHAPE = re.compile(ISIN_PATTERN)
+_SECURITY_ID_SHAPE = re.compile(r"[0-9]{1,12}")
+
+
+def valid_isin(value: Any) -> bool:
+    """True when ``value`` has the ISO 6166 ISIN shape (prefix+body+digit)."""
+
+    return bool(_ISIN_SHAPE.fullmatch(str(value).strip().upper()))
+
+
+def valid_security_id(value: Any) -> bool:
+    """True when ``value`` looks like an exchange security code (numeric)."""
+
+    return bool(_SECURITY_ID_SHAPE.fullmatch(str(value).strip().upper()))
+
 
 NSE_EQUITY_SERIES = {"EQ", "BE", "BZ"}
 NSE_SME_SERIES = {"SM", "ST"}

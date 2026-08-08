@@ -136,18 +136,32 @@ class SymbolHistoryRebuilder:
             # registry derived from raw snapshots.
             pass
 
-        identifiers = {
-            stable_key
-            for stable_key, mapped_symbol in registry["exchanges"]
-            .get(exchange, {})
-            .items()
-            if mapped_symbol == requested_symbol
-        }
+        # Seed the security's identity from the file the requested ticker
+        # resolves to.  Seeding from every registry key that maps to the name
+        # would conflate two companies the moment a delisted ticker was
+        # reassigned, because the delisted company's stale key mapping still
+        # names the same ticker.
+        file_mappings = registry["files"].get(exchange, {})
+        owners = registry["identities"].get(exchange, {})
+        filename = file_mappings.get(requested_symbol)
+        identifiers = set(owners.get(filename, ())) if filename else set()
+        if not identifiers:
+            identifiers = {
+                stable_key
+                for stable_key, mapped_symbol in registry["exchanges"]
+                .get(exchange, {})
+                .items()
+                if mapped_symbol == requested_symbol
+            }
         symbols = {requested_symbol}
         selected_rows: list[pd.Series] = []
 
-        # Follow both symbol names and stable identifiers so renamed securities
-        # rebuild into one continuous current-symbol history.
+        # Follow stable identifiers so renamed securities rebuild into one
+        # continuous current-symbol history.  A row that carries identifiers
+        # joins only through them: a ticker name is reassignable, so matching
+        # an identifier-bearing row by name alone would swallow the history
+        # of a different company that later took over the name.  Rows with no
+        # identifiers at all (NSE SME, legacy eras) still join by name.
         changed = True
         while changed:
             changed = False
@@ -158,7 +172,12 @@ class SymbolHistoryRebuilder:
                 for _, row in frame.iterrows():
                     row_symbol = str(row.get("SYMBOL", "")).strip().upper()
                     row_keys = set(self.histories._stable_keys(row))
-                    if row_symbol in symbols or row_keys.intersection(identifiers):
+                    matches = (
+                        row_keys.intersection(identifiers)
+                        if row_keys
+                        else row_symbol in symbols
+                    )
+                    if matches:
                         selected_rows.append(row)
                         old_symbol_count = len(symbols)
                         old_identifier_count = len(identifiers)
@@ -195,9 +214,12 @@ class SymbolHistoryRebuilder:
                 stable_key
             ] = current_symbol
         action_records = self.histories._read_applied_actions()
+        # Every name the security was known by matches, not only the current
+        # one: an action whose stable_id fell back to the pre-rename ticker
+        # would otherwise be skipped and the rebuild would revert it.
         adjusted_rows = [
             self.histories._apply_recorded_actions(
-                exchange, current_symbol, row, action_records
+                exchange, symbols, row, action_records
             )
             for _, row in selected.iterrows()
         ]

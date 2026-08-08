@@ -25,12 +25,12 @@ def _csv(text):
 def test_nse_equity_legacy_and_udiff_share_one_output_contract():
     legacy = _csv(
         "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,TOTTRDQTY,TIMESTAMP,TOTALTRADES,ISIN\n"
-        "ABC,EQ,10,12,9,11,1000,05-JUL-2024,20,INEABC\n"
+        "ABC,EQ,10,12,9,11,1000,05-JUL-2024,20,INEABC000009\n"
     )
     udiff = _csv(
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
         "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC,123\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123\n"
     )
     old_result = public_equity(normalize_nse_equity(legacy, date(2024, 7, 5)))
     new_result = public_equity(normalize_nse_equity(udiff, date(2024, 7, 8)))
@@ -42,8 +42,8 @@ def test_nse_equity_legacy_and_udiff_share_one_output_contract():
 def test_nse_delivery_uses_symbol_and_series_not_symbol_alone():
     prices = _csv(
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,ISIN\n"
-        "2025-01-01,ABC,EQ,1,2,1,2,100,INE1\n"
-        "2025-01-01,ABC,BE,1,2,1,2,200,INE2\n"
+        "2025-01-01,ABC,EQ,1,2,1,2,100,INE111111111\n"
+        "2025-01-01,ABC,BE,1,2,1,2,200,INE222222222\n"
     )
     delivery = _csv(
         "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
@@ -89,17 +89,17 @@ def test_nse_sme_and_fo_retain_new_columns():
     [
         (
             "SC_CODE,SC_NAME,SC_GROUP,OPEN,HIGH,LOW,CLOSE,NO_OF_SHRS,NO_TRADES,ISIN_CODE,TRADING_DATE\n"
-            "500002,ABB LTD.,A,10,12,9,11,100,5,INE1,16-Aug-22\n",
+            "500002,ABB LTD.,A,10,12,9,11,100,5,INE111111111,16-Aug-22\n",
             date(2022, 8, 16),
         ),
         (
             "ISIN,SCRIP ID,SCRIP_CODE,SC_GROUP,OPEN PRICE,HIGH PRICE,LOW PRICE,CLOSING PRICE,NO_OF_SHRS,NO_TRADES,TRADING_DATE\n"
-            "INE1,ABB,500002,A,10,12,9,11,100,5,17-Aug-22\n",
+            "INE111111111,ABB,500002,A,10,12,9,11,100,5,17-Aug-22\n",
             date(2022, 8, 17),
         ),
         (
             "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-            "2024-07-08,ABB,A,10,12,9,11,100,5,INE1,500002\n",
+            "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002\n",
             date(2024, 7, 8),
         ),
     ],

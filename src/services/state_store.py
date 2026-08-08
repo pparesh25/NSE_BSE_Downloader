@@ -73,6 +73,40 @@ def quarantine_copy(
         return None
 
 
+def quarantine_move(
+    path: Path,
+    quarantine_root: Path,
+    category: str,
+) -> Optional[Path]:
+    """Move a superseded file into quarantine instead of deleting it.
+
+    Used for files whose content was folded into another file: the original
+    must leave the published tree, but deleting it would make a wrong merge
+    unrecoverable.  If the move fails the file is left in place -- a stale
+    file is recoverable and visible, deleted bytes are neither.
+    """
+
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        digest = file_sha256(path)
+        directory = Path(quarantine_root) / category
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{path.stem}.{digest[:12]}{path.suffix}"
+        if target.exists():
+            # Identical content is already preserved; finish the removal.
+            path.unlink(missing_ok=True)
+            return target
+        try:
+            path.replace(target)
+        except OSError:
+            shutil.move(str(path), str(target))
+        return target
+    except Exception:
+        return None
+
+
 class VersionedJSONStore:
     """Persist one JSON document using schema validation and atomic replace."""
 

@@ -58,19 +58,35 @@ all green, checksums verified, packaged macOS app launched).
    `main/version.py` reads `1.1.0`, every running v1.0.1 client announces it within
    three seconds of its next launch.
 
+### How it actually went
+
+All seven steps completed on 2026-08-09, in that order. Two things worth carrying to
+the next release:
+
+- **`gh release create` with 198 MB of assets did not finish inside ten minutes.**
+  `gh` creates the release as a *draft*, uploads, then publishes, so the interruption
+  left a draft with only the three small sidecars and nothing public — a good failure
+  mode. The zips were uploaded to that draft separately and the draft was published
+  once all six assets were present. Upload the large assets in their own step.
+- **The release notes linked to `blob/main/UPGRADE.md`, which did not exist on `main`
+  until step 7.** Anyone opening the Release page between steps 4 and 7 would have hit
+  a 404. The links now point at `blob/v1.1.0/`, which is also the correct habit: a
+  release should describe fixed content, not a branch that moves after publication.
+
 ### Known gap in the tooling
 
 Neither workflow publishes a GitHub Release; both end at `actions/upload-artifact`
-with 14-day retention. Steps 3–4 are therefore manual. Worth automating before the
-second release, not before the first.
+with 14-day retention. Steps 3–4 were therefore manual. Worth automating before the
+second release.
 
-### Why this is paused
+### Why it was paused
 
-The release would ship the defects catalogued in
+The release would have shipped the defects catalogued in
 [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md), two of which
-block the owner's own stated goal of building a multi-year daily and symbol-wise
-database. Publishing first would mean notifying every existing user to upgrade to a
-build that cannot complete a historical backfill.
+blocked the owner's own stated goal of building a multi-year daily and symbol-wise
+database. Publishing first would have meant notifying every existing user to upgrade
+to a build that could not complete a historical backfill. Phases 1–3 closed those
+defects first, which is what made this release publishable.
 
 ## 1. BSE SME/Startup classification and symbol naming
 

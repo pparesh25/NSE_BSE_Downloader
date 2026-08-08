@@ -150,15 +150,18 @@ Open decision, deliberately not taken unilaterally:
 
 ## Stage 2 — Cutover
 
-Execute in order. Step 2.3 is the point of no return.
+**Completed 2026-08-09.** Executed in order; step 2.3 was the point of no return.
 
-- [ ] **2.1** Re-run all gates at the release commit in both environments
-- [ ] **2.2** Publish the Release (Stage 1.3) — *still reversible: delete release + tag*
-- [ ] **2.3** Mark PR #10 ready and **merge with a merge commit** (not squash, not
+- [x] **2.1** Re-run all gates at the release commit in both environments —
+      398 tests on Python 3.10 and 3.13, coverage 77.2%, Ruff, mypy, `--smoke-gui`
+- [x] **2.2** Publish the Release (Stage 1.3) — tag `v1.1.0` at `059f497`, three
+      platform assets plus sidecars, every digest verified from the published page
+- [x] **2.3** Mark PR #10 ready and **merge with a merge commit** (not squash, not
       rebase — GitHub reports `rebaseable: false`, and the branch carries two
       multi-parent commits including the history-preserving import `8b338e3`)
-      → **this publishes the notification to every v1.0.1 user**
-- [ ] **2.4** Watch CI green on `main`
+      → merge commit `ed06dc8`; `main/version.py` now reads `1.1.0`, and the released
+      commit is an ancestor of `main`, so the tag describes code that is on `main`
+- [x] **2.4** Watch CI green on `main`
 - [ ] **2.5** Watch issues for 48 hours
 
 Rollback after 2.3: do **not** force-push `main`. Restore from `archive/pyqt6-v1.0.1` in

@@ -1,6 +1,6 @@
 # v1.1.0
 
-> ### Upgrading from v1.0.1? Read **[UPGRADE.md](https://github.com/pparesh25/NSE_BSE_Downloader/blob/main/UPGRADE.md)** first.
+> ### Upgrading from v1.0.1? Read **[UPGRADE.md](https://github.com/pparesh25/NSE_BSE_Downloader/blob/v1.1.0/UPGRADE.md)** first.
 > This release replaced PyQt6 with PySide6 and now needs Python 3.10 or newer. If you
 > run from source, `pip install -r requirements.txt` is **required** — copying the new
 > files over an old installation without it will stop the app from starting.
@@ -91,13 +91,13 @@ data folder overwrote each other's symbol histories with no error anywhere. The 
 copy now says so and stops; repair commands take the same lock.
 
 Full changelog: see `VERSION_HISTORY` in
-[version.py](https://github.com/pparesh25/NSE_BSE_Downloader/blob/main/version.py).
+[version.py](https://github.com/pparesh25/NSE_BSE_Downloader/blob/v1.1.0/version.py).
 
 ## Your existing data
 
 **Nothing is deleted, moved or rewritten.** `~/NSE_BSE_Data/` is safe.
 
-Three things to know:
+Four things to know:
 
 1. **New files have more columns.** v1.0.1 wrote 7; v1.1.0 writes 9 for equity, SME and
    futures. Files you already have keep their old shape until you download that date

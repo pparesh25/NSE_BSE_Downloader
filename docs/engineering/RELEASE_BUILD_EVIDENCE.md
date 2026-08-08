@@ -1,140 +1,107 @@
 # Release build evidence
 
-Date: 2026-08-05 (Asia/Kolkata)
-Branch: `codex/pyside6-port-v1.1.0`
-Source commit tested: `4d25c17e836359a705182aaf0176434d37235110`
-Release status: blocked; no release or update notification has been published
+Date: 2026-08-09 (Asia/Kolkata)
+Tag: `v1.1.0`
+Source commit built and published: `059f497c7716f9910ea70a2b8ea0e1d2dcb769d4`
+Release status: **published** —
+<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0>
 
 ## Purpose
 
-This record separates build-readiness evidence from release authorization. A build
-may pass compilation and smoke tests without being suitable for community release.
-The canonical `main` branch, v1.1 tag, release assets, and update metadata remain
-unchanged until all required platform and trust gates pass.
+This record describes the artifacts that were actually shipped. An integrity record
+pinned to a superseded commit is worse than none, because it invites trust in a stale
+hash, so this file is rewritten at each release against the tagged commit rather than
+appended to. The superseded rehearsal evidence it replaces is summarized at the end.
 
-## Local macOS ARM64 build
+## What was built
 
-- Host: macOS 26.5.2 ARM64.
-- Python: conda-forge CPython 3.13.12 from `opentrader313`.
-- Compiler: Apple clang 21.0.0.
-- Nuitka: 4.1rc5.
-- Command: `build_nuitka_cross_platform.py --target-platform=darwin --build
-  --clean --standalone-folder --output-dir=dist-macos-arm64`.
-- Result: successful `app-dist` build for macOS 11.0 ARM64 or newer.
-- Bundle identity: `com.github.pparesh25.NSEBSEDownloader`.
-- Bundle version: `1.1.0`.
-- Embedded resources: `config.yaml` and `src/gui/resources/QR_UPI.jpeg` present.
-- Bundle size: 391 MiB.
-- Main executable SHA-256:
-  `669d45d7c7fbbd720030b85c7fa967a2abfec904e9bfc84795a1ac0fed9957d5`.
-- Direct packaged `--help` smoke test: passed with exit code 0 before configuration
-  or user-data initialization.
+GitHub Actions run [`31274716003`](https://github.com/pparesh25/NSE_BSE_Downloader/actions/runs/31274716003),
+triggered by the `v1.1.0` tag push. Three isolated Python 3.13 Nuitka builds, each
+installing only `requirements.txt` and `requirements-build.txt` and asserting that
+pytest and mypy are absent:
 
-The build is intentionally not a release candidate. The existing primary environment
-contains development and unrelated optional packages. The compilation report tracked
-2,195 modules, including 1,445 compiled modules, and pulled in packages such as mypy,
-pydantic, PyObjC, openpyxl, lxml, and Pillow. The resulting size is therefore not a
-valid estimate for a clean community artifact.
+| Target | Runner | Wall clock |
+| --- | --- | ---: |
+| macOS 15 ARM64 | `macos-15` | 18 min 30 s |
+| Ubuntu 24.04 x64 | `ubuntu-24.04` | 20 min 23 s |
+| Windows Server 2022 x64 | `windows-2022` | 27 min 18 s |
 
-## Archive and updater compatibility
+The Quality Gates run for the same commit also passed: tests on Python 3.10 and 3.13,
+Ruff, mypy, and the packaging dry run.
 
-The cross-platform packager created:
+## Published assets
 
-- Archive: `NSE_BSE_Downloader-1.1.0-darwin-arm64.zip`.
-- Size: 141,433,363 bytes (approximately 145 MiB on disk).
-- SHA-256:
-  `ddb2eb187ef3f495f96fde3372281455d0fe9a62f82bbb4e4f1f1bcb7ad06394`.
-- Contract: one top-level folder, deterministic member ordering/timestamps,
-  `BUILD-METADATA.json`, preserved executable mode metadata, and no symlinks.
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `NSE_BSE_Downloader-1.1.0-darwin-arm64.zip` | 65,188,287 | `178ed931997321151248a7e7fe38d61e7e7491e4ade12a00ddd6d7c74c93eb65` |
+| `NSE_BSE_Downloader-1.1.0-windows-x64.zip` | 48,394,086 | `660b0f1c521616778dd79c19925aa06fb0f1d4c7ff36301d614d9ef9dcebd0ab` |
+| `NSE_BSE_Downloader-1.1.0-linux-x64.zip` | 84,434,022 | `bacafebe4695861fc7c8aa519d4327212285c8a0b8f154371f1e10f061bbccc3` |
 
-An end-to-end extraction test found that Python's standard ZIP extraction discarded
-the executable bit. The updater now restores only archived executable bits after all
-existing path, link, size, and compression checks pass. It does not restore writable,
-setuid, setgid, or sticky bits. The extracted macOS executable retained mode `0755`
-and passed the packaged `--help` smoke test with exit code 0.
+Each ZIP ships with its `.sha256` sidecar in `shasum -c` format, so a user can verify
+a download without trusting this document.
 
-## Trust and distribution gates
+## Independent verification
 
-- Nuitka applied an ad-hoc signature and `codesign --verify --deep --strict` passed.
-- The host has zero valid Developer ID code-signing identities.
-- Gatekeeper rejected the ad-hoc signed bundle, as expected.
-- Developer ID signing and Apple notarization are not complete.
-- No application icon assets (`.icns`, `.ico`, or `.png`) currently exist.
-- `version.py` still has blank `__update_url__` and `__update_sha256__` values.
-- The local ZIP and checksum above are evidence artifacts only and must not be
-  published as a release asset.
+Performed against the downloaded files, not inferred from a green tick.
 
-## Reproducible clean-build workflow
+- **Checksums.** All three sidecars verified with `shasum -a 256 -c`: `OK`.
+- **Layout.** Each archive has exactly one top-level directory, named after the
+  archive itself.
+- **Provenance.** Every `BUILD-METADATA.json` records `version 1.1.0`,
+  `git_commit 059f497c7716…` — the tagged commit — and `trust_status: unsigned`.
+- **The packaged application starts.** The macOS bundle was extracted and run with
+  `--smoke-gui` under a temporary `HOME`, so it could not reach the real data root:
+  **exit code 0**. It created its folders under the temporary home only.
+- **The single-instance lock works in the packaged build.** `.state/app.lock` was
+  created during the run and cleared on exit, which exercises the Phase 3.5 guard in a
+  compiled binary rather than only under pytest.
+- **Gatekeeper.** `codesign -dv` reports `Signature=adhoc`, `TeamIdentifier=not set`,
+  and `spctl --assess --type execute` reports `rejected`. This is the documented,
+  expected behaviour for an unsigned build and is exactly what `UPGRADE.md` and the
+  release notes prepare users for.
+- **From the outside.** Every asset was downloaded again from the published Release
+  page — not from the build directory — and re-verified against the sidecars that came
+  down with them.
 
-`.github/workflows/release-artifacts.yml` defines isolated Python 3.13 builds for:
+## Trust status
 
-- macOS 15 ARM64;
-- Windows Server 2022 x64;
-- Ubuntu 24.04 x64.
+Shipped **unsigned**, deliberately. The reasoning is recorded in
+[RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) §1.4 and
+[RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md): no Developer ID or Windows
+signing credentials exist, and the one-time right-click→Open and SmartScreen steps are
+documented for users rather than hidden.
 
-Each runner installs only `requirements.txt` and `requirements-build.txt`, asserts
-that pytest and mypy are absent, performs a real Nuitka build, runs the packaged
-`--help` smoke test, creates an updater-compatible ZIP plus SHA-256 sidecar, and
-uploads the compilation report with a 14-day retention period. Action versions are
-pinned to full commit SHAs. Pull-request builds check out and record the exact PR-head
-commit rather than GitHub's temporary merge commit. The workflow does not publish a
-GitHub Release, sign a binary, notarize an app, change version metadata, or merge the
-migration branch.
+`__update_artifacts__` in `version.py` is deliberately left empty, which keeps the
+updater **notification-only** for every platform. It never executes a downloaded
+artifact without a checksum bound in advance.
 
-The first matrix run passed all three functional builds but was rejected during
-independent provenance review because `GITHUB_SHA` identified GitHub's temporary PR
-merge commit. The workflow and packager were corrected to use `SOURCE_COMMIT` before
-the accepted run described below.
+## What remains, after this release
 
-## Accepted clean matrix evidence
+1. Application icons for macOS, Windows and Linux.
+2. Signing credentials: Developer ID plus notarization for macOS, and a Windows
+   certificate if that route is chosen.
+3. A macOS Intel build, or a documented source-only route for Intel hardware.
+4. Automating the Release step itself: both workflows still end at
+   `actions/upload-artifact`, so publishing was manual this time.
 
-- GitHub Actions run: `30948814245`.
-- Exact source commit: `9dba2aca8179f43cb1875c3288753bfa3fc75698`.
-- macOS 15 ARM64: passed in 16 minutes 25 seconds.
-- Ubuntu 24.04 x64: passed in 17 minutes 48 seconds.
-- Windows Server 2022 x64: passed in 26 minutes 9 seconds.
-- The push and pull-request Quality Gates runs for the same source commit also passed.
+## Superseded evidence
 
-The three Actions artifacts were downloaded to an isolated temporary directory and
-audited independently of their workflow steps. Every inner ZIP passed CRC/integrity,
-single-root layout, sidecar checksum, embedded version, exact source-commit,
-executable-mode, native binary-magic, resource-report, and clean-dependency checks.
+Two earlier records are retained here in summary only, because their hashes describe
+artifacts that were never published:
 
-| Target | ZIP bytes | SHA-256 | Report modules |
-| --- | ---: | --- | ---: |
-| macOS ARM64 | 61,345,459 | `829460eaf5cd3dbcf98e4f94b8799fb2042f0bcb8f8a764ef1977791b849d053` | 1,165 |
-| Windows x64 | 46,382,818 | `ec625b1bea69ae88ac65d6150df6280a9695daa9df143ccb946e378bb66e7715` | 1,150 |
-| Linux x64 | 82,416,308 | `e26da32008e91fc3d6c579d9f1e86ff9e3f97b1e5d758363c6382710633c8aef` | 1,162 |
-
-All reports contained 21 runtime distributions. None included mypy, pytest,
-pydantic, pydantic-core, openpyxl, lxml, Pillow, or PyObjC. The native signatures
-were Mach-O ARM64 (`cffaedfe`), Windows PE (`4d5a`), and Linux ELF (`7f454c46`).
-The accepted files remain temporary Actions artifacts and are not final signed release
-assets.
-
-## Validation completed after packaging changes
-
-- Full suite in `opentrader313`: 182 tests passed.
-- Full suite in `mark_screener`: 182 tests passed.
-- Coverage: 73.89%, above the required 70% gate.
-- Ruff: passed.
-- mypy: passed for all configured production and packaging modules.
-- Darwin, Windows, and Linux packaging dry runs: passed.
-- Release packager and updater security regression suite: passed.
-- All data-related tests used temporary roots. `/Users/paresh/NSE_BSE_Data` was not
-  modified.
-
-## Remaining release blockers
-
-1. Run the clean GitHub matrix and inspect all three uploaded ZIPs, checksums, sizes,
-   compilation reports, and packaged smoke-test logs.
-2. Decide supported release platforms and whether macOS Intel is required in addition
-   to ARM64.
-3. Add professional application icons for macOS, Windows, and Linux.
-4. Obtain the required signing credentials. Complete Windows signing if selected and
-   Developer ID signing plus notarization for macOS.
-5. Test each final signed artifact on a clean machine or clean virtual machine.
-6. Create the immutable v1.1.0 release and independently verify published asset
-   checksums.
-7. Only then populate checksum-bound update metadata, merge the migration branch, and
-   publish the update notification.
+- **Local macOS ARM64 build, commit `4d25c17e`, 2026-08-05.** Built from the primary
+  development environment, so it pulled in mypy, pydantic, PyObjC, openpyxl, lxml and
+  Pillow; its 391 MiB bundle was never a valid estimate for a clean artifact. It did
+  establish the archive contract — single top-level folder, deterministic member
+  ordering and timestamps, `BUILD-METADATA.json`, preserved executable mode, no
+  symlinks — and it found that Python's standard ZIP extraction discards the
+  executable bit, which is why the updater restores archived executable bits (and only
+  those) after all path, link, size and compression checks pass.
+- **Clean matrix rehearsal, run `30948814245`, commit `9dba2aca`, and the tag-less
+  rehearsal `31054912467`.** All three platforms green; artifacts audited for CRC
+  integrity, single-root layout, sidecar checksum, embedded version, exact source
+  commit, executable mode, native binary magic (`cffaedfe`, `4d5a`, `7f454c46`) and
+  clean dependencies — 21 runtime distributions, none of them development-only. An
+  earlier matrix attempt was rejected during provenance review because `GITHUB_SHA`
+  identified GitHub's temporary PR merge commit; the workflow and packager were
+  corrected to use `SOURCE_COMMIT` before that run.

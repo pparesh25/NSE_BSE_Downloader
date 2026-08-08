@@ -14,9 +14,20 @@ This file is the central index for approved but incomplete engineering work. Det
 research and evidence files remain authoritative references, but every deferred topic
 must also be recorded here so it is not lost between phases.
 
-## 0. v1.1.0 release publication — paused 2026-08-06
+## 0. v1.1.0 release publication — published 2026-08-09
 
-Status: Deliberately paused. Code-level defect remediation takes priority.
+Status: **Done.** Paused on 2026-08-06 so that code-level defect remediation could go
+first; resumed once Phase 3 of
+[CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md) closed, which
+removed every defect the pause existed to avoid shipping.
+
+Published from tag `v1.1.0` at commit `059f497`:
+<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0>. Asset digests
+and the verification performed on them are in
+[RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md).
+
+The steps below are kept as the record of how it was done, and as the template for the
+next release.
 
 Detailed record: [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md),
 [RELEASE_IMPLEMENTATION_PLAN.md](RELEASE_IMPLEMENTATION_PLAN.md)

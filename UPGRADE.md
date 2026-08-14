@@ -4,35 +4,25 @@
 is the one you need.** The download you just received is application source code, not a
 ready-to-run installer, and v1.1.0 needs a different set of libraries than v1.0.1 did.
 
-Two ways forward. Pick one.
+There were two ways forward. **Option A is unavailable right now**, so Option B is the
+one to follow.
 
 ---
 
-## Option A — Download a prebuilt application (easiest)
+## Option A — Download a prebuilt application (withdrawn)
 
-Go to the releases page and download the file for your system:
+**The prebuilt v1.1.0 applications have been withdrawn, and no release is published at
+the moment.** The releases page is empty on purpose; there is nothing there to
+download.
 
-**https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest**
+They were withdrawn because they could not download market data at all. The packaged
+application carried its own copy of OpenSSL but no certificate store, so every HTTPS
+request to NSE and BSE failed certificate verification, and the app reported an "SSL
+certificate issue" for every date. The exchanges were fine; the build was not.
 
-| Your system | File to download |
-|---|---|
-| Windows 10/11, 64-bit | `NSE_BSE_Downloader-1.1.0-windows-x64.zip` |
-| Mac with Apple Silicon (M1/M2/M3/M4) | `NSE_BSE_Downloader-1.1.0-darwin-arm64.zip` |
-| Linux, 64-bit | `NSE_BSE_Downloader-1.1.0-linux-x64.zip` |
-
-Each file has a matching `.sha256` file next to it if you want to verify the download.
-
-Unzip it and run it. Nothing else to install — Python and all libraries are bundled.
-
-> **Intel Mac users:** there is no prebuilt build for Intel Macs. Use Option B.
-
-> **macOS first launch:** the app is not signed with an Apple Developer certificate, so
-> macOS will refuse to open it on the first try. This is expected. **Right-click** (or
-> Control-click) the app icon, choose **Open**, then click **Open** in the dialog. You
-> only need to do this once.
-
-> **Windows first launch:** SmartScreen may show "Windows protected your PC" for the same
-> reason. Click **More info** → **Run anyway**.
+**Running from source is not affected by this**, because it uses the certificates your
+own Python installation already trusts. Use Option B. This section will return, with
+the file names and first-launch instructions, once a corrected build is published.
 
 ---
 
@@ -85,10 +75,10 @@ Other errors and what they mean:
 ### Older systems
 
 PySide6 requires macOS 13 (Ventura) or newer, and a reasonably recent Linux. If `pip`
-refuses to install it, your system is below that floor. v1.0.1 remains available and
-functional:
+refuses to install it, your system is below that floor. The v1.0.1 source remains
+available and functional, under "Source code" on its tag page:
 
-**https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/1.0.1**
+**https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.0.1**
 
 ---
 
@@ -142,8 +132,8 @@ date range shown before clicking Start, and narrow it if it is larger than you e
 
 ## Going back to v1.0.1
 
-v1.0.1 still runs and still reads your data folder. Download it from the
-[1.0.1 release](https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/1.0.1).
+v1.0.1 still runs and still reads your data folder. Download its source from the
+[v1.0.1 tag](https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.0.1).
 
 Be aware this is not a clean round trip: 9-column files written by v1.1.0 stay
 9-column, and v1.0.1 does not understand the `.state` folder v1.1.0 creates. It will

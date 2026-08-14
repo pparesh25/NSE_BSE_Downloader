@@ -3,9 +3,12 @@
 > ### Upgrading from v1.0.1? Read **[UPGRADE.md](UPGRADE.md)** first.
 > v1.1.0 replaced PyQt6 with PySide6 and requires Python 3.10 or newer. Copying these
 > files over an existing v1.0.1 install **without** running
-> `pip install -r requirements.txt` will stop the app from starting. Prebuilt
-> applications that need no setup are on the
-> [releases page](https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest).
+> `pip install -r requirements.txt` will stop the app from starting.
+>
+> **The prebuilt v1.1.0 applications have been withdrawn**, so no release is published
+> at the moment. They carried no certificate store and could not download anything;
+> running from source is not affected. Install from source with the steps below until a
+> corrected build is published.
 
 A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
@@ -58,8 +61,9 @@ Version 1.1 keeps the existing `~/NSE_BSE_Data/` data root and
 `~/.nse_bse_downloader/` preference directory. Existing seven-column daily files
 remain readable and are not rewritten merely by launching the application. A date
 downloaded again is published under the current stable nine-column EQ/SME/FO
-contract. Back up important user data before a major upgrade and use the official
-GitHub Release assets rather than an archive from a mutable branch.
+contract. Back up important user data before a major upgrade. While no release is
+published, install from the immutable `v1.1.0` tag rather than an archive from a
+mutable branch.
 
 ## Nuitka packaging and release trust
 

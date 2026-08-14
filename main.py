@@ -108,6 +108,11 @@ Examples:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--verify-tls",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     repair.add_argument(
         "--rebuild-exchange",
         choices=("NSE", "BSE"),
@@ -295,10 +300,53 @@ def run_gui_mode(config_path: str, *, smoke_test: bool = False):
 
 
 
+def run_tls_check() -> int:
+    """Prove this build can complete one verified HTTPS request.
+
+    Every other packaging check -- checksums, layout, provenance, Gatekeeper,
+    --smoke-gui -- is satisfied by a binary that cannot open a TLS connection,
+    which is exactly how v1.1.0 shipped without a certificate store. This is the
+    one check that touches the network, so it runs against the compiled artifact
+    during packaging rather than only against the source tree under pytest.
+    """
+
+    from src.utils.http_client import fetch_text_sync
+    from src.utils.tls import certificate_bundle_path, default_ssl_context
+
+    bundle = certificate_bundle_path()
+    authorities = len(default_ssl_context().get_ca_certs())
+    print(f"Certificate bundle: {bundle if bundle is not None else 'NONE (system default)'}")
+    print(f"Trusted certificate authorities loaded: {authorities}")
+
+    if bundle is None:
+        # A build that relies on the host's trust store is the defect itself: it
+        # works on the machine that built it and nowhere else.
+        print("TLS verification FAILED: no certificate bundle travelled with this build")
+        return 1
+    if authorities == 0:
+        print("TLS verification FAILED: the bundle loaded no certificate authorities")
+        return 1
+
+    url = "https://raw.githubusercontent.com/pparesh25/NSE_BSE_Downloader/main/version.py"
+    try:
+        # The updater's own endpoint, reached through the application's own HTTP
+        # client, so this exercises the shipped path rather than a private one.
+        fetch_text_sync(url, timeout=30)
+    except Exception as error:
+        print(f"TLS verification FAILED for {url}: {error!r}")
+        return 1
+
+    print("TLS verification passed.")
+    return 0
+
+
 def main():
     """Main entry point"""
     parser = setup_argument_parser()
     args = parser.parse_args()
+
+    if args.verify_tls:
+        return run_tls_check()
 
     # Validate config file exists
     config_path = Path(args.config)

@@ -75,10 +75,16 @@ def executable_path(package: Path, target_platform: str) -> Path:
 
 
 def smoke_test(package: Path, target_platform: str) -> None:
-    """Exercise CLI loading and an isolated real GUI startup."""
+    """Exercise CLI loading, one verified HTTPS request, and a real GUI startup."""
 
     executable = executable_path(package, target_platform)
     _run_smoke_command(executable, ["--help"], package.parent, os.environ.copy())
+
+    # v1.1.0 passed every other check here and could not open a single TLS
+    # connection on a user's machine, because none of them touch the network.
+    _run_smoke_command(
+        executable, ["--verify-tls"], package.parent, os.environ.copy()
+    )
 
     with tempfile.TemporaryDirectory(prefix="nse-bse-gui-smoke-") as directory:
         root = Path(directory)

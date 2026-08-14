@@ -9,6 +9,7 @@ whatever OpenSSL was compiled to look for.
 
 import asyncio
 from datetime import date
+from pathlib import Path
 import ssl
 import sys
 from types import SimpleNamespace
@@ -17,6 +18,8 @@ import aiohttp
 import pytest
 
 import build_nuitka_cross_platform as packaging
+import main as application
+import package_release_artifact as packager
 from src.services.corporate_actions import CorporateActionClient
 from src.services.pipeline_telemetry import PipelineTelemetry
 from src.utils import tls
@@ -147,3 +150,58 @@ def test_corporate_action_requests_verify_against_the_shared_context(
         assert connector._ssl is default_ssl_context()
     finally:
         asyncio.run(connector.close())
+
+
+def test_tls_check_passes_when_a_bundle_is_present_and_the_request_succeeds(
+    monkeypatch, capsys
+):
+    requested = {}
+
+    def fake_fetch(url, timeout=None, **_kwargs):
+        requested["url"] = url
+        return "__version__ = \"1.1.0\"\n"
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", fake_fetch)
+    assert application.run_tls_check() == 0
+    assert requested["url"].startswith("https://")
+    assert "TLS verification passed" in capsys.readouterr().out
+
+
+def test_tls_check_fails_when_the_request_cannot_be_verified(monkeypatch, capsys):
+    def refuse(_url, timeout=None, **_kwargs):
+        raise ssl.SSLCertVerificationError("unable to get local issuer certificate")
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", refuse)
+    assert application.run_tls_check() == 1
+    assert "TLS verification FAILED" in capsys.readouterr().out
+
+
+def test_tls_check_fails_when_no_bundle_travelled_with_the_build(monkeypatch, capsys):
+    monkeypatch.setattr(tls, "certificate_bundle_path", lambda: None)
+
+    def unreachable(_url, timeout=None, **_kwargs):  # pragma: no cover
+        raise AssertionError("the network must not be reached without a bundle")
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", unreachable)
+    assert application.run_tls_check() == 1
+    assert "no certificate bundle travelled with this build" in capsys.readouterr().out
+
+
+def test_the_packaged_smoke_test_verifies_tls(monkeypatch, tmp_path):
+    commands = []
+
+    def record(_executable, arguments, _cwd, _environment):
+        commands.append(list(arguments))
+        if "--config" in arguments:
+            # Stand in for the GUI startup the real command performs.
+            config = Path(arguments[arguments.index("--config") + 1])
+            (config.parent / "market-data").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(packager, "executable_path", lambda *_args: tmp_path / "app")
+    monkeypatch.setattr(packager, "_run_smoke_command", record)
+
+    packager.smoke_test(tmp_path / "package", "linux")
+
+    assert ["--verify-tls"] in commands
+    assert ["--help"] in commands
+    assert any("--smoke-gui" in command for command in commands)

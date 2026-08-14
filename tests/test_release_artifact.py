@@ -107,8 +107,10 @@ def test_smoke_test_uses_isolated_gui_config(tmp_path, monkeypatch):
     release.smoke_test(executable, "linux")
 
     assert calls[0][0][-1] == "--help"
-    gui_command, gui_options = calls[1]
-    assert "--smoke-gui" in gui_command
+    assert calls[1][0][-1] == "--verify-tls"
+    gui_command, gui_options = next(
+        call for call in calls if "--smoke-gui" in call[0]
+    )
     assert gui_options["env"]["QT_QPA_PLATFORM"] == "offscreen"
     assert gui_options["env"]["HOME"] == gui_options["env"]["USERPROFILE"]
 

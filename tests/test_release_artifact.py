@@ -101,7 +101,9 @@ def test_smoke_test_uses_isolated_gui_config(tmp_path, monkeypatch):
             config_path = Path(command[command.index("--config") + 1])
             config = release.yaml.safe_load(config_path.read_text(encoding="utf-8"))
             Path(config["data_paths"]["base_folder"]).mkdir(parents=True)
-        return type("Result", (), {"returncode": 0, "stderr": b""})()
+        return type(
+            "Result", (), {"returncode": 0, "stdout": b"TLS verification passed.\n", "stderr": b""}
+        )()
 
     monkeypatch.setattr(release.subprocess, "run", fake_run)
     release.smoke_test(executable, "linux")

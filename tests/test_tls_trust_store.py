@@ -187,7 +187,7 @@ def test_tls_check_fails_when_no_bundle_travelled_with_the_build(monkeypatch, ca
     assert "no certificate bundle travelled with this build" in capsys.readouterr().out
 
 
-def test_the_packaged_smoke_test_verifies_tls(monkeypatch, tmp_path):
+def test_the_packaged_smoke_test_verifies_tls(monkeypatch, tmp_path, capsys):
     commands = []
 
     def record(_executable, arguments, _cwd, _environment):
@@ -196,6 +196,9 @@ def test_the_packaged_smoke_test_verifies_tls(monkeypatch, tmp_path):
             # Stand in for the GUI startup the real command performs.
             config = Path(arguments[arguments.index("--config") + 1])
             (config.parent / "market-data").mkdir(exist_ok=True)
+        if "--verify-tls" in arguments:
+            return "Trusted certificate authorities loaded: 137\nTLS verification passed.\n"
+        return ""
 
     monkeypatch.setattr(packager, "executable_path", lambda *_args: tmp_path / "app")
     monkeypatch.setattr(packager, "_run_smoke_command", record)
@@ -205,3 +208,5 @@ def test_the_packaged_smoke_test_verifies_tls(monkeypatch, tmp_path):
     assert ["--verify-tls"] in commands
     assert ["--help"] in commands
     assert any("--smoke-gui" in command for command in commands)
+    # The evidence has to reach the build log, not just the exit code.
+    assert "TLS verification passed." in capsys.readouterr().out

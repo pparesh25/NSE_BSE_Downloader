@@ -1,7 +1,7 @@
 # Pending engineering tasks
 
-Last reviewed: 2026-08-06 (Asia/Kolkata)
-Repository branch at review: `codex/pyside6-port-v1.1.0`
+Last reviewed: 2026-08-14 (Asia/Kolkata)
+Repository branch at review: `main`
 
 ## Working convention
 
@@ -14,17 +14,22 @@ This file is the central index for approved but incomplete engineering work. Det
 research and evidence files remain authoritative references, but every deferred topic
 must also be recorded here so it is not lost between phases.
 
-## 0. v1.1.0 release publication — published 2026-08-09
+## 0. v1.1.0 release publication — published 2026-08-09, withdrawn 2026-08-14
 
-Status: **Done.** Paused on 2026-08-06 so that code-level defect remediation could go
-first; resumed once Phase 3 of
+Status: **Withdrawn.** Paused on 2026-08-06 so that code-level defect remediation could
+go first; resumed once Phase 3 of
 [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md) closed, which
 removed every defect the pause existed to avoid shipping.
 
-Published from tag `v1.1.0` at commit `059f497`:
-<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0>. Asset digests
-and the verification performed on them are in
-[RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md).
+Published from tag `v1.1.0` at commit `059f497`, then unpublished on 2026-08-14 with
+all six assets: the shipped builds carried no certificate store and could not download
+anything. The defect and its reproduction are in
+[RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md); the work to fix it is §3 below.
+The `v1.1.0` tag remains, so
+<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0> still resolves to
+the tag and its source archives. `main` still reads `1.1.0`, so installed v1.0.1
+clients still announce the update; `README.md` and `UPGRADE.md` were corrected to send
+them to the source install rather than to an empty releases page.
 
 The steps below are kept as the record of how it was done, and as the template for the
 next release.
@@ -232,3 +237,43 @@ unchanged symbol-history files, reducing unnecessary publication, and evaluating
 bounded file-write improvements. The current pipeline already batches history merges
 in memory, but it must still publish thousands of individual files for a fresh
 Select-All run.
+
+## 3. Packaged builds have no certificate store
+
+Status: Root cause established and reproduced; fix not started. **Blocks any
+republication of v1.1.0 or any later release.**
+
+Detailed record: [RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md), "Why the
+release was withdrawn".
+
+### What is wrong
+
+The Nuitka bundle ships its own OpenSSL, compiled with an `OPENSSLDIR` that exists
+only on the build runner, and no CA bundle is included. The packaged application
+therefore starts with zero trusted roots and every HTTPS request fails certificate
+verification. `certifi` is not a dependency at all, and `http_client.py` passes
+`ssl=True`, which relies on whatever OpenSSL's compiled-in default happens to be.
+
+### Approved implementation direction
+
+- Add `certifi` to `requirements.txt` as a runtime dependency.
+- Build the TLS context from `certifi.where()` in one place, and use it for both the
+  downloader and the update checker, rather than relying on OpenSSL defaults.
+- Ensure the packaging step includes `certifi`'s data file in the bundle, and assert
+  its presence in the packaging dry run rather than discovering its absence at runtime.
+- Prefer an explicit, verifiable trust store over an `SSL_CERT_FILE` environment
+  variable set at startup: the environment variable works, but it is invisible to the
+  test suite and to anyone reading the code.
+
+### Required evidence
+
+- A test that fails without the fix: assert the connector's TLS context loads CA
+  certificates, so a future packaging change cannot silently drop them again.
+- **A compiled artifact on each platform observed completing a real HTTPS request.**
+  This is the gap that let the defect ship. Every existing check — checksums, layout,
+  provenance, Gatekeeper, `--smoke-gui` — passes on a build that cannot open a TLS
+  connection, because none of them touch the network.
+- Verify macOS, Windows and Linux separately. The macOS build is the one reproduced
+  against; Windows almost certainly shares the defect, and Linux may survive by finding
+  `/etc/ssl/certs`. Do not infer one platform from another.
+- Re-run the full gate set in both supported environments.

@@ -123,7 +123,7 @@ expect.
 ## Going back
 
 v1.0.1 still runs and still reads your data folder:
-[1.0.1 release](https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/1.0.1).
+[v1.0.1 tag](https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.0.1).
 Note it is not a clean round trip — 9-column files stay 9-column, and v1.0.1 ignores the
 `.state` folder this version creates.
 

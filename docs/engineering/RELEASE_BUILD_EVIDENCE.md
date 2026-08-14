@@ -3,8 +3,11 @@
 Date: 2026-08-09 (Asia/Kolkata)
 Tag: `v1.1.0`
 Source commit built and published: `059f497c7716f9910ea70a2b8ea0e1d2dcb769d4`
-Release status: **published** —
-<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0>
+Release status: **withdrawn 2026-08-14.** Published on 2026-08-09, then unpublished
+with all six assets after the shipped builds proved unable to download any market
+data. The `v1.1.0` tag remains; the Release does not, so
+<https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0> now shows the
+tag and its source archives only. See "Why the release was withdrawn" below.
 
 ## Purpose
 
@@ -37,8 +40,45 @@ Ruff, mypy, and the packaging dry run.
 | `NSE_BSE_Downloader-1.1.0-windows-x64.zip` | 48,394,086 | `660b0f1c521616778dd79c19925aa06fb0f1d4c7ff36301d614d9ef9dcebd0ab` |
 | `NSE_BSE_Downloader-1.1.0-linux-x64.zip` | 84,434,022 | `bacafebe4695861fc7c8aa519d4327212285c8a0b8f154371f1e10f061bbccc3` |
 
-Each ZIP ships with its `.sha256` sidecar in `shasum -c` format, so a user can verify
-a download without trusting this document.
+Each ZIP shipped with its `.sha256` sidecar in `shasum -c` format, so a user could
+verify a download without trusting this document. The assets are no longer
+downloadable; the digests are kept so a copy already downloaded can still be
+identified as one of these builds.
+
+## Why the release was withdrawn
+
+The three published applications could not download market data at all. Every date in
+a run failed, the log reported an SSL certificate issue for each one, and the host
+circuit breaker then opened and skipped the rest.
+
+Reproduced on 2026-08-14 against the withdrawn `darwin-arm64` asset, whose
+`BUILD-METADATA.json` records `git_commit 059f497` — the tagged commit in this record:
+
+- The bundle ships its own `libssl.3.dylib` and `libcrypto.3.dylib`, compiled with
+  `OPENSSLDIR = /Library/Frameworks/Python.framework/Versions/3.13/etc/openssl`. That
+  is the python.org framework path present on the build runner; it does not exist on
+  an end user's machine.
+- No `cacert.pem` is bundled anywhere in the app, and `certifi` is not a dependency,
+  so the bundled OpenSSL starts with **zero trusted roots**.
+- Run as shipped, the packaged application fails its own update check with
+  `CERTIFICATE_VERIFY_FAILED ... unable to get local issuer certificate`.
+- The same binary, with `SSL_CERT_FILE=/etc/ssl/cert.pem`, completes that check
+  silently. Nothing else changed between the two runs.
+
+Classifying a certificate failure as terminal is correct, so the downloader behaved as
+designed; the trust store was simply absent. Running from source is unaffected,
+because it uses the certificates the user's own Python installation already trusts.
+
+**Why the verification below did not catch it.** Every check in this record is
+satisfied by a build that cannot open a TLS connection. `--smoke-gui` constructs the
+GUI and exits; it makes no network request. Checksums, layout, provenance and
+Gatekeeper all describe the file, not its ability to work. The one property a user
+cares about — that it can fetch a bhavcopy — was never asserted against a compiled
+artifact on any platform.
+
+The macOS asset is the one reproduced against. The Windows build almost certainly
+carries the same defect; the Linux build may find `/etc/ssl/certs` and survive. Each
+platform must be verified separately rather than inferred from this one.
 
 ## Independent verification
 
@@ -75,13 +115,17 @@ documented for users rather than hidden.
 updater **notification-only** for every platform. It never executes a downloaded
 artifact without a checksum bound in advance.
 
-## What remains, after this release
+## What remains, before anything is published again
 
-1. Application icons for macOS, Windows and Linux.
-2. Signing credentials: Developer ID plus notarization for macOS, and a Windows
+1. **A certificate store in the packaged build**, and a check that proves it. Nothing
+   may be republished until a compiled artifact on each platform is observed to
+   complete a real HTTPS request. Tracked in
+   [PENDING_TASKS.md](PENDING_TASKS.md) §3.
+2. Application icons for macOS, Windows and Linux.
+3. Signing credentials: Developer ID plus notarization for macOS, and a Windows
    certificate if that route is chosen.
-3. A macOS Intel build, or a documented source-only route for Intel hardware.
-4. Automating the Release step itself: both workflows still end at
+4. A macOS Intel build, or a documented source-only route for Intel hardware.
+5. Automating the Release step itself: both workflows still end at
    `actions/upload-artifact`, so publishing was manual this time.
 
 ## Superseded evidence

@@ -20,9 +20,9 @@ formatting alone; three of the older audits are largely in Gujarati for that rea
 | [PENDING_TASKS.md](PENDING_TASKS.md) | Central index of approved but incomplete work |
 | [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md) | **Current focus.** Phased plan for the defects blocking a multi-year backfill |
 | [PROJECT_REVIEW_2026-08-06.md](PROJECT_REVIEW_2026-08-06.md) | The review those defects came from, with evidence |
-| [RELEASE_IMPLEMENTATION_PLAN.md](RELEASE_IMPLEMENTATION_PLAN.md) | Staged plan for the v1.1.0 cutover and after (paused) |
+| [RELEASE_IMPLEMENTATION_PLAN.md](RELEASE_IMPLEMENTATION_PLAN.md) | Staged plan for the v1.1.0 cutover and after |
 | [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) | Verified steps for branch protection, release build, signing |
-| [RELEASE_NOTES_1.1.0.md](RELEASE_NOTES_1.1.0.md) | Drafted user-facing notes for the paused release |
+| [RELEASE_NOTES_1.1.0.md](RELEASE_NOTES_1.1.0.md) | User-facing notes for v1.1.0, published then withdrawn |
 | [CANONICAL_REPOSITORY_MIGRATION.md](CANONICAL_REPOSITORY_MIGRATION.md) | Record of the PySide6 port becoming canonical here |
 
 ## Release and packaging
@@ -31,7 +31,7 @@ formatting alone; three of the older audits are largely in Gujarati for that rea
 |---|---|
 | [PACKAGING.md](PACKAGING.md) | Nuitka build, signing and fresh-user verification checklist |
 | [RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md) | Signing credential policy and clean-machine acceptance gate |
-| [RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md) | Recorded output of actual build attempts |
+| [RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md) | What v1.1.0 actually shipped, and why it was withdrawn |
 
 ## Audits and findings
 

@@ -14,6 +14,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 import aiohttp
 import pandas as pd
 
+from ..utils.tls import default_ssl_context
 from .canonical_data import valid_isin, valid_security_id
 from .symbol_history import SymbolHistoryStore
 from .state_store import (
@@ -326,7 +327,9 @@ class CorporateActionClient:
         }
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         async with aiohttp.ClientSession(
-            timeout=timeout, headers=headers
+            timeout=timeout,
+            headers=headers,
+            connector=aiohttp.TCPConnector(ssl=default_ssl_context()),
         ) as session:
             async with session.get("https://www.nseindia.com/") as response:
                 await response.read()
@@ -358,7 +361,9 @@ class CorporateActionClient:
         }
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         async with aiohttp.ClientSession(
-            timeout=timeout, headers=headers
+            timeout=timeout,
+            headers=headers,
+            connector=aiohttp.TCPConnector(ssl=default_ssl_context()),
         ) as session:
             async with session.get(
                 "https://api.bseindia.com/BseIndiaAPI/api/CorpactCSVDownload/w",

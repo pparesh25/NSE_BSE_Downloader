@@ -35,9 +35,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 REQUIRED_MODULES = {
     "PySide6.QtWidgets": "PySide6",
     "aiohttp": "aiohttp",
+    "certifi": "certifi",
     "pandas": "pandas",
     "yaml": "PyYAML",
 }
+# A CA bundle is a few hundred kilobytes of PEM blocks.  Anything much smaller
+# is a stub or a truncated file, and would compile into a build that trusts
+# almost nothing while looking correctly configured.
+MINIMUM_CA_BUNDLE_BYTES = 50_000
 REQUIRED_RESOURCES = (
     Path("config.yaml"),
     Path("src/gui/resources/QR_UPI.jpeg"),
@@ -132,6 +137,32 @@ def validate_icon_resources(resources: Path) -> List[str]:
     return errors
 
 
+def certificate_bundle_errors() -> List[str]:
+    """Check that there is a real trust store to bundle into the build.
+
+    The v1.1.0 artifacts compiled and passed every other gate while carrying no
+    certificates at all, so they could not open a single HTTPS connection on a
+    user's machine.  This runs in the dry run, before a 20-minute build.
+    """
+
+    errors: List[str] = []
+    try:
+        import certifi
+    except ImportError:
+        # missing_runtime_dependencies() names the distribution to install.
+        return errors
+
+    bundle = Path(certifi.where())
+    if not bundle.is_file():
+        errors.append(f"CA certificate bundle is missing: {bundle}")
+    elif bundle.stat().st_size < MINIMUM_CA_BUNDLE_BYTES:
+        errors.append(
+            f"CA certificate bundle is implausibly small "
+            f"({bundle.stat().st_size} bytes): {bundle}"
+        )
+    return errors
+
+
 def missing_runtime_dependencies() -> List[str]:
     missing = []
     for module, distribution in REQUIRED_MODULES.items():
@@ -183,6 +214,10 @@ def get_nuitka_command(
         "--file-reference-choice=runtime",
         f"--include-data-files={project_root / 'config.yaml'}=config.yaml",
         (f"--include-data-dir={project_root / 'src/gui/resources'}=src/gui/resources"),
+        # Without this the compiled binary has no certificates to verify
+        # against, and every HTTPS request fails.  Nuitka compiles certifi's
+        # module but treats cacert.pem as data it does not need.
+        "--include-package-data=certifi",
         f"--output-dir={destination}",
         f"--output-filename={APP_NAME}",
         f"--company-name={ORGANIZATION_NAME}",
@@ -469,6 +504,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     missing = missing_runtime_dependencies()
     if missing:
         _print_errors("Missing runtime dependencies:", missing)
+        return 1
+    bundle_errors = certificate_bundle_errors()
+    if bundle_errors:
+        _print_errors("Certificate bundle validation failed:", bundle_errors)
         return 1
 
     output_dir = args.output_dir.resolve()

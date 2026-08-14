@@ -7,6 +7,11 @@ pandas>=2.0.0,<3
 # Async HTTP requests
 aiohttp>=3.9.0,<4
 
+# CA certificates carried with the application.  A compiled build ships its own
+# OpenSSL, whose compile-time certificate directory does not exist on a user's
+# machine, so the trust store has to travel with us rather than be looked up.
+certifi>=2024.2.2
+
 # Configuration management
 pyyaml>=6.0,<7
 

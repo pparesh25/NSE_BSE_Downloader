@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from ..core.exceptions import CircuitOpenError, NetworkError
+from .tls import default_ssl_context
 
 
 @dataclass
@@ -62,7 +63,7 @@ class TransportPool:
             keepalive_timeout=60,
             enable_cleanup_closed=sys.version_info < (3, 13),
             force_close=False,
-            ssl=True,
+            ssl=default_ssl_context(),
         )
         self.session = aiohttp.ClientSession(
             timeout=timeout,

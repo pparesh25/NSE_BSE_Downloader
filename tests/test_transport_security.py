@@ -10,6 +10,7 @@ from src.utils.async_downloader import (
     DownloadTask,
 )
 from src.utils.http_client import _single_use_session
+from src.utils.tls import default_ssl_context
 
 
 def test_config_download_settings_are_mutable_for_the_runtime(tmp_path):
@@ -49,7 +50,7 @@ def test_http_sessions_use_certificate_verification():
         session = await _single_use_session(timeout=1)
         try:
             assert session.connector is not None
-            assert session.connector._ssl is True
+            assert session.connector._ssl is default_ssl_context()
         finally:
             await session.close()
 

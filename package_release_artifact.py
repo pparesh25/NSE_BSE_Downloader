@@ -75,10 +75,20 @@ def executable_path(package: Path, target_platform: str) -> Path:
 
 
 def smoke_test(package: Path, target_platform: str) -> None:
-    """Exercise CLI loading and an isolated real GUI startup."""
+    """Exercise CLI loading, one verified HTTPS request, and a real GUI startup."""
 
     executable = executable_path(package, target_platform)
     _run_smoke_command(executable, ["--help"], package.parent, os.environ.copy())
+
+    # v1.1.0 passed every other check here and could not open a single TLS
+    # connection on a user's machine, because none of them touch the network.
+    # What this proves is printed rather than discarded: a passing check that
+    # leaves no evidence is how a green tick came to mean nothing last time.
+    tls_output = _run_smoke_command(
+        executable, ["--verify-tls"], package.parent, os.environ.copy()
+    )
+    for line in tls_output.splitlines():
+        print(f"  [packaged] {line}")
 
     with tempfile.TemporaryDirectory(prefix="nse-bse-gui-smoke-") as directory:
         root = Path(directory)
@@ -113,7 +123,9 @@ def _run_smoke_command(
     arguments: Sequence[str],
     cwd: Path,
     environment: dict[str, str],
-) -> None:
+) -> str:
+    """Run one packaged command and return its standard output."""
+
     result = subprocess.run(
         [str(executable), *arguments],
         cwd=cwd,
@@ -124,13 +136,15 @@ def _run_smoke_command(
         timeout=180,
         check=False,
     )
+    stdout = (result.stdout or b"").decode("utf-8", errors="replace")
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace")[-2000:]
         command = " ".join(arguments)
         raise RuntimeError(
             f"Packaged {command} smoke test failed with "
-            f"{result.returncode}: {stderr}"
+            f"{result.returncode}: {stdout[-2000:]}{stderr}"
         )
+    return stdout
 
 
 def _iter_package_paths(package: Path) -> Iterable[Path]:

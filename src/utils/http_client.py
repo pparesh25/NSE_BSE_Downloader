@@ -13,6 +13,8 @@ from typing import Optional, Callable, Dict
 
 import aiohttp
 
+from .tls import default_ssl_context
+
 
 @dataclass
 class HTTPStatusError(Exception):
@@ -40,9 +42,10 @@ async def _single_use_session(
     headers: Optional[Dict[str, str]] = None,
 ) -> aiohttp.ClientSession:
     client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else aiohttp.ClientTimeout()
-    # Keep aiohttp's verified system-CA behaviour explicit.  Update metadata,
-    # holiday calendars and update archives all pass through this helper.
-    connector = aiohttp.TCPConnector(ssl=True)
+    # Verify against the trust store the application ships with rather than
+    # whatever OpenSSL was compiled to look for.  Update metadata, holiday
+    # calendars and update archives all pass through this helper.
+    connector = aiohttp.TCPConnector(ssl=default_ssl_context())
     effective_headers = _default_headers()
     if headers:
         effective_headers.update(headers)

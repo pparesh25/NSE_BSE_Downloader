@@ -101,14 +101,18 @@ def test_smoke_test_uses_isolated_gui_config(tmp_path, monkeypatch):
             config_path = Path(command[command.index("--config") + 1])
             config = release.yaml.safe_load(config_path.read_text(encoding="utf-8"))
             Path(config["data_paths"]["base_folder"]).mkdir(parents=True)
-        return type("Result", (), {"returncode": 0, "stderr": b""})()
+        return type(
+            "Result", (), {"returncode": 0, "stdout": b"TLS verification passed.\n", "stderr": b""}
+        )()
 
     monkeypatch.setattr(release.subprocess, "run", fake_run)
     release.smoke_test(executable, "linux")
 
     assert calls[0][0][-1] == "--help"
-    gui_command, gui_options = calls[1]
-    assert "--smoke-gui" in gui_command
+    assert calls[1][0][-1] == "--verify-tls"
+    gui_command, gui_options = next(
+        call for call in calls if "--smoke-gui" in call[0]
+    )
     assert gui_options["env"]["QT_QPA_PLATFORM"] == "offscreen"
     assert gui_options["env"]["HOME"] == gui_options["env"]["USERPROFILE"]
 

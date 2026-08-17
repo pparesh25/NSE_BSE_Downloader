@@ -310,7 +310,11 @@ def run_tls_check() -> int:
     during packaging rather than only against the source tree under pytest.
     """
 
-    from src.utils.http_client import fetch_text_sync
+    import ssl
+
+    import aiohttp
+
+    from src.utils.http_client import HTTPStatusError, fetch_text_sync
     from src.utils.tls import certificate_bundle_path, default_ssl_context
 
     bundle = certificate_bundle_path()
@@ -332,8 +336,22 @@ def run_tls_check() -> int:
         # The updater's own endpoint, reached through the application's own HTTP
         # client, so this exercises the shipped path rather than a private one.
         fetch_text_sync(url, timeout=30)
-    except Exception as error:
+    # Order matters, as it does in the downloader's own classifier: aiohttp's
+    # certificate errors subclass its connection errors.
+    except (ssl.SSLError, aiohttp.ClientSSLError) as error:
         print(f"TLS verification FAILED for {url}: {error!r}")
+        return 1
+    except HTTPStatusError as answered:
+        # A status line can only arrive after the handshake completed and the
+        # certificate verified.  What the server chose to answer -- a rate limit,
+        # a 404, an outage -- is not this check's business, and failing a release
+        # build over it would be a false alarm about certificates.
+        print(f"TLS verified: the endpoint answered HTTP {answered.status}.")
+        return 0
+    except Exception as error:
+        # Not a certificate problem, but nothing was proved either.  Say which
+        # it is, so a reader retries instead of debugging the trust store.
+        print(f"TLS verification INCONCLUSIVE: {url} was unreachable: {error!r}")
         return 1
 
     print("TLS verification passed.")

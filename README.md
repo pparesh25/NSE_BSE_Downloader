@@ -1,21 +1,23 @@
-# NSE/BSE Data Downloader v1.1.0 (PySide6)
+# NSE/BSE Data Downloader v1.1.1 (PySide6)
 
 > ### Upgrading from v1.0.1? Read **[UPGRADE.md](UPGRADE.md)** first.
 > v1.1.0 replaced PyQt6 with PySide6 and requires Python 3.10 or newer. Copying these
 > files over an existing v1.0.1 install **without** running
 > `pip install -r requirements.txt` will stop the app from starting.
 >
-> **The prebuilt v1.1.0 applications have been withdrawn**, so no release is published
-> at the moment. They carried no certificate store and could not download anything;
-> running from source is not affected. Install from source with the steps below until a
-> corrected build is published.
+> Prebuilt applications that need no setup are on the
+> [releases page](https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest).
+>
+> **Using a v1.1.0 prebuilt application?** Replace it. Those builds shipped without a
+> certificate store and could not download anything; they were withdrawn and v1.1.1
+> fixes it. Source installs were never affected.
 
 A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
 ![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.1.1-brightgreen.svg)
 
 ## Features
 
@@ -61,8 +63,8 @@ Version 1.1 keeps the existing `~/NSE_BSE_Data/` data root and
 `~/.nse_bse_downloader/` preference directory. Existing seven-column daily files
 remain readable and are not rewritten merely by launching the application. A date
 downloaded again is published under the current stable nine-column EQ/SME/FO
-contract. Back up important user data before a major upgrade. While no release is
-published, install from the immutable `v1.1.0` tag rather than an archive from a
+contract. Back up important user data before a major upgrade and use the official
+GitHub Release assets, or the immutable `v1.1.1` tag, rather than an archive from a
 mutable branch.
 
 ## Nuitka packaging and release trust
@@ -287,6 +289,17 @@ platform-specific Nuitka command generation and the default no-build guard. The
 strict project mypy configuration currently passes all 45 source files.
 
 ## Version history
+
+### v1.1.1 (2026-08-18)
+
+- Gave the packaged application its own certificate authorities. v1.1.0 builds
+  shipped without a trust store, so every download failed certificate
+  verification and the host circuit breaker opened. Source runs were unaffected.
+- Routed the corporate-action endpoints through the same trust store as every
+  other request.
+- Made packaging prove it: a compiled build must complete one verified HTTPS
+  request before it can become a release, and a build with no certificate
+  bundle now fails the packaging dry run.
 
 ### v1.1.0 (2026-07-31)
 

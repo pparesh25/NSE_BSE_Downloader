@@ -4,9 +4,9 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.1.0"
-__build_date__ = "2026-08-09"
-__build_number__ = 27
+__version__ = "1.1.1"
+__build_date__ = "2026-08-18"
+__build_number__ = 28
 
 # Verified update artifacts, keyed by "<platform>-<architecture>" exactly as
 # package_release_artifact.py names each release archive.  Release automation
@@ -22,7 +22,7 @@ __build_number__ = 27
 # v1.0.1 clients parse those three by regular expression to discover this
 # release, and tests/test_index_and_version.py fails if that contract breaks.
 __update_artifacts__: dict[str, dict[str, str]] = {
-    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.1.0-darwin-arm64.zip",
+    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.1.1-darwin-arm64.zip",
     #                  "sha256": "<64 hex characters>"},
     # "windows-x64": {...},
     # "linux-x64": {...},
@@ -30,6 +30,19 @@ __update_artifacts__: dict[str, dict[str, str]] = {
 
 # Version history
 VERSION_HISTORY = {
+
+    "1.1.1": {
+        "release_date": "2026-08-18",
+        "features": [
+            "Packaged builds carry their own certificate authorities",
+            "Packaging proves a compiled build can open a verified HTTPS connection"
+        ],
+        "bug_fixes": [
+            "Fixed every download failing with an SSL certificate error in the packaged application",
+            "Fixed the corporate-action endpoints bypassing the application trust store",
+            "Failed a packaging run when no certificate bundle would travel with the build"
+        ]
+    },
 
     "1.1.0": {
         "release_date": "2026-08-09",

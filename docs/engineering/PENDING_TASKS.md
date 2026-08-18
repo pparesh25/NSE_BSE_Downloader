@@ -1,6 +1,6 @@
 # Pending engineering tasks
 
-Last reviewed: 2026-08-14 (Asia/Kolkata)
+Last reviewed: 2026-08-18 (Asia/Kolkata)
 Repository branch at review: `main`
 
 ## Working convention
@@ -14,10 +14,10 @@ This file is the central index for approved but incomplete engineering work. Det
 research and evidence files remain authoritative references, but every deferred topic
 must also be recorded here so it is not lost between phases.
 
-## 0. v1.1.0 release publication — published 2026-08-09, withdrawn 2026-08-14
+## 0. v1.1 release publication — 1.1.0 published, withdrawn, republished as 1.1.1
 
-Status: **Withdrawn.** Paused on 2026-08-06 so that code-level defect remediation could
-go first; resumed once Phase 3 of
+Status: **Superseded by v1.1.1.** Paused on 2026-08-06 so that code-level defect
+remediation could go first; resumed once Phase 3 of
 [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md) closed, which
 removed every defect the pause existed to avoid shipping.
 
@@ -29,7 +29,11 @@ The `v1.1.0` tag remains, so
 <https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.1.0> still resolves to
 the tag and its source archives. `main` still reads `1.1.0`, so installed v1.0.1
 clients still announce the update; `README.md` and `UPGRADE.md` were corrected to send
-them to the source install rather than to an empty releases page.
+them to the source install rather than to an empty releases page, and restored when
+v1.1.1 was published. Release notes: [RELEASE_NOTES_1.1.1.md](RELEASE_NOTES_1.1.1.md).
+
+The withdrawal cost one release cycle and no user data: the broken builds could not
+write anything, because they could not download anything.
 
 The steps below are kept as the record of how it was done, and as the template for the
 next release.
@@ -238,10 +242,10 @@ bounded file-write improvements. The current pipeline already batches history me
 in memory, but it must still publish thousands of individual files for a fresh
 Select-All run.
 
-## 3. Packaged builds have no certificate store
+## 3. Packaged builds have no certificate store — done 2026-08-18
 
-Status: Root cause established and reproduced; fix not started. **Blocks any
-republication of v1.1.0 or any later release.**
+Status: **Done.** Fixed, merged and proved on compiled artifacts for all three
+platforms before v1.1.1 was published.
 
 Detailed record: [RELEASE_BUILD_EVIDENCE.md](RELEASE_BUILD_EVIDENCE.md), "Why the
 release was withdrawn".
@@ -265,15 +269,25 @@ verification. `certifi` is not a dependency at all, and `http_client.py` passes
   variable set at startup: the environment variable works, but it is invisible to the
   test suite and to anyone reading the code.
 
-### Required evidence
+### Evidence produced
 
-- A test that fails without the fix: assert the connector's TLS context loads CA
-  certificates, so a future packaging change cannot silently drop them again.
-- **A compiled artifact on each platform observed completing a real HTTPS request.**
-  This is the gap that let the defect ship. Every existing check — checksums, layout,
-  provenance, Gatekeeper, `--smoke-gui` — passes on a build that cannot open a TLS
-  connection, because none of them touch the network.
-- Verify macOS, Windows and Linux separately. The macOS build is the one reproduced
-  against; Windows almost certainly shares the defect, and Linux may survive by finding
-  `/etc/ssl/certs`. Do not infer one platform from another.
-- Re-run the full gate set in both supported environments.
+- `tests/test_tls_trust_store.py` asserts that a bundle travels with the application
+  and that all three connection sites use it, so a future packaging change cannot
+  silently drop them again.
+- **A compiled artifact on each platform completed a real HTTPS request**, in
+  `workflow_dispatch` run 31821982454. Each resolved its bundle from *inside* the
+  artifact, not from the host: `…/main.app/Contents/MacOS/certifi/cacert.pem`,
+  `/tmp/onefile_…/certifi/cacert.pem`, `…\Temp\onefile_…\certifi\cacert.pem`,
+  121 authorities each. That is the property no source-level test can establish.
+- A/B on the owner's Mac, same endpoint, same minute: the withdrawn build still fails
+  with `CERTIFICATE_VERIFY_FAILED`; the fixed build reaches the HTTP layer.
+- Full gate set re-run in both supported environments.
+
+### What it changed about how a release is verified
+
+`--verify-tls` now runs on the compiled artifact during packaging, and prints which
+bundle travelled and how many authorities loaded. Running the packaged artifact on a
+real machine also found a defect in that check itself: it read an HTTP 429 as a
+certificate failure, which would have failed release builds at random. A status line
+proves the handshake completed, so it now passes, and an unreachable endpoint is
+reported as inconclusive rather than as a certificate problem (PR #15).

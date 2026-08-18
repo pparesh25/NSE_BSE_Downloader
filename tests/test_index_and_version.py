@@ -73,12 +73,19 @@ def test_nse_index_allows_blank_optional_ohlc_but_rejects_bad_text():
 
 
 def test_version_history_drives_update_notification():
-    assert get_version() == "1.1.0"
-    notes = VERSION_HISTORY["1.1.0"]
-    assert notes["release_date"] == "2026-08-09"
-    assert any("delivery" in item.lower() for item in notes["features"])
-    assert any("open interest" in item.lower() for item in notes["features"])
-    assert any("calendar" in item.lower() for item in notes["features"])
+    assert get_version() == "1.1.1"
+    notes = VERSION_HISTORY["1.1.1"]
+    assert notes["release_date"] == "2026-08-18"
+    assert any("certificate" in item.lower() for item in notes["features"])
+    assert any("ssl" in item.lower() for item in notes["bug_fixes"])
+
+    # The superseded entry stays, so someone arriving from v1.0.1 still reads
+    # what the 1.1 line actually introduced.
+    superseded = VERSION_HISTORY["1.1.0"]
+    assert superseded["release_date"] == "2026-08-09"
+    assert any("delivery" in item.lower() for item in superseded["features"])
+    assert any("open interest" in item.lower() for item in superseded["features"])
+    assert any("calendar" in item.lower() for item in superseded["features"])
 
     checker = object.__new__(UpdateChecker)
     checker.logger = logging.getLogger("test.update")
@@ -86,13 +93,9 @@ def test_version_history_drives_update_notification():
     parsed = checker._parse_github_version_file(
         Path("version.py").read_text(encoding="utf-8")
     )
-    assert parsed["latest_version"] == "1.1.0"
+    assert parsed["latest_version"] == "1.1.1"
     assert any(
-        "delivery" in item.lower()
-        for item in parsed["changelog"]["features"]
-    )
-    assert any(
-        "calendar" in item.lower()
+        "certificate" in item.lower()
         for item in parsed["changelog"]["features"]
     )
 
@@ -112,7 +115,8 @@ def test_version_metadata_remains_readable_by_v1_0_1_clients():
         re.DOTALL,
     )
 
-    assert version is not None and version.group(1) == "1.1.0"
+    assert version is not None and version.group(1) == "1.1.1"
     assert build_date is not None
     assert history is not None
+    assert '"1.1.1"' in history.group(1)
     assert '"1.1.0"' in history.group(1)

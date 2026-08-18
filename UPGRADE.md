@@ -1,28 +1,44 @@
-# Upgrading from v1.0.1 to v1.1.0 — read this first
+# Upgrading from v1.0.1 to v1.1.1 — read this first
 
 **If you arrived here from the "New version available" popup inside the app, this file
 is the one you need.** The download you just received is application source code, not a
-ready-to-run installer, and v1.1.0 needs a different set of libraries than v1.0.1 did.
+ready-to-run installer, and v1.1 needs a different set of libraries than v1.0.1 did.
 
-There were two ways forward. **Option A is unavailable right now**, so Option B is the
-one to follow.
+Two ways forward. Pick one.
+
+> **If you already installed a v1.1.0 prebuilt application, replace it with v1.1.1.**
+> Those builds shipped without a certificate store, so every download failed with an
+> "SSL certificate issue" no matter which dates you chose. They were withdrawn. Nothing
+> you downloaded with them is wrong -- they could not write anything at all -- and your
+> data folder is untouched. Source installs were never affected.
 
 ---
 
-## Option A — Download a prebuilt application (withdrawn)
+## Option A — Download a prebuilt application (easiest)
 
-**The prebuilt v1.1.0 applications have been withdrawn, and no release is published at
-the moment.** The releases page is empty on purpose; there is nothing there to
-download.
+Go to the releases page and download the file for your system:
 
-They were withdrawn because they could not download market data at all. The packaged
-application carried its own copy of OpenSSL but no certificate store, so every HTTPS
-request to NSE and BSE failed certificate verification, and the app reported an "SSL
-certificate issue" for every date. The exchanges were fine; the build was not.
+**https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest**
 
-**Running from source is not affected by this**, because it uses the certificates your
-own Python installation already trusts. Use Option B. This section will return, with
-the file names and first-launch instructions, once a corrected build is published.
+| Your system | File to download |
+|---|---|
+| Windows 10/11, 64-bit | `NSE_BSE_Downloader-1.1.1-windows-x64.zip` |
+| Mac with Apple Silicon (M1/M2/M3/M4) | `NSE_BSE_Downloader-1.1.1-darwin-arm64.zip` |
+| Linux, 64-bit | `NSE_BSE_Downloader-1.1.1-linux-x64.zip` |
+
+Each file has a matching `.sha256` file next to it if you want to verify the download.
+
+Unzip it and run it. Nothing else to install — Python and all libraries are bundled.
+
+> **Intel Mac users:** there is no prebuilt build for Intel Macs. Use Option B.
+
+> **macOS first launch:** the app is not signed with an Apple Developer certificate, so
+> macOS will refuse to open it on the first try. This is expected. **Right-click** (or
+> Control-click) the app icon, choose **Open**, then click **Open** in the dialog. You
+> only need to do this once.
+
+> **Windows first launch:** SmartScreen may show "Windows protected your PC" for the same
+> reason. Click **More info** → **Run anyway**.
 
 ---
 

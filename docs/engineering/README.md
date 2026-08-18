@@ -22,6 +22,7 @@ formatting alone; three of the older audits are largely in Gujarati for that rea
 | [PROJECT_REVIEW_2026-08-06.md](PROJECT_REVIEW_2026-08-06.md) | The review those defects came from, with evidence |
 | [RELEASE_IMPLEMENTATION_PLAN.md](RELEASE_IMPLEMENTATION_PLAN.md) | Staged plan for the v1.1.0 cutover and after |
 | [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) | Verified steps for branch protection, release build, signing |
+| [RELEASE_NOTES_1.1.1.md](RELEASE_NOTES_1.1.1.md) | User-facing notes for v1.1.1, the republished release |
 | [RELEASE_NOTES_1.1.0.md](RELEASE_NOTES_1.1.0.md) | User-facing notes for v1.1.0, published then withdrawn |
 | [CANONICAL_REPOSITORY_MIGRATION.md](CANONICAL_REPOSITORY_MIGRATION.md) | Record of the PySide6 port becoming canonical here |
 

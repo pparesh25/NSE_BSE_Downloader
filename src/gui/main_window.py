@@ -2510,12 +2510,14 @@ Built for traders, analysts, and financial professionals.
         except Exception as e:
             self.logger.error(f"Error showing about dialog: {e}")
             # Fallback about text
+            # Deliberately version-free: this path runs when reading the
+            # version failed, and a hardcoded number here goes stale silently.
             fallback_text = """
-NSE/BSE Data Downloader v1.1.0
+NSE/BSE Data Downloader
 
 A comprehensive data downloader for NSE and BSE market data.
             """
-            QMessageBox.about(self, "About NSE/BSE Data Downloader v1.1.0", fallback_text.strip())
+            QMessageBox.about(self, "About NSE/BSE Data Downloader", fallback_text.strip())
 
     def show_donate_dialog(self):
         """Show donate dialog"""

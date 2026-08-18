@@ -8,7 +8,7 @@ A comprehensive data downloader for NSE and BSE market data with:
 - Smart date management
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "NSE/BSE Data Downloader Team"
 __email__ = "support@example.com"
 

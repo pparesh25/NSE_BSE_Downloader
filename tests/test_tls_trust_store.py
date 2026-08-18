@@ -23,7 +23,7 @@ import package_release_artifact as packager
 from src.services.corporate_actions import CorporateActionClient
 from src.services.pipeline_telemetry import PipelineTelemetry
 from src.utils import tls
-from src.utils.http_client import _single_use_session
+from src.utils.http_client import HTTPStatusError, _single_use_session
 from src.utils.tls import certificate_bundle_path, default_ssl_context
 from src.utils.transport_pool import TransportPool
 
@@ -172,6 +172,55 @@ def test_tls_check_fails_when_the_request_cannot_be_verified(monkeypatch, capsys
         raise ssl.SSLCertVerificationError("unable to get local issuer certificate")
 
     monkeypatch.setattr("src.utils.http_client.fetch_text_sync", refuse)
+    assert application.run_tls_check() == 1
+    assert "TLS verification FAILED" in capsys.readouterr().out
+
+
+def test_an_http_status_still_proves_the_certificate_verified(monkeypatch, capsys):
+    # A rate limit, a 404 or an outage arrives only after a completed handshake.
+    # Treating it as a certificate failure would fail release builds at random.
+    def rate_limited(url, timeout=None, **_kwargs):
+        raise HTTPStatusError(429, "Too Many Requests", url)
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", rate_limited)
+    assert application.run_tls_check() == 0
+    output = capsys.readouterr().out
+    assert "TLS verified" in output
+    assert "429" in output
+
+
+def test_an_unreachable_endpoint_is_reported_as_inconclusive(monkeypatch, capsys):
+    def unreachable(_url, timeout=None, **_kwargs):
+        raise OSError("nodename nor servname provided")
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", unreachable)
+    assert application.run_tls_check() == 1
+    output = capsys.readouterr().out
+    assert "INCONCLUSIVE" in output
+    assert "FAILED" not in output
+
+
+def test_a_certificate_error_is_not_mistaken_for_a_connection_error(
+    monkeypatch, capsys
+):
+    # aiohttp reports a missing trust store as ClientConnectorCertificateError,
+    # which subclasses ClientConnectorError.  Classified by connection first, the
+    # very defect this check exists for would be called "inconclusive".
+    def no_trust_store(_url, timeout=None, **_kwargs):
+        raise aiohttp.ClientConnectorCertificateError(
+            aiohttp.client_reqrep.ConnectionKey(
+                host="raw.githubusercontent.com",
+                port=443,
+                is_ssl=True,
+                ssl=None,
+                proxy=None,
+                proxy_auth=None,
+                proxy_headers_hash=None,
+            ),
+            ssl.SSLCertVerificationError("unable to get local issuer certificate"),
+        )
+
+    monkeypatch.setattr("src.utils.http_client.fetch_text_sync", no_trust_store)
     assert application.run_tls_check() == 1
     assert "TLS verification FAILED" in capsys.readouterr().out
 

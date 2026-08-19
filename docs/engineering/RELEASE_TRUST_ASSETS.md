@@ -1,5 +1,9 @@
 # Release Trust and Assets
 
+> **Still the position as of v1.1.1, and now tracked as approved future work:**
+> [PENDING_TASKS.md](PENDING_TASKS.md) §4 covers signing both platforms, a Windows
+> installer and a macOS .dmg, to be taken up after the rest of that board is closed.
+
 ## Signing decision for v1.1.0
 
 **Decided 2026-08-06: v1.1.0 ships unsigned.** Recorded here so it is not

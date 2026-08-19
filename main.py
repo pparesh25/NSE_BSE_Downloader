@@ -15,6 +15,7 @@ Usage:
 
 import sys
 import argparse
+import logging
 from pathlib import Path
 
 MINIMUM_PYTHON = (3, 10)
@@ -362,6 +363,14 @@ def main():
     """Main entry point"""
     parser = setup_argument_parser()
     args = parser.parse_args()
+
+    # Before anything that can fail, so whatever happens next is recorded.
+    from src.utils.logging_setup import configure_logging, log_environment
+
+    log_path = configure_logging()
+    log_environment()
+    if log_path is not None:
+        logging.getLogger(__name__).info(f"Logging to {log_path}")
 
     if args.verify_tls:
         return run_tls_check()

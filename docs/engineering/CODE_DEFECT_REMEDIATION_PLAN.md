@@ -1402,11 +1402,28 @@ self-consistent?" is currently unanswerable without mutating it.
       every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
       changing it later forces a migration of published files.
 
-### 4.3 Diagnostics — effort S
+### 4.3 Diagnostics — effort S — **done 2026-08-19**
 
-- [ ] `RotatingFileHandler` in `run_gui_mode` and a Help → "Open Log Folder" action.
-      There is no logging configuration anywhere; a packaged binary produces zero
-      diagnostics.
+- [x] `RotatingFileHandler` and a Help → "Open Log Folder" action. There was no
+      logging configuration anywhere, so a packaged binary produced zero
+      diagnostics: every `logger.info` went to a handler that was never
+      installed, and only Python's last-resort handler put warnings on a console
+      a windowed application does not have.
+
+Implemented in `src/utils/logging_setup.py`, configured from `main()` so the
+repair commands are covered too, not only the GUI. Logs go to
+`~/.nse_bse_downloader/logs/`, bounded at 2 MB with five backups, and never
+under the data root. The console keeps `WARNING` and above; the file keeps
+`INFO`, so a terminal stays readable while the detail survives.
+
+Every run starts by recording the version, build date, platform, Python version,
+whether this is a packaged build, and which certificate bundle it loaded — so a
+log file attached to an issue identifies itself without anyone having to ask.
+That last line is the one whose absence withdrew v1.1.0.
+
+The cost of not having this was measured: diagnosing that certificate defect
+meant running the packaged binary from a terminal to capture stderr, which is
+not something a user can be asked to do.
 
 ---
 

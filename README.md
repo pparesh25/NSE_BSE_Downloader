@@ -107,6 +107,12 @@ work is active follows the same safe shutdown path.
 
 Files are stored under `~/NSE_BSE_Data/` by default.
 
+If something goes wrong, **Help → Open Log Folder** opens
+`~/.nse_bse_downloader/logs/`. Each run records the application version,
+platform and certificate status at the top, so attaching the log to an issue is
+usually enough to identify the build. The files are capped and rotated, and
+nothing is written into your data folder.
+
 ## Output contracts
 
 NSE/BSE Equity and SME:

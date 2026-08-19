@@ -1314,9 +1314,43 @@ class MainWindow(QMainWindow):
         )
         help_menu.addAction(check_update_action)
 
+        open_logs_action = QAction('Open Log Folder', self)
+        open_logs_action.triggered.connect(self.open_log_folder)
+        help_menu.addAction(open_logs_action)
+
         about_action = QAction('About', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+    def open_log_folder(self) -> None:
+        """Open the folder holding the log files, for attaching to a report.
+
+        A packaged application has no console, so this is the only way a user
+        can hand over what the application recorded.  The folder is opened
+        rather than the file itself, because the rotated copies next to it are
+        usually the interesting ones after a crash.
+        """
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        from runtime_paths import log_directory
+
+        folder = log_directory()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "Log Folder",
+                f"The log folder could not be created:\n\n{folder}\n\n{error}",
+            )
+            return
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            QMessageBox.information(
+                self, "Log Folder", f"Logs are written to:\n\n{folder}"
+            )
 
     def create_exchange_selection(self) -> QGroupBox:
         """Create exchange selection area"""

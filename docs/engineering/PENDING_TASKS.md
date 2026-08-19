@@ -291,3 +291,67 @@ real machine also found a defect in that check itself: it read an HTTP 429 as a
 certificate failure, which would have failed release builds at random. A status line
 proves the handshake completed, so it now passes, and an unreachable endpoint is
 reported as inconclusive rather than as a certificate problem (PR #15).
+
+## 4. Signed, installable packages for Windows and macOS
+
+Status: Approved, not started. **Lowest priority: take this up only after every other
+open item on this board is closed.** It changes how the application is distributed, not
+what it does, and nothing here blocks the data work.
+
+### Where v1.1.1 actually stands
+
+Tested by the owner on Windows after the release: **no false positive.** The
+`NSE_BSE_Downloader.exe` from `NSE_BSE_Downloader-1.1.1-windows-x64.zip` copies and
+runs without adding a Defender exclusion, and Defender does not delete it. So the
+Nuitka onefile build is not being classified as malware, and neither a submission to
+Microsoft nor a move to standalone-folder packaging is needed for that reason.
+
+What remains on first run is the **unknown-publisher warning** — SmartScreen saying the
+file has no reputation, not Defender saying it is dangerous. macOS says the equivalent
+through Gatekeeper. Only a signature fixes either, which is what this item is for.
+
+### Track A — Windows: signature, then an installer
+
+- Apply to **SignPath Foundation**, which signs open-source projects at no cost. This
+  project looks eligible: GPL-3.0, public repository, built by a public CI from a
+  tagged commit. Eligibility is theirs to judge, so treat approval as the first gate
+  and do not plan the rest around it until it lands.
+- **The existing workflow cannot use it as written.** `trusted-release-candidate.yml`
+  expects `WINDOWS_CERTIFICATE_BASE64` and `WINDOWS_CERTIFICATE_PASSWORD` — a PFX file
+  in a secret. Since June 2023 a code-signing key must live on a hardware token or in a
+  cloud HSM, so no CA hands out a PFX any more, and SignPath signs through its own
+  service. The Windows half of that workflow therefore needs rewriting around a signing
+  service rather than a decoded certificate file. The macOS half is unaffected.
+- Only then produce an **installer** (Inno Setup, NSIS or MSI). Note that an installer
+  is itself an executable and needs signing too; an unsigned installer wrapping a signed
+  application is worse than the ZIP we ship today, because it puts an unsigned binary in
+  front of the user. Keep the ZIP as well — it needs no elevation and no uninstall.
+- Reputation accumulates per publisher and per download volume. Expect the warning to
+  fade rather than vanish on the first signed release, unless an EV certificate is
+  bought, which SignPath Foundation does not provide.
+
+### Track B — macOS: Apple Developer ID, then a .dmg
+
+- **SignPath cannot sign this.** Gatekeeper and `notarytool` accept only a Developer ID
+  certificate issued by Apple through the Apple Developer Program, which no third-party
+  CA can issue. The free route that exists for Windows has no macOS equivalent; this
+  track costs $99/year or does not happen.
+- The signing and notarization path is already implemented in
+  `trusted-release-candidate.yml` and documented in
+  [RELEASE_TRUST_ASSETS.md](RELEASE_TRUST_ASSETS.md); it waits only on credentials.
+- A **.dmg** is packaging, independent of signing, and can be built first. An unsigned
+  .dmg still triggers Gatekeeper, so on its own it only replaces one right-click→Open
+  with another. Its real value is a drag-to-Applications layout instead of a folder the
+  user places by hand.
+
+### Required evidence
+
+- The signed Windows artifact verifies under the Authenticode policy, with an RFC 3161
+  timestamp, so it stays valid after the certificate expires.
+- The signed macOS app passes `spctl --assess --type execute` rather than being
+  `rejected`, which is what `RELEASE_BUILD_EVIDENCE.md` records today.
+- Both installed and launched on a machine that did not build them, with the first-run
+  wording that users actually see recorded in `UPGRADE.md` and the release notes.
+- `BUILD-METADATA.json` records `trust_status: signed`, and the release evidence file
+  states which artifacts are signed and which are not. A release where only some
+  platforms are signed must say so plainly.

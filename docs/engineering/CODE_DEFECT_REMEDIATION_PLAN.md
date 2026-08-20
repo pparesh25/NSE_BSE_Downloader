@@ -1484,6 +1484,76 @@ simply did not publish that far back will report a head gap that no download can
       every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
       changing it later forces a migration of published files.
 
+#### Sampled evidence, 2026-08-20
+
+One real report was downloaded from every supported era before any code was written,
+because the grep in the box above searches for the wrong names and therefore makes this
+look simpler than it is. Six of the columns that actually carry these fields are not in
+that pattern at all.
+
+| Era | Turnover column | Unit | Previous-close column |
+| --- | --- | --- | --- |
+| `nse-equity-legacy` | `TOTTRDVAL` | rupees | `PREVCLOSE` |
+| `nse-equity-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `nse-fo-legacy` | `VAL_INLAKH` | **lakhs** | **absent** |
+| `nse-fo-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `nse-sme-two-digit-year` | `NET_TRDVAL` | rupees | `PREV_CL_PR` |
+| `nse-sme-four-digit-year` | `NET_TRDVAL` | rupees | `PREV_CL_PR` |
+| `nse-index` | `Turnover (Rs. Cr.)` | **crores** | **absent** |
+| `bse-equity-isin-legacy` | `NET_TURNOV` | rupees | `PREVCLOSE` |
+| `bse-equity-bhavcopy-legacy` | `NET_TURNOV` | rupees | `PREVIOUS CLOSE PRICE` |
+| `bse-equity-udiff-zip` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `bse-equity-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `bse-index` | **absent** | — | `PreviousClose` |
+| `nse-delivery` | `TURNOVER_LACS` | **lakhs** | `PREV_CLOSE` |
+| `bse-delivery` | `DAY'S TURNOVER` | rupees | absent |
+
+Units were decided by arithmetic rather than by the column's name, because a name is a
+claim and three different units are in play:
+
+* every equity era gives `turnover / (volume * close)` a median of **1.000**, over
+  2,775 to 4,939 rows each — rupees, including BSE's `NET_TURNOV`;
+* NSE F&O cannot be checked that way, since no lot size is in the file. Read as lakhs,
+  2024-07-05 totals Rs 13,626,112 crore; read as rupees, Rs 136 crore. The next
+  schema's `TtlTrfVal` totals Rs 11,979,608 crore for 2026-08-07. Lakhs it is, and the
+  boundary at 2024-07-08 is a five-order-of-magnitude discontinuity if missed;
+* an index value is not a price per share, so the index turnover was checked against
+  the whole cash market instead: "Nifty Total Market" read as crores is 83.8% of that
+  day's NSE turnover, and read as lakhs 0.84%;
+* BSE's `DAY'S TURNOVER` matches the same day's bhavcopy `TtlTrfVal` with a median
+  ratio of 1.0000 across 4,938 scrips.
+
+Two corrections to what the box above assumes:
+
+* the 2022-08-17 to 2022-12-31 BSE era names it `PREVIOUS CLOSE PRICE`, with spaces,
+  not `PREVCLOSE`;
+* **the NSE index previous close cannot be derived.** `Closing - Points Change` agrees
+  with the previous session's own close to the paisa for 162 of 163 indices, but NSE
+  publishes `Points Change = 0.0` and `Change(%) = "-"` for *Nifty50 Dividend Points*,
+  where the derivation gives 187.24 against an actual 182.42. The other six
+  disagreements are 0.01 rounding. A rule that is silently wrong for one index in a
+  hundred and sixty is not a rule worth having, so this field stays empty.
+
+NSE equity's `PrvsClsgPric` was confirmed to be the raw previous close, agreeing with
+the previous session's `ClsPric` for 3,325 of 3,325 instruments.
+
+#### Decided output contract
+
+* Both fields are published to daily files **and** symbol histories.
+* Stored in **rupees** everywhere: NSE F&O legacy is multiplied by 100,000 and NSE index
+  by 10,000,000, so one column never holds three units.
+* Where the exchange published nothing, the field is **empty**, not zero. Zero would
+  claim a BSE index has no turnover rather than that none is published.
+* Daily files stay **headerless**; a per-segment schema manifest records the column
+  names and generation instead, so the two schema generations become distinguishable
+  without breaking any consumer that reads the files positionally.
+* In symbol histories the new columns go **after** `ISIN`, so no column that has
+  already been written moves.
+* `.state/raw` snapshots gain both columns, and `read_internal_snapshot` must accept
+  the previous column set as well — it validates the list exactly and quarantines what
+  it cannot match, so a strict change would send every existing snapshot to quarantine
+  the first time a rebuild ran.
+
 ### 4.3 Diagnostics — effort S — **done 2026-08-19**
 
 - [x] `RotatingFileHandler` and a Help → "Open Log Folder" action. There was no

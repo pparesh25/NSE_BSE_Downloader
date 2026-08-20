@@ -1465,7 +1465,11 @@ The per-segment earliest-available floor belongs to 4.2, so the head-gap check m
 against `base_start_date` for every segment. Until 4.2 lands, a segment the exchange
 simply did not publish that far back will report a head gap that no download can close.
 
-### 4.2 Missing fields and metadata — effort M
+4.2 has since landed (2026-08-20) and pinned four NSE floors, so this no longer applies
+to NSE. **BSE EQ remains unbounded on purpose** — its archive has holes rather than a
+floor — so a BSE head gap can still be reported that no download can close.
+
+### 4.2 Missing fields and metadata — effort M — **done 2026-08-20**
 
 - [x] `TURNOVER` and `PREV_CLOSE` — **done 2026-08-20**. Grepping all of `src/` for
       `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returned **zero hits**,
@@ -1488,9 +1492,13 @@ simply did not publish that far back will report a head gap that no download can
       matched nothing published a date with every delivery field empty and no
       complaint anywhere. The rate is now recorded against the stage and `--audit`
       judges it against the neighbouring sessions rather than a fixed threshold.
-- [ ] Add `'TS'` to `BSE_EQUITY_SERIES`. BSE Startup scrips are silently absent from
-      every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
-      changing it later forces a migration of published files.
+- [x] Add `'TS'` to `BSE_EQUITY_SERIES` — **closed 2026-08-20 as "will not do".**
+      The owner decided to leave BSE group handling exactly as it is, so `TS` stays
+      out of the accepted set and BSE Startup scrips remain absent from every era.
+      That is now an accepted omission rather than an open box: sampling the
+      2026-08-07 BSE bhavcopy found one `TS` scrip dropped, and changing published
+      naming later would force an audited migration of files already on disk.
+      Recorded in [PENDING_TASKS.md](PENDING_TASKS.md) §1, which is closed.
 
 #### Sampled evidence, 2026-08-20
 
@@ -1672,11 +1680,14 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
 Phase 3  stop writing wrong data ← done.  3.1 parser, 3.2 volume, 3.3 identity,
                                    3.4 size/value gates, 3.5 one writer per root
    ↓
-Phase 4  verifiability           ← 4.1 done: --audit answers "can I trust
-                                   this?" without changing the answer.  4.2
-                                   missing fields still open; 4.3 done
+Phase 4  verifiability           ← done.  4.1 --audit answers "can I trust
+                                   this?" without changing the answer; 4.2
+                                   turnover, previous close and the per-segment
+                                   floors landed, and its last box -- BSE `TS` --
+                                   was closed as "will not do"; 4.3 logging
    ↓
-Phase 5  storage model           ← the durable fix, built on a correct base
+Phase 5  storage model           ← the durable fix, built on a correct base.
+                                   The only phase still open.
 ```
 
 Phases 1 and 3 can proceed in parallel if convenient — they touch disjoint files.

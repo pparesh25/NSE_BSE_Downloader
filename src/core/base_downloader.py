@@ -483,7 +483,9 @@ class BaseDownloader(ABC):
                 if internal is not None and self.segment in {"EQ", "SME"}
                 else df
             )
-            rows = store.upsert_frame(self.exchange, self.segment, frame)
+            rows = store.upsert_frame(
+                self.exchange, self.segment, frame, published=df
+            )
             self.logger.info(
                 "Mirrored %s %s %s rows into the EOD database",
                 rows, self.exchange_segment, target_date,

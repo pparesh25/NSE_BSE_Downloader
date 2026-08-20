@@ -1673,11 +1673,14 @@ The migration is four independently shippable steps, from §7 of the review:
       `ISIN` alone identifies a security — and found that a clustered table without
       statistics silently scans every date an exchange ever published. Evidence:
       [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md).
-- [ ] **2. Prove parity.** `export_daily(date)` / `export_symbol(symbol)` regenerate
-      text from the database; re-export and SHA-diff against what the same run
-      published. The data root was deleted on 2026-08-21 — it held download-test files
-      only — so this begins by downloading a small date range, which then serves as
-      both the mirror's input and the parity target.
+- [~] **2. Prove parity — daily files done 2026-08-21, symbol histories open.**
+      `src/services/eod_export.py` regenerates a published daily file from the
+      database, and `--verify-eod-parity` diffs a whole data root read-only. Proven
+      for equity, index, futures and a three-component combined file. Measuring again
+      corrected the schema twice: row order is not recoverable from the values (index
+      reports are published in source order), and neither is a column's dtype (a
+      gapless whole-number column is `int64` in equity and `float64` in index). Still
+      owed: `export_symbol`, and a run against genuinely downloaded dates.
 - [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
       7,426-files-per-run cost dies and appending one day stops rewriting the store.
       Consumers still see identical `.txt` files at identical paths.

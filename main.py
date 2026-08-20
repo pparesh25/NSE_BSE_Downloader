@@ -89,6 +89,8 @@ Examples:
     python main.py --rebuild-combined NSE 2026-07-31
     python main.py --audit                # verify the database, change nothing
     python main.py --audit NSE_EQ BSE_EQ  # verify only these segments
+    python main.py --verify-eod-parity    # regenerate every daily file from
+                                          # the database and diff it
         """
     )
 
@@ -137,6 +139,17 @@ Examples:
         metavar=("EXCHANGE", "YYYY-MM-DD"),
         help="Rebuild one deterministic EQ+SME/Index output from components",
     )
+    # Read-only like ``--audit``, and in the same group for the same reason.
+    repair.add_argument(
+        "--verify-eod-parity",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE_SEGMENT",
+        help=(
+            "Regenerate published daily files from the EOD database and "
+            "report any that do not match byte for byte"
+        ),
+    )
     # In the same mutually exclusive group as the repairs even though it
     # repairs nothing: asking a question about the database while rewriting it
     # would not answer the question.  ``default=None`` distinguishes "not
@@ -174,6 +187,28 @@ def run_audit_mode(config_path: str, segments) -> int:
 
     print(report.render())
     return 1 if report.failed else 0
+
+
+def run_eod_parity_mode(config_path: str, segments) -> int:
+    """Diff every published daily file against the database it was mirrored to.
+
+    Phase 5 step 2.  This changes nothing and is the evidence that has to hold
+    before step 3 lets the database publish.  Exit codes match ``--audit``:
+    0 clean, 1 a mismatch was found, 2 the check could not run -- because "no
+    differences" and "could not look" must not be the same answer.
+    """
+
+    from src.services.eod_export import verify_parity
+
+    try:
+        config = Config(config_path)
+        report = verify_parity(config, segments)
+    except Exception as error:
+        print(f"Parity check could not run: {error}")
+        return 2
+
+    print(report.render())
+    return 1 if report.mismatches else 0
 
 
 def run_rebuild_mode(config_path: str, args) -> int:
@@ -421,6 +456,11 @@ def main():
     try:
         if args.audit is not None:
             return run_audit_mode(str(config_path), args.audit)
+
+        if args.verify_eod_parity is not None:
+            return run_eod_parity_mode(
+                str(config_path), args.verify_eod_parity
+            )
 
         if (
             args.rebuild_symbol

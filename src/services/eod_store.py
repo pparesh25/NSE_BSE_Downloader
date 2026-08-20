@@ -136,7 +136,7 @@ class EodStore:
     #: cannot silently misalign the parameters.
     _COLUMNS: Sequence[str] = (
         "exchange", "segment", "security_key", "trade_date",
-        "symbol", "series", "isin", "security_id",
+        "source_order", "symbol", "series", "isin", "security_id",
         "open", "high", "low", "close", "prev_close",
         "volume", "turnover", "total_trades", "qty_per_trade",
         "delivery_qty", "delivery_pct",
@@ -217,6 +217,7 @@ class EodStore:
                     segment       TEXT    NOT NULL,
                     security_key  TEXT    NOT NULL,
                     trade_date    INTEGER NOT NULL,
+                    source_order  INTEGER NOT NULL,
                     symbol        TEXT    NOT NULL,
                     series        TEXT    NOT NULL DEFAULT '',
                     isin          TEXT    NOT NULL DEFAULT '',
@@ -235,6 +236,28 @@ class EodStore:
                     open_interest INTEGER,
                     change_in_oi  INTEGER,
                     PRIMARY KEY (exchange, segment, security_key, trade_date)
+                ) WITHOUT ROWID
+                """
+            )
+            # What the publisher's own frame looked like, one row per
+            # published component.  The text a file carries is whatever
+            # ``to_csv`` made of that frame, and pandas decides ``7`` versus
+            # ``7.0`` from the column's dtype -- which is not recoverable from
+            # the values.  A whole-number column with no gaps is ``int64`` in
+            # an equity frame and ``float64`` in an index frame, and both are
+            # correct.  Recording the dtypes is the only way to regenerate the
+            # bytes; inferring them was measured to write ``352148975`` where
+            # the publisher wrote ``352148975.0``.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS published_frames (
+                    exchange   TEXT    NOT NULL,
+                    segment    TEXT    NOT NULL,
+                    trade_date INTEGER NOT NULL,
+                    columns    TEXT    NOT NULL,
+                    dtypes     TEXT    NOT NULL,
+                    rows       INTEGER NOT NULL,
+                    PRIMARY KEY (exchange, segment, trade_date)
                 ) WITHOUT ROWID
                 """
             )
@@ -277,7 +300,7 @@ class EodStore:
 
     @classmethod
     def _row_values(
-        cls, exchange: str, segment: str, row: dict[str, Any]
+        cls, exchange: str, segment: str, order: int, row: dict[str, Any]
     ) -> tuple[Any, ...]:
         symbol = _text(row.get("SYMBOL"))
         if not symbol:
@@ -292,6 +315,7 @@ class EodStore:
             segment,
             security_key(symbol, isin, identifier),
             int(trade_date),
+            order,
             symbol,
             _text(row.get("SERIES")),
             isin if valid_isin(isin) else "",
@@ -312,7 +336,11 @@ class EodStore:
         )
 
     def upsert_frame(
-        self, exchange: str, segment: str, frame: Any
+        self,
+        exchange: str,
+        segment: str,
+        frame: Any,
+        published: Any = None,
     ) -> int:
         """Insert or replace every row of one published frame.
 
@@ -320,6 +348,12 @@ class EodStore:
         leaves the date either wholly present or wholly absent -- never half a
         bhavcopy.  Re-running a date is an update rather than a duplicate,
         which is what makes a re-download safe to repeat.
+
+        ``published`` is the frame that reached ``to_csv``, when that is not
+        the same object the values come from: equity segments carry identity
+        in an internal frame and publish a narrower public one.  Its column
+        names and dtypes are recorded so the file can be regenerated exactly;
+        without them the export has to guess, and guessing was measured wrong.
         """
 
         if segment not in SUPPORTED_SEGMENTS:
@@ -327,7 +361,10 @@ class EodStore:
         records = self._records(frame)
         if not records:
             return 0
-        values = [self._row_values(exchange, segment, row) for row in records]
+        values = [
+            self._row_values(exchange, segment, order, row)
+            for order, row in enumerate(records)
+        ]
         placeholders = ", ".join("?" * len(self._COLUMNS))
         assignments = ", ".join(
             f"{column}=excluded.{column}"
@@ -351,6 +388,22 @@ class EodStore:
                 )
                 # Counted inside the same transaction as the rows it counts, so
                 # a rolled-back date cannot leave the tally claiming it landed.
+                signature = self._frame_signature(
+                    published if published is not None else frame
+                )
+                if signature is not None:
+                    columns, dtypes = signature
+                    connection.execute(
+                        """
+                        INSERT OR REPLACE INTO published_frames(
+                            exchange, segment, trade_date, columns, dtypes, rows
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            exchange, segment, values[0][3],
+                            ",".join(columns), ",".join(dtypes), len(values),
+                        ),
+                    )
                 written = self._counter(connection, "rows_written") + len(values)
                 self._set_counter(connection, "rows_written", written)
                 analyzed = self._counter(connection, "rows_at_analyze")
@@ -414,6 +467,45 @@ class EodStore:
         )
 
     @staticmethod
+    def _frame_signature(
+        frame: Any,
+    ) -> Optional[tuple[list[str], list[str]]]:
+        """Column names and dtypes of a DataFrame, or ``None`` for anything else."""
+
+        dtypes = getattr(frame, "dtypes", None)
+        if dtypes is None:
+            return None
+        try:
+            return (
+                [str(name) for name in frame.columns],
+                [str(dtype) for dtype in dtypes],
+            )
+        except (AttributeError, TypeError):
+            return None
+
+    def published_frame(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> Optional[dict[str, Any]]:
+        """What the publisher's frame looked like for one component."""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT columns, dtypes, rows FROM published_frames "
+                    "WHERE exchange = ? AND segment = ? AND trade_date = ?",
+                    (exchange, segment, int(trade_date)),
+                ).fetchone()
+        except sqlite3.DatabaseError as error:
+            self._raise_corruption(error)
+        if row is None:
+            return None
+        return {
+            "columns": row["columns"].split(","),
+            "dtypes": row["dtypes"].split(","),
+            "rows": int(row["rows"]),
+        }
+
+    @staticmethod
     def _records(frame: Any) -> list[dict[str, Any]]:
         """Accept a DataFrame or a plain sequence of mappings."""
 
@@ -458,13 +550,21 @@ class EodStore:
     def daily_rows(
         self, exchange: str, segment: str, trade_date: int
     ) -> list[dict[str, Any]]:
-        """Every row of one bhavcopy, ordered by symbol."""
+        """Every row of one bhavcopy, in the order the exchange published it.
+
+        Not alphabetically.  Equity frames happen to be sorted by symbol, but
+        index frames are not -- the NSE index report publishes ``Nifty 50``,
+        ``Nifty Next 50``, ``Nifty 100`` in that order, which no sort of the
+        stored columns reproduces.  ``source_order`` is the row's position in
+        the frame that was published, and it is the only thing that makes the
+        text regenerable byte for byte.
+        """
 
         try:
             with self._connect() as connection:
                 rows = connection.execute(
                     "SELECT * FROM eod WHERE exchange = ? AND segment = ? "
-                    "AND trade_date = ? ORDER BY symbol",
+                    "AND trade_date = ? ORDER BY source_order",
                     (exchange, segment, int(trade_date)),
                 ).fetchall()
             return [dict(row) for row in rows]
@@ -490,7 +590,7 @@ class EodStore:
                 rows = connection.execute(
                     f"SELECT * FROM eod WHERE exchange = ? "
                     f"AND security_key IN ({placeholders}) "
-                    "ORDER BY trade_date, security_key",
+                    "ORDER BY trade_date, source_order",
                     [exchange, *keys],
                 ).fetchall()
             return [dict(row) for row in rows]

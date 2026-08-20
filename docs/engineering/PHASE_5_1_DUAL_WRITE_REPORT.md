@@ -1,4 +1,4 @@
-# Phase 5 step 1 evidence — dual-writing the EOD database
+# Phase 5 evidence — dual-write, and regenerating text from the database
 
 Date: 2026-08-20 (Asia/Kolkata)
 Branch: `feat/sqlite-system-of-record`
@@ -151,14 +151,101 @@ run with the mirror switched off.
   second key for the same security. Pre-existing, and surfaced here because step 2 is
   where it becomes visible.
 
-## Next
+---
 
-Step 2 — `export_daily(date)` / `export_symbol(symbol)` regenerating text from the
-database, re-exported and SHA-diffed against the files the same run published. The
-formatting question this step defers (`7` versus `7.0`, per exchange) is the first
-thing that harness will answer.
+# Step 2 — parity, and what it changed again
 
-With the test tree gone there is no existing corpus to diff against, which makes step
-2 cleaner rather than harder: download a small date range once, and every file it
-publishes is both the mirror's input and the parity target, produced by the same run
-from the same frame.
+Date: 2026-08-21 (Asia/Kolkata)
+
+## The approach
+
+`src/services/eod_export.py` rebuilds the frame and hands it to `DataFrame.to_csv`
+with the arguments the publisher uses, rather than formatting numbers itself. The
+published text is whatever pandas made of that frame, so reproducing the frame is the
+only reliable way to reproduce the text. That turns byte parity into a question about
+**dtypes** — which has a finite answer — instead of a question about float repr, which
+does not.
+
+Every parity test builds its frame by running the **real** normalizer over a synthetic
+source report. A hand-built frame would carry whatever dtypes the test chose, so the
+export would be checked against the test's own assumptions rather than against what
+the publisher writes.
+
+## Two more corrections the harness forced
+
+**Row order is not recoverable from the values.** NSE publishes its index report as
+`Nifty 50`, `Nifty Next 50`, `Nifty 100` — source order, not alphabetical, and no sort
+of the stored columns reproduces it. Equity frames happen to be sorted by symbol,
+which is exactly why this would have gone unnoticed until an index file was diffed.
+The store now carries `source_order`, the row's position in the published frame.
+
+**A column's dtype is not recoverable from the values either.** The first parity run
+failed on one character:
+
+```
+published: ...,352148975.0,...
+exported : ...,352148975,...
+```
+
+A gapless whole-number column is `int64` in an equity frame and `float64` in an index
+frame. The values are identical; nothing stored about them distinguishes the two, and
+both are correct. So the store records what the publisher's frame actually was, in a
+`published_frames` table of column names, dtypes and row count — one row per published
+component, about 47,000 rows for a full multi-year archive. Inferring the dtype was
+tried first and measured wrong, which is why it is now only the fallback for a
+database written before the signature existed.
+
+## What is proven
+
+`tests/test_eod_export.py` publishes through the real path and regenerates:
+
+- an equity day, byte for byte;
+- a whole-number column that must not grow a decimal point, and a column with one
+  missing value that must keep one — the two halves of the same rule;
+- an index day in published order;
+- a futures day with open interest;
+- **a combined `NSE/EQ` file built from three components.** This is the hardest case:
+  `pd.concat` decides the result's dtypes and an index component with no delivery
+  columns widens the equity ones to float, so the exporter concatenates the way
+  `CombinedFileBuilder` does rather than reading one table.
+
+## Running it against a real tree
+
+```
+python main.py --verify-eod-parity            # every segment
+python main.py --verify-eod-parity NSE_EQ     # one
+```
+
+Read-only, in the same mutually exclusive group as `--audit` and the repairs, with the
+same three-valued exit: 0 clean, 1 a mismatch, 2 could not run.
+
+Two judgements are worth naming. A file the database has no record of is reported as
+**unmirrored**, not as a failure — dual-write fills forward, so files published before
+it was switched on have nothing to compare with, and calling that a failure would bury
+the real ones. And a report that compared nothing says so rather than printing the
+success line, because an empty data root must not read as a verified one.
+
+Which components a combined EQ file carries is decided by **row counts**, not by the
+user's current append preferences: the only candidate that can be right is the one
+whose component row counts sum to the lines in the file, and preferences may have
+changed since it was published.
+
+## Gates
+
+- `pytest` both interpreters — **546 passed**, coverage 78.90% (floor 70%).
+- `ruff check .` — passed. `mypy` over 60 source files — no issues.
+- `main.py --smoke-gui` — exit 0. `main.py --verify-eod-parity` on an empty root —
+  exit 0, and it says nothing was compared.
+
+## What step 2 still owes
+
+`export_symbol` is **not** written yet. Daily files were done first because they are
+self-contained; a symbol history additionally involves deduplication, the registry's
+rename merge, and replayed corporate actions, and it deserves its own pass now that
+the dtype and ordering questions have been answered and paid for. Nothing here is
+wired into publication — that is step 3, and only after this has held for a release.
+
+The parity pass has not yet run against downloaded data. Everything above is proven
+against frames the real normalizer produced, which is the same code path, but a real
+download across several dates and all four segments is the evidence that closes
+step 2.

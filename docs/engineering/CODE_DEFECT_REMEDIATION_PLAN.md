@@ -1467,14 +1467,16 @@ simply did not publish that far back will report a head gap that no download can
 
 ### 4.2 Missing fields and metadata — effort M
 
-- [ ] `TURNOVER` and `PREV_CLOSE`. Grepping all of `src/` for
-      `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returns **zero hits**. The
-      prototypes prove the source files carry them. These are the only genuinely
-      unrecoverable fields — everything else is already in `.state/raw` at full
-      fidelity and can be re-published offline.
-- [ ] A header row, a schema version, and a per-segment manifest. Files are headerless
-      and `validate_daily_output` accepts *either* 7 or 9 columns, so two schema
-      generations coexist as "valid" with no marker.
+- [x] `TURNOVER` and `PREV_CLOSE` — **done 2026-08-20**. Grepping all of `src/` for
+      `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returned **zero hits**,
+      but that pattern searches for the wrong names: six of the columns that actually
+      carry these fields are not in it. These are the only genuinely unrecoverable
+      fields — everything else is already in `.state/raw` at full fidelity and can be
+      re-published offline.
+- [x] A schema version and a per-segment manifest — **done 2026-08-20**. A header row
+      was **not** added; see below. Files are headerless and `validate_daily_output`
+      accepts 7, 9 or 11 columns, so three schema generations coexist as "valid" and
+      the marker is what tells them apart.
 - [ ] A per-segment earliest-available floor, so "how far back can I go?" is answerable
       from the UI. Today the picker offers 1990 and
       `price_source('NSE','SME',date(1995,1,1))` returns a URL.
@@ -1536,6 +1538,34 @@ Two corrections to what the box above assumes:
 
 NSE equity's `PrvsClsgPric` was confirmed to be the raw previous close, agreeing with
 the previous session's `ClsPric` for 3,325 of 3,325 instruments.
+
+#### How 4.2's first two boxes were closed
+
+Both fields are published to daily files and symbol histories, in rupees
+throughout. `TURNOVER_SOURCES` and `PREV_CLOSE_SOURCES` in `canonical_data.py` hold the
+per-era column names and the factor that turns each era's value into rupees; both are
+listed as *required* in `SOURCE_SCHEMAS` wherever the era publishes them, so a source
+that stops publishing one stops that date with the column named rather than filling a
+decade with silently empty turnover.
+
+Two migrations had to be handled or the change would have destroyed data rather than
+added it. `read_internal_snapshot` matches the snapshot column list exactly and
+quarantines what it cannot match, and the snapshots are the only thing a rebuild has to
+work from, so the previous column set is accepted and filled with empty values; symbol
+histories upgrade through both earlier generations the same way. Running `--audit`
+against the owner's real root immediately afterwards produced **8,096 errors** — every
+history there was the middle generation, which the audit did not know — and that is now
+two notices, one per exchange.
+
+**No header row.** The plan's box asked for one, and it was not added: it would break
+every tool that reads these files positionally, including the owner's own downstream
+scripts, for no gain the marker does not already give. `<EX>/<SEG>/SCHEMA.json` names
+the columns of every width the application has published, so a reader counts a row's
+columns and looks the width up. It describes generations rather than claiming one,
+because a folder legitimately holds more than one at a time: a backfill writes old
+dates in the current format while yesterday's file is still in the previous one. It is
+rewritten only when its content changes, so a launch does not restamp a file in the
+user's data folder for nothing.
 
 #### Decided output contract
 

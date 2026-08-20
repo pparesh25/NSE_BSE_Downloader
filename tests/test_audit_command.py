@@ -24,6 +24,49 @@ DAY = date(2026, 7, 30)
 EARLIER = date(2026, 7, 29)
 
 
+def _pin_clock(monkeypatch, day: date) -> None:
+    monkeypatch.setattr(
+        "src.utils.date_utils.DateUtils.today_ist", classmethod(lambda cls: day)
+    )
+    monkeypatch.setattr(
+        "src.utils.date_utils.DateUtils.is_data_available_time",
+        staticmethod(lambda now=None: True),
+    )
+
+
+@pytest.fixture(autouse=True)
+def fixed_clock(monkeypatch):
+    """Pin "the last session the exchanges published" to the fixture date.
+
+    Coverage is judged up to the newest session that exists, so without this
+    every test would grow a stale-tail finding as the real calendar moved on.
+    """
+
+    _pin_clock(monkeypatch, DAY)
+
+
+def _config(start: date = DAY) -> Config:
+    """A configuration whose data root is this test's temporary home."""
+
+    config = Config("config.yaml")
+    config.date_settings.base_start_date = start.isoformat()
+    return config
+
+
+def _config_file(tmp_path: Path, start: date = DAY) -> str:
+    """The shipped configuration, re-pointed at this test's start date."""
+
+    shipped = Path("config.yaml").read_text(encoding="utf-8")
+    target = tmp_path / "audit-config.yaml"
+    target.write_text(
+        shipped.replace(
+            'base_start_date: "2025-07-15"', f'base_start_date: "{start}"'
+        ),
+        encoding="utf-8",
+    )
+    return str(target)
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -78,7 +121,7 @@ def _record_simple(base: Path, segment: str, target_date: date, path: Path):
 def healthy(tmp_path):
     """A data root holding one recorded, verifiable NSE_FO date."""
 
-    config = Config("config.yaml")
+    config = _config()
     published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
     _record_simple(config.base_data_path, "FO", DAY, published)
     return config, published
@@ -219,7 +262,7 @@ def deferred(tmp_path):
     which is the false positive this fixture exists to pin down.
     """
 
-    config = Config("config.yaml")
+    config = _config()
     component_dir = config.base_data_path / ".state" / "components" / "NSE" / "EQ"
     component_dir.mkdir(parents=True)
     component = component_dir / f"{DAY.isoformat()}.csv"
@@ -262,14 +305,15 @@ def test_a_date_that_never_reached_publication_is_reported(deferred):
 
     report = DatabaseAudit(config, ["NSE_EQ"]).run()
 
-    assert [finding.category for finding in report.findings] == [
-        "unpublished-date"
-    ]
+    assert {finding.category for finding in report.findings} == {
+        "unpublished-date",
+        "incomplete-date",
+    }
     assert report.failed
 
 
 def test_an_unknown_segment_is_refused_before_anything_is_read(tmp_path):
-    config = Config("config.yaml")
+    config = _config()
 
     with pytest.raises(AuditError) as error:
         DatabaseAudit(config, ["NSE_COMMODITY"])
@@ -278,7 +322,7 @@ def test_an_unknown_segment_is_refused_before_anything_is_read(tmp_path):
 
 
 def test_a_root_with_no_pipeline_database_says_so(tmp_path):
-    config = Config("config.yaml")
+    config = _config()
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -286,28 +330,31 @@ def test_a_root_with_no_pipeline_database_says_so(tmp_path):
     assert any("no pipeline database" in note for note in report.notes)
 
 
-def test_the_audit_writes_nothing_to_the_data_root(healthy):
+def test_the_audit_writes_nothing_to_the_data_root(healthy, tmp_path):
     """The constraint the whole command exists under, measured end to end."""
 
     config, _ = healthy
     root = config.base_data_path
     before = _fingerprint(root)
 
-    assert main.run_audit_mode("config.yaml", []) == 0
+    assert main.run_audit_mode(_config_file(tmp_path), []) == 0
 
     assert _fingerprint(root) == before
 
 
-def test_the_command_separates_a_broken_database_from_broken_data(healthy):
+def test_the_command_separates_a_broken_database_from_broken_data(
+    healthy, tmp_path
+):
     config, published = healthy
-    assert main.run_audit_mode("config.yaml", ["NSE_FO"]) == 0
+    config_file = _config_file(tmp_path)
+    assert main.run_audit_mode(config_file, ["NSE_FO"]) == 0
 
     published.write_text("SYMBOL,9,9,9\n", encoding="utf-8")
-    assert main.run_audit_mode("config.yaml", ["NSE_FO"]) == 1
+    assert main.run_audit_mode(config_file, ["NSE_FO"]) == 1
 
     database = config.base_data_path / ".state" / "pipeline_state.sqlite3"
     database.write_bytes(b"not a database")
-    assert main.run_audit_mode("config.yaml", []) == 2
+    assert main.run_audit_mode(config_file, []) == 2
 
 
 def test_the_parser_distinguishes_no_audit_from_a_whole_root_audit():
@@ -356,7 +403,7 @@ def test_a_record_that_cannot_be_parsed_is_reported_not_quarantined(healthy):
 
 
 def test_a_complete_stage_with_no_digest_is_a_finding_in_itself(tmp_path):
-    config = Config("config.yaml")
+    config = _config()
     published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
 
     manifest = PipelineManifest(config.base_data_path)
@@ -367,6 +414,8 @@ def test_a_complete_stage_with_no_digest_is_a_finding_in_itself(tmp_path):
         ("downloaded", "validated", "daily"),
         ("delivery", "symbols", "actions", "combined"),
     )
+    manifest.mark("NSE", "FO", DAY, "downloaded", "complete")
+    manifest.mark("NSE", "FO", DAY, "validated", "complete", rows=1)
     manifest.mark(
         "NSE", "FO", DAY, "daily", "complete", path=str(published), rows=1
     )
@@ -382,7 +431,7 @@ def test_a_complete_stage_with_no_digest_is_a_finding_in_itself(tmp_path):
 def test_a_data_root_that_moved_is_matched_by_layout_not_by_path(tmp_path):
     # Recorded paths are absolute and were written wherever the data root was
     # at the time.  A restored backup must not report every file as missing.
-    config = Config("config.yaml")
+    config = _config()
     published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
     elsewhere = Path("/somewhere/else/NSE_BSE_Data/NSE/FO") / published.name
 
@@ -394,6 +443,8 @@ def test_a_data_root_that_moved_is_matched_by_layout_not_by_path(tmp_path):
         ("downloaded", "validated", "daily"),
         ("delivery", "symbols", "actions", "combined"),
     )
+    manifest.mark("NSE", "FO", DAY, "downloaded", "complete")
+    manifest.mark("NSE", "FO", DAY, "validated", "complete", rows=1)
     manifest.mark(
         "NSE",
         "FO",
@@ -443,7 +494,7 @@ def test_a_running_download_is_flagged_as_making_findings_transient(healthy):
 
 
 def test_a_complete_stage_with_no_path_is_a_finding_in_itself(tmp_path):
-    config = Config("config.yaml")
+    config = _config()
 
     manifest = PipelineManifest(config.base_data_path)
     manifest.begin(
@@ -453,6 +504,8 @@ def test_a_complete_stage_with_no_path_is_a_finding_in_itself(tmp_path):
         ("downloaded", "validated", "daily"),
         ("delivery", "symbols", "actions", "combined"),
     )
+    manifest.mark("NSE", "FO", DAY, "downloaded", "complete")
+    manifest.mark("NSE", "FO", DAY, "validated", "complete", rows=1)
     manifest.mark(
         "NSE", "FO", DAY, "daily", "complete", component_sha256="a" * 64
     )
@@ -527,3 +580,143 @@ def test_records_for_a_segment_this_version_does_not_publish_are_noted(healthy):
     ]
     assert len(unknown) == 1
     assert not report.failed
+
+
+def _categories(report, category: str) -> list:
+    return [
+        finding for finding in report.findings if finding.category == category
+    ]
+
+
+def test_a_truncated_head_is_reported_against_the_configured_start(tmp_path):
+    # The defect this replaces: `get_missing_file_dates` looks only between
+    # the first and last filename, so a database that never went back far
+    # enough looks complete to it.
+    config = _config(date(2026, 7, 27))
+    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    _record_simple(config.base_data_path, "FO", DAY, published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    head = _categories(report, "head-gap")
+    assert len(head) == 1
+    assert "2026-07-27 to 2026-07-29" in head[0].message
+    assert report.failed
+
+
+def test_a_stale_tail_is_visible_without_failing_the_audit(
+    monkeypatch, tmp_path
+):
+    config = _config()
+    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    _record_simple(config.base_data_path, "FO", DAY, published)
+    _pin_clock(monkeypatch, date(2026, 8, 7))
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    tail = _categories(report, "stale-tail")
+    assert len(tail) == 1
+    # Freshness is the owner's business; only damage fails the command.
+    assert tail[0].severity == "notice"
+    assert "2026-07-31 to 2026-08-07" in tail[0].message
+    assert not report.failed
+
+
+def test_a_missing_day_inside_the_published_range_is_reported(tmp_path):
+    config = _config(date(2026, 7, 28))
+    for day in (date(2026, 7, 28), DAY):
+        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        _record_simple(config.base_data_path, "FO", day, published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    missing = _categories(report, "missing-dates")
+    assert len(missing) == 1
+    assert "2026-07-29" in missing[0].message
+    assert report.failed
+
+
+def test_a_holiday_is_not_mistaken_for_a_missing_day(monkeypatch, tmp_path):
+    # 26 June 2026 is a trading holiday in the bundled calendar, with a
+    # weekend behind it.  Judging the gap without a calendar would invent
+    # three missing sessions here.
+    _pin_clock(monkeypatch, date(2026, 6, 29))
+    config = _config(date(2026, 6, 25))
+    for day in (date(2026, 6, 25), date(2026, 6, 29)):
+        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        _record_simple(config.base_data_path, "FO", day, published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert report.findings == ()
+
+
+def test_a_date_the_exchange_never_published_is_not_a_gap(tmp_path):
+    config = _config(date(2026, 7, 28))
+    for day in (date(2026, 7, 28), DAY):
+        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        _record_simple(config.base_data_path, "FO", day, published)
+    PipelineManifest(config.base_data_path).skip_date(
+        "NSE", "FO", date(2026, 7, 29), "The exchange published no report"
+    )
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert _categories(report, "missing-dates") == []
+    assert not report.failed
+
+
+def test_a_year_with_no_trading_calendar_is_declined_not_guessed(
+    monkeypatch, tmp_path
+):
+    # The bundled calendar starts in 2013.  Treating an unknown year as
+    # holiday-free would report every Diwali in it as a missing session.
+    _pin_clock(monkeypatch, date(2005, 6, 30))
+    config = _config(date(2005, 6, 1))
+    published = _publish(config, "FO", date(2005, 6, 30), "SYMBOL,1,2,3\n")
+    _record_simple(config.base_data_path, "FO", date(2005, 6, 30), published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert _categories(report, "missing-dates") == []
+    assert _categories(report, "head-gap") == []
+    assert any("no trading calendar is known for 2005" in note
+               for note in report.notes)
+
+
+def test_a_truncated_day_is_caught_by_neighbours_when_no_digest_can_be(
+    tmp_path,
+):
+    """The only plausibility check data written before the manifest can get."""
+
+    config = _config(date(2026, 7, 21))
+    days = [
+        date(2026, 7, day) for day in (21, 22, 23, 24, 27, 28, 29, 30)
+    ]
+    for day in days:
+        rows = 5 if day == date(2026, 7, 28) else 100
+        _publish(config, "FO", day, "SYMBOL,1,2,3\n" * rows)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    outliers = _categories(report, "row-count-outlier")
+    assert len(outliers) == 1
+    assert outliers[0].target_date == date(2026, 7, 28)
+    assert "5 rows is 5% of the 100-row median" in outliers[0].message
+
+
+def test_a_file_that_gained_rows_since_publication_says_how(healthy):
+    config, published = healthy
+
+    published.write_text(
+        "SYMBOL,1,2,3\nSYMBOL,4,5,6\n", encoding="utf-8"
+    )
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert {finding.category for finding in report.findings} == {
+        "digest-mismatch",
+        "row-count-drift",
+    }
+    drift = _categories(report, "row-count-drift")[0]
+    assert "holds 2 rows but the pipeline recorded 1" in drift.message

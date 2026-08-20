@@ -24,21 +24,24 @@ none of the ordinary routes into the data root are used here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import socket
 import sqlite3
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from ..core.config import Config
 from ..core.data_manager import DAILY_FILE_PATTERNS
+from ..utils import holiday_calendar
+from ..utils.date_utils import DateUtils
+from .canonical_data import BAND_SESSIONS, row_count_band_error
 from .instance_lock import SingleInstanceLock
 from .pipeline_sqlite import ReadOnlyPipelineStore
-from .state_store import file_sha256
 
 ERROR = "error"
 WARNING = "warning"
@@ -54,6 +57,115 @@ SEVERITY_ORDER = {ERROR: 0, WARNING: 1, NOTICE: 2}
 FAILING_SEVERITIES = frozenset({ERROR, WARNING})
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+
+#: How far a session may be from its neighbours and still be judged against
+#: them.  The same bound the writer uses: a market grows over decades, so a
+#: 1995 session must not be measured against a 2026 one merely because nothing
+#: closer has been downloaded yet.
+BAND_MAX_DISTANCE_DAYS = 180
+
+#: Read size for the single pass that produces both a digest and a row count.
+_READ_BLOCK = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class FileMeasurement:
+    """What one pass over a published file establishes."""
+
+    sha256: str
+    rows: int
+
+
+def measure_file(path: Path) -> FileMeasurement:
+    """Return the digest and row count of ``path`` from a single read.
+
+    Both checks need the whole file, and an audit of a multi-year database
+    reads every published file already; reading each one twice would double
+    the only expensive part of the command.
+    """
+
+    digest = hashlib.sha256()
+    rows = 0
+    trailing_newline = True
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(_READ_BLOCK), b""):
+            digest.update(block)
+            rows += block.count(b"\n")
+            trailing_newline = block.endswith(b"\n")
+    # A final line without its newline is still a row.
+    return FileMeasurement(
+        digest.hexdigest(), rows if trailing_newline else rows + 1
+    )
+
+
+class OfflineTradingCalendar:
+    """Which days the exchanges traded, decided without a network call.
+
+    ``DataManager.is_trading_day`` asks ``HolidayManager.is_holiday``, which
+    fetches a year it does not have.  A diagnostic must not do that -- the
+    defect that withdrew v1.1.0 was a TLS failure, and an audit that hangs
+    trying to reach NSE cannot help diagnose one.
+
+    So this reads the holiday cache the application has already saved, falls
+    back to the bundled calendar, and reports a year it has neither of as
+    *unknown* rather than as holiday-free.  Guessing that a year had no
+    holidays would turn every Diwali into a missing trading day.
+    """
+
+    def __init__(self, config: Config):
+        settings = config.date_settings
+        self.weekend_skip = getattr(settings, "weekend_skip", True)
+        self.holiday_skip = getattr(settings, "holiday_skip", True)
+        cached, cached_years = config.holiday_manager.cached_calendar()
+        self._cached = cached
+        self._cached_years = set(cached_years)
+
+    def knows_year(self, year: int) -> bool:
+        return (
+            not self.holiday_skip
+            or year in self._cached_years
+            or holiday_calendar.holidays_for_year(year) is not None
+        )
+
+    def is_trading_day(self, target_date: date) -> bool:
+        if self.weekend_skip and target_date.weekday() >= 5:
+            return False
+        if not self.holiday_skip:
+            return True
+        if target_date.year in self._cached_years:
+            return target_date not in self._cached
+        bundled = holiday_calendar.holidays_for_year(target_date.year)
+        if bundled is None:
+            # Unknown rather than empty; ``knows_year`` keeps such a year out
+            # of the expected set entirely.
+            return True
+        return target_date not in bundled
+
+    def trading_days(self, first: date, last: date) -> list[date]:
+        days = []
+        current = first
+        while current <= last:
+            if self.knows_year(current.year) and self.is_trading_day(current):
+                days.append(current)
+            current += timedelta(days=1)
+        return days
+
+    def expected_last_trading_date(self) -> date:
+        """The most recent session whose reports the exchanges have published.
+
+        Mirrors ``DataManager.get_expected_last_trading_date``: today counts
+        only after the 6 p.m. IST publication time.
+        """
+
+        today = DateUtils.today_ist()
+        current = today
+        if self.is_trading_day(today) and DateUtils.is_data_available_time():
+            return today
+        if self.is_trading_day(today):
+            current = today - timedelta(days=1)
+        while not self.is_trading_day(current):
+            current -= timedelta(days=1)
+        return current
 
 
 class AuditError(RuntimeError):
@@ -187,9 +299,13 @@ class DatabaseAudit:
             ]
         else:
             self.segments = available
+        self.calendar = OfflineTradingCalendar(config)
         self._findings: list[AuditFinding] = []
         self._notes: list[str] = []
         self._relocated_reported = False
+        self._unknown_calendar_years: set[int] = set()
+        # One read per file, however many checks want to look at it.
+        self._measurements: dict[Path, Optional[FileMeasurement]] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -213,6 +329,33 @@ class DatabaseAudit:
                 path=path,
             )
         )
+
+    def _measure(
+        self,
+        path: Path,
+        kind: str,
+        *,
+        exchange_segment: str = "",
+        target_date: Optional[date] = None,
+    ) -> Optional[FileMeasurement]:
+        """Digest and row count for one file, read once and remembered."""
+
+        if path in self._measurements:
+            return self._measurements[path]
+        try:
+            measurement: Optional[FileMeasurement] = measure_file(path)
+        except OSError as error:
+            measurement = None
+            self._add(
+                ERROR,
+                "unreadable-file",
+                f"the {kind} could not be read: {error}",
+                exchange_segment=exchange_segment,
+                target_date=target_date,
+                path=path,
+            )
+        self._measurements[path] = measurement
+        return measurement
 
     def _note_running_instance(self) -> None:
         """Say so if a download may be writing while the audit reads.
@@ -394,18 +537,15 @@ class DatabaseAudit:
                 path=Path(recorded_path),
             )
             return
-        try:
-            actual = file_sha256(path)
-        except OSError as error:
-            self._add(
-                ERROR,
-                "unreadable-file",
-                f"the {kind} could not be read: {error}",
-                exchange_segment=exchange_segment,
-                target_date=target_date,
-                path=path,
-            )
+        measurement = self._measure(
+            path,
+            kind,
+            exchange_segment=exchange_segment,
+            target_date=target_date,
+        )
+        if measurement is None:
             return
+        actual = measurement.sha256
         summary.digests_verified += 1
         if actual != recorded_digest:
             self._add(
@@ -495,19 +635,22 @@ class DatabaseAudit:
 
     # -------------------------------------------------------------- file scan
 
-    def _scan_published_folder(
-        self,
-        exchange: str,
-        segment: str,
-        recorded_dates: set[date],
-        summary: SegmentSummary,
-    ) -> None:
+    def _published_files(
+        self, exchange: str, segment: str
+    ) -> dict[date, Path]:
+        """Every file in one segment folder that matches the naming contract.
+
+        Anything else in the folder is reported here, because the folder is a
+        published interface: a leftover ``.tmp`` is an interrupted write, and
+        a stray file is something no consumer will ever read.
+        """
+
         exchange_segment = f"{exchange}_{segment}"
         folder = self.config.resolve_data_path(exchange, segment)
+        published: dict[date, Path] = {}
         if not folder.is_dir():
-            return
+            return published
         pattern = re.compile(DAILY_FILE_PATTERNS[exchange_segment])
-        earliest = min(recorded_dates) if recorded_dates else None
 
         for path in sorted(folder.iterdir()):
             if not path.is_file():
@@ -544,8 +687,17 @@ class DatabaseAudit:
                     path=path,
                 )
                 continue
+            published[file_date] = path
+        return published
 
-            summary.files += 1
+    def _report_unrecorded(
+        self,
+        exchange_segment: str,
+        published: dict[date, Path],
+        recorded_dates: set[date],
+    ) -> None:
+        earliest = min(recorded_dates) if recorded_dates else None
+        for file_date, path in sorted(published.items()):
             if file_date in recorded_dates:
                 continue
             if earliest is not None and file_date < earliest:
@@ -569,6 +721,237 @@ class DatabaseAudit:
                     path=path,
                 )
 
+    # --------------------------------------------------------------- coverage
+
+    def _configured_start(self) -> Optional[date]:
+        raw = getattr(self.config.date_settings, "base_start_date", None)
+        try:
+            return date.fromisoformat(str(raw))
+        except ValueError:
+            self._add(
+                ERROR,
+                "unusable-configuration",
+                f"base_start_date '{raw}' is not a date, so coverage cannot "
+                "be judged",
+            )
+            return None
+
+    @staticmethod
+    def _runs(expected: list[date], present: set[date]) -> list[list[date]]:
+        """Group absent dates into stretches of consecutive trading days.
+
+        One finding per stretch rather than per date: a head gap of a year is
+        one fact about the database, not two hundred and fifty of them.
+        """
+
+        runs: list[list[date]] = []
+        current: list[date] = []
+        for day in expected:
+            if day in present:
+                if current:
+                    runs.append(current)
+                    current = []
+                continue
+            current.append(day)
+        if current:
+            runs.append(current)
+        return runs
+
+    def _check_coverage(
+        self,
+        exchange_segment: str,
+        published: dict[date, Path],
+        entries: list[tuple[date, dict[str, Any]]],
+    ) -> None:
+        """Judge coverage against the configured start, not the first file.
+
+        ``get_missing_file_dates`` looks only *between* the first and last
+        filename on disk, so a truncated head and a stale tail are both
+        invisible to it.  This starts from ``base_start_date`` -- or from the
+        oldest file, when the owner has deliberately gone back further -- and
+        ends at the last session the exchanges have actually published.
+        """
+
+        if not published and not entries:
+            # A segment the owner does not download.  The audit cannot know
+            # which segments are wanted, so silence is the only honest answer.
+            return
+        configured = self._configured_start()
+        if configured is None:
+            return
+
+        floor = min([configured, *published]) if published else configured
+        ceiling = self.calendar.expected_last_trading_date()
+        if floor > ceiling:
+            return
+
+        for year in range(floor.year, ceiling.year + 1):
+            if not self.calendar.knows_year(year):
+                self._unknown_calendar_years.add(year)
+
+        expected = self.calendar.trading_days(floor, ceiling)
+        if not expected:
+            return
+
+        # A date the pipeline recorded is not a coverage question, whatever
+        # became of it: a settled absence is not a gap, a complete date is the
+        # digest check's to judge, and an unfinished one is reported below.
+        # Counting them here would report the same date twice.
+        accounted = set(published).union(
+            target_date for target_date, _record in entries
+        )
+        first_published = min(accounted) if accounted else None
+        last_published = max(accounted) if accounted else None
+
+        for run in self._runs(expected, accounted):
+            span = (
+                run[0].isoformat() if len(run) == 1
+                else f"{run[0].isoformat()} to {run[-1].isoformat()}"
+            )
+            if first_published is None:
+                self._add(
+                    WARNING,
+                    "missing-dates",
+                    f"{len(run)} expected trading day(s) ({span}) have no "
+                    "published file, and this segment has none at all",
+                    exchange_segment=exchange_segment,
+                )
+            elif run[-1] < first_published:
+                self._add(
+                    WARNING,
+                    "head-gap",
+                    f"the database starts at {first_published.isoformat()}, "
+                    f"leaving {len(run)} trading day(s) ({span}) between the "
+                    f"configured start and the oldest published file",
+                    exchange_segment=exchange_segment,
+                )
+            elif last_published is not None and run[0] > last_published:
+                # Freshness, not damage: the owner decides when to download.
+                self._add(
+                    NOTICE,
+                    "stale-tail",
+                    f"{len(run)} trading day(s) ({span}) since the newest "
+                    f"published file have not been downloaded",
+                    exchange_segment=exchange_segment,
+                )
+            else:
+                self._add(
+                    WARNING,
+                    "missing-dates",
+                    f"{len(run)} trading day(s) ({span}) inside the published "
+                    "range have no file",
+                    exchange_segment=exchange_segment,
+                )
+
+        unfinished = sorted(
+            target_date for target_date, record in entries
+            if not record.get("complete") and not record.get("skipped_reason")
+        )
+        if unfinished:
+            listed = ", ".join(day.isoformat() for day in unfinished[:5])
+            if len(unfinished) > 5:
+                listed += f", and {len(unfinished) - 5} more"
+            self._add(
+                WARNING,
+                "incomplete-date",
+                f"{len(unfinished)} date(s) never finished every required "
+                f"stage: {listed}",
+                exchange_segment=exchange_segment,
+            )
+
+    # -------------------------------------------------------------- row counts
+
+    @staticmethod
+    def _recorded_rows(record: dict[str, Any]) -> Optional[int]:
+        """The row count the writer recorded for the file it published.
+
+        The combined stage wins where it ran: for a deferred publication the
+        daily count describes the component, and the file on disk carries the
+        appended SME and Index rows as well.
+        """
+
+        stages = record.get("stages", {})
+        combined = stages.get("combined")
+        daily = stages.get("daily")
+        combined = combined if isinstance(combined, dict) else {}
+        daily = daily if isinstance(daily, dict) else {}
+        if combined.get("status") == "complete" and isinstance(
+            combined.get("rows"), int
+        ):
+            return int(combined["rows"])
+        if (
+            daily.get("status") == "complete"
+            and not daily.get("publication_deferred")
+            and isinstance(daily.get("rows"), int)
+        ):
+            return int(daily["rows"])
+        return None
+
+    def _check_row_counts(
+        self,
+        exchange_segment: str,
+        published: dict[date, Path],
+        entries: list[tuple[date, dict[str, Any]]],
+    ) -> None:
+        """Size every published file against its record and its neighbours.
+
+        The writer already bands a day against whatever sessions existed when
+        it was written, which for a backfill walking backwards is very few.
+        Judging again now, against the finished neighbourhood, is what makes a
+        truncated or placeholder day visible after the fact.  It is also the
+        only plausibility check available for files written before the
+        manifest existed, which carry no digest to compare.
+        """
+
+        recorded = {
+            target_date: rows
+            for target_date, record in entries
+            if (rows := self._recorded_rows(record)) is not None
+        }
+        on_disk: dict[date, int] = {}
+        for target_date, path in sorted(published.items()):
+            measurement = self._measure(
+                path,
+                "published file",
+                exchange_segment=exchange_segment,
+                target_date=target_date,
+            )
+            if measurement is None:
+                continue
+            on_disk[target_date] = measurement.rows
+            expected = recorded.get(target_date)
+            if expected is not None and expected != measurement.rows:
+                self._add(
+                    ERROR,
+                    "row-count-drift",
+                    f"the file holds {measurement.rows} rows but the pipeline "
+                    f"recorded {expected} when it published this date",
+                    exchange_segment=exchange_segment,
+                    target_date=target_date,
+                    path=path,
+                )
+
+        for target_date, rows in sorted(on_disk.items()):
+            neighbours = [
+                count for _distance, count in sorted(
+                    (abs((other - target_date).days), count)
+                    for other, count in on_disk.items()
+                    if other != target_date
+                    and abs((other - target_date).days)
+                    <= BAND_MAX_DISTANCE_DAYS
+                )[:BAND_SESSIONS]
+            ]
+            reason = row_count_band_error(rows, neighbours)
+            if reason is not None:
+                self._add(
+                    WARNING,
+                    "row-count-outlier",
+                    reason,
+                    exchange_segment=exchange_segment,
+                    target_date=target_date,
+                    path=published[target_date],
+                )
+
     # ------------------------------------------------------------------- entry
 
     def run(self) -> AuditReport:
@@ -577,6 +960,8 @@ class DatabaseAudit:
         self._findings = []
         self._notes = []
         self._relocated_reported = False
+        self._unknown_calendar_years = set()
+        self._measurements = {}
 
         self._note_running_instance()
         grouped = self._load_records()
@@ -599,17 +984,31 @@ class DatabaseAudit:
             exchange, segment = exchange_segment.split("_", 1)
             entries = grouped.get(exchange_segment, [])
             summary = SegmentSummary(exchange_segment, records=len(entries))
+            published = self._published_files(exchange, segment)
+            summary.files = len(published)
+
             for target_date, record in entries:
                 self._check_record_digests(
                     exchange, segment, target_date, record, summary
                 )
-            self._scan_published_folder(
-                exchange,
-                segment,
+            self._report_unrecorded(
+                exchange_segment,
+                published,
                 {target_date for target_date, _ in entries},
-                summary,
             )
+            self._check_coverage(exchange_segment, published, entries)
+            self._check_row_counts(exchange_segment, published, entries)
             summaries.append(summary)
+
+        if self._unknown_calendar_years:
+            years = ", ".join(
+                str(year) for year in sorted(self._unknown_calendar_years)
+            )
+            self._notes.append(
+                "no trading calendar is known for "
+                f"{years}, so holidays in those years cannot be told apart "
+                "from missing files; they were left out of the expected set."
+            )
 
         return AuditReport(
             base_data_path=self.base_data_path,

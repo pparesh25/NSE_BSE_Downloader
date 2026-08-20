@@ -981,3 +981,44 @@ def test_a_registry_naming_a_file_that_does_not_exist_is_reported(
     missing = _categories(report, "missing-registered-file")
     assert len(missing) == 1
     assert "gone.txt" in missing[0].message
+
+
+def test_two_files_claiming_one_date_are_reported(healthy):
+    config, published = healthy
+    published.with_suffix(".csv").write_text("SYMBOL,1,2,3\n", encoding="utf-8")
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    duplicates = _categories(report, "duplicate-published-file")
+    assert len(duplicates) == 1
+    assert duplicates[0].target_date == DAY
+
+
+def test_auditing_a_segment_that_feeds_no_history_skips_the_symbol_check(
+    symbols_root,
+):
+    # Someone asking about NSE futures did not ask about symbol histories,
+    # and reading 8,000 of them to answer would be its own kind of wrong.
+    _write_history(symbols_root, "NSE", "ghost.txt", [EARLIER])
+
+    futures = DatabaseAudit(symbols_root, ["NSE_FO"]).run()
+    equity = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert futures.symbols == ()
+    assert _categories(futures, "unaccounted-symbol-file") == []
+    assert len(_categories(equity, "unaccounted-symbol-file")) == 1
+
+
+def test_the_symbol_check_uses_every_snapshot_the_exchange_has(symbols_root):
+    """EQ and SME share one SYMBOLS folder, so half the snapshots is wrong."""
+
+    sme_day = DAY
+    _write_snapshot(
+        symbols_root, "NSE", "SME", sme_day, [("TINY", "INE000C01003", "3")]
+    )
+    _write_history(symbols_root, "NSE", "tiny.txt", [sme_day])
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert _categories(report, "unaccounted-symbol-file") == []
+    assert report.symbols[0].snapshots == 3

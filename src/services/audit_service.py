@@ -76,6 +76,14 @@ BAND_MAX_DISTANCE_DAYS = 180
 #: Read size for the single pass that produces both a digest and a row count.
 _READ_BLOCK = 1024 * 1024
 
+#: The longest run of closed days the calendar walk will step back over.  The
+#: exchanges have never closed for anything near this long.
+_MAX_CLOSED_RUN = 60
+
+#: Segments whose rows become symbol histories, and therefore the ones whose
+#: selection makes the ``SYMBOLS`` cross-check relevant.
+SYMBOL_BEARING_SEGMENTS = frozenset({"EQ", "SME"})
+
 #: How many individual dates or filenames one aggregated finding names before
 #: it falls back to a count.  A finding nobody can read is not a finding.
 _LISTED = 5
@@ -186,7 +194,11 @@ class OfflineTradingCalendar:
             return today
         if self.is_trading_day(today):
             current = today - timedelta(days=1)
-        while not self.is_trading_day(current):
+        # Bounded: a holiday cache that somehow marked every day a holiday
+        # would otherwise walk backwards for ever inside a diagnostic.
+        for _ in range(_MAX_CLOSED_RUN):
+            if self.is_trading_day(current):
+                return current
             current -= timedelta(days=1)
         return current
 
@@ -731,6 +743,17 @@ class DatabaseAudit:
                     path=path,
                 )
                 continue
+            if file_date in published:
+                self._add(
+                    WARNING,
+                    "duplicate-published-file",
+                    "two files claim this date, and which one a consumer "
+                    f"reads depends on the directory order: {path.name} and "
+                    f"{published[file_date].name}",
+                    exchange_segment=exchange_segment,
+                    target_date=file_date,
+                    path=path,
+                )
             published[file_date] = path
         return published
 
@@ -1184,7 +1207,17 @@ class DatabaseAudit:
             if payload is None:
                 continue
             bit = 1 << index[snapshot_date]
-            reader = csv.reader(payload.decode("utf-8").splitlines())
+            try:
+                decoded = payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                self._add(
+                    ERROR,
+                    "raw-schema-unknown",
+                    f"this raw snapshot is not readable as text: {error}",
+                    path=path,
+                )
+                continue
+            reader = csv.reader(decoded.splitlines())
             header = next(reader, None)
             if header is None:
                 continue
@@ -1532,12 +1565,21 @@ class DatabaseAudit:
             self._check_row_counts(exchange_segment, published, entries)
             summaries.append(summary)
 
+        # Every raw snapshot for the exchange is used, whichever of its
+        # segments was asked for -- EQ and SME write into one ``SYMBOLS``
+        # folder, so judging it from half the snapshots would report the other
+        # half's securities as unaccounted for.  Only the *trigger* narrows:
+        # someone auditing NSE_FO did not ask about symbol histories.
+        symbol_exchanges = sorted({
+            exchange for exchange, segment in (
+                value.split("_", 1) for value in self.segments
+            )
+            if segment in SYMBOL_BEARING_SEGMENTS
+        })
         symbol_summaries = [
             summary for summary in (
                 self._check_symbol_histories(exchange)
-                for exchange in sorted(
-                    {segment.split("_", 1)[0] for segment in self.segments}
-                )
+                for exchange in symbol_exchanges
             )
             if summary is not None
         ]

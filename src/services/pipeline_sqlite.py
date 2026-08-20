@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -370,3 +372,72 @@ class SQLitePipelineStore:
             return [date.fromisoformat(row["target_date"]) for row in rows]
         except (sqlite3.DatabaseError, ValueError) as error:
             self._raise_corruption(error)
+
+
+class ReadOnlyPipelineStore:
+    """Read pipeline records without touching the database or its directory.
+
+    Every other route into this database writes before it reads.
+    ``SQLitePipelineStore.__init__`` sets the journal mode, creates the tables
+    and inserts the schema version; ``PipelineManifest.__init__`` additionally
+    imports the legacy JSON and copies it aside; and a record that fails to
+    parse is quarantined, which is another write.  ``--audit`` must do none of
+    that: a report is only evidence about a database if producing it did not
+    change that database.
+
+    SQLite's own ``mode=ro`` is not sufficient, which was found by measuring
+    rather than by reading the documentation.  Opening the real data root that
+    way left ``pipeline_state.sqlite3-shm`` rewritten: a WAL database needs its
+    shared-memory index, and a read-only *connection* still creates and stamps
+    that file.  On a genuinely read-only medium it would fail outright.
+
+    So the database is copied to a temporary directory outside the data root
+    and the copy is opened.  The ``-wal`` file is copied after it, in that
+    order, because in WAL mode the main file only changes during a checkpoint;
+    the ``-shm`` file is deliberately *not* copied, since SQLite rebuilds it
+    from the WAL and a stale one is worse than none.  A copy torn by a
+    concurrent writer surfaces as a database error, which the caller reports
+    as "the audit could not look" rather than as a finding about the data.
+
+    Rows are returned exactly as stored.  Deciding what a malformed row means
+    is the caller's job, because for the audit a malformed row is a finding to
+    report rather than an error to raise.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def exists(self) -> bool:
+        return self.path.is_file()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with tempfile.TemporaryDirectory(prefix="nse-bse-audit-") as scratch:
+            copy = Path(scratch) / self.path.name
+            shutil.copy2(self.path, copy)
+            write_ahead_log = Path(f"{self.path}-wal")
+            if write_ahead_log.is_file():
+                shutil.copy2(write_ahead_log, Path(f"{copy}-wal"))
+            connection = sqlite3.connect(copy, timeout=30)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                yield connection
+            finally:
+                connection.close()
+
+    def raw_records(self) -> list[tuple[str, str]]:
+        """Return ``(record_key, record_json)`` pairs, oldest date first.
+
+        Raises ``sqlite3.DatabaseError`` if the file cannot be read at all;
+        that is a failure of the audit, not a finding about the data.
+        """
+
+        if not self.exists():
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT record_key, record_json FROM pipeline_dates "
+                "ORDER BY target_date, record_key"
+            ).fetchall()
+        return [(row["record_key"], row["record_json"]) for row in rows]

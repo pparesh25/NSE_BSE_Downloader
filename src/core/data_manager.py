@@ -20,6 +20,20 @@ from .exceptions import DataProcessingError, FileOperationError, DateRangeError
 from ..utils.date_utils import DateUtils
 
 
+#: The published filename contract, one pattern per exchange segment.  Kept at
+#: module scope so a read-only caller such as ``--audit`` can recognise a
+#: published file without constructing a ``DataManager``, whose ``__init__``
+#: creates the folder structure.
+DAILY_FILE_PATTERNS = {
+    'NSE_EQ': r'(\d{4}-\d{2}-\d{2})-NSE-EQ\.(?:txt|csv)',
+    'NSE_FO': r'(\d{4}-\d{2}-\d{2})-NSE-FO\.(?:txt|csv)',
+    'NSE_SME': r'(\d{4}-\d{2}-\d{2})-NSE-SME\.(?:txt|csv)',
+    'NSE_INDEX': r'(\d{4}-\d{2}-\d{2})-NSE-INDEX\.(?:txt|csv)',
+    'BSE_EQ': r'(\d{4}-\d{2}-\d{2})-BSE-EQ\.(?:txt|csv)',
+    'BSE_INDEX': r'(\d{4}-\d{2}-\d{2})-BSE-INDEX\.(?:txt|csv)',
+}
+
+
 class DataManager:
     """
     Centralized data management system
@@ -41,14 +55,7 @@ class DataManager:
         self._expected_row_cache: Dict[tuple[str, str], Dict[date, int]] = {}
 
         # Date patterns for different exchanges
-        self.date_patterns = {
-            'NSE_EQ': r'(\d{4}-\d{2}-\d{2})-NSE-EQ\.(?:txt|csv)',
-            'NSE_FO': r'(\d{4}-\d{2}-\d{2})-NSE-FO\.(?:txt|csv)',
-            'NSE_SME': r'(\d{4}-\d{2}-\d{2})-NSE-SME\.(?:txt|csv)',
-            'NSE_INDEX': r'(\d{4}-\d{2}-\d{2})-NSE-INDEX\.(?:txt|csv)',
-            'BSE_EQ': r'(\d{4}-\d{2}-\d{2})-BSE-EQ\.(?:txt|csv)',
-            'BSE_INDEX': r'(\d{4}-\d{2}-\d{2})-BSE-INDEX\.(?:txt|csv)',
-        }
+        self.date_patterns = dict(DAILY_FILE_PATTERNS)
         self._ensure_folder_structure()
 
     def is_trading_day(

@@ -286,6 +286,31 @@ class Config:
 
         return self._exchange_configs[exchange][segment]
 
+    def resolve_data_path(self, exchange: str, segment: str) -> Path:
+        """Return the folder for one segment without creating anything.
+
+        ``get_data_path`` creates the folder as a side effect of being asked
+        where it is, which a read-only caller such as ``--audit`` must not do:
+        a report is only evidence about the database if producing it did not
+        change the database.
+
+        Args:
+            exchange: Exchange name
+            segment: Segment name
+
+        Returns:
+            Path object for data storage, which may not exist
+        """
+        exchange_paths = self._config_data.get('data_paths', {}).get('exchanges', {})
+
+        if exchange in exchange_paths and segment in exchange_paths[exchange]:
+            relative_path = exchange_paths[exchange][segment]
+        else:
+            # Default path structure
+            relative_path = f"{exchange}/{segment}"
+
+        return self.base_data_path / relative_path
+
     def get_data_path(self, exchange: str, segment: str) -> Path:
         """
         Get data storage path for specific exchange and segment
@@ -297,15 +322,7 @@ class Config:
         Returns:
             Path object for data storage
         """
-        exchange_paths = self._config_data.get('data_paths', {}).get('exchanges', {})
-
-        if exchange in exchange_paths and segment in exchange_paths[exchange]:
-            relative_path = exchange_paths[exchange][segment]
-        else:
-            # Default path structure
-            relative_path = f"{exchange}/{segment}"
-
-        data_path = self.base_data_path / relative_path
+        data_path = self.resolve_data_path(exchange, segment)
         data_path.mkdir(parents=True, exist_ok=True)
 
         return data_path

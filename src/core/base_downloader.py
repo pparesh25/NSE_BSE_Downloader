@@ -21,6 +21,7 @@ from .config import Config
 from .data_manager import DataManager
 from .exceptions import DataProcessingError, FileOperationError
 from ..services.combined_file_builder import CombinedFileBuilder
+from ..services.eod_store import SUPPORTED_SEGMENTS, EodStore
 from ..services.pipeline_state import PipelineManifest, SegmentResult
 from ..services.settings import SettingsService
 
@@ -429,6 +430,71 @@ class BaseDownloader(ABC):
                 f"{self.exchange_segment} {target_date} rejected: {reason}"
             )
 
+    def _eod_store(self) -> Optional[EodStore]:
+        """Return this run's EOD database, or ``None`` when dual-write is off.
+
+        Built on demand and cached on the config rather than wired up by the
+        GUI, so the CLI repair paths get it too and there is nothing to tear
+        down: the store opens a connection per call and holds none between
+        them.
+        """
+
+        if not self.get_download_option("dual_write_eod_database", True):
+            return None
+        store = getattr(self.config, "eod_store", None)
+        if store is None:
+            state_path = self.config.base_data_path / ".state"
+            store = EodStore(
+                state_path / "eod.sqlite3", state_path / "quarantine"
+            )
+            self.config.eod_store = store
+        return store
+
+    def _dual_write_eod(self, target_date: date, df: pd.DataFrame) -> None:
+        """Mirror one published frame into the EOD database.
+
+        Phase 5 step 1.  **Nothing reads this database yet**, so a failure here
+        must not fail a date whose text files are correct: it is logged and the
+        run continues.  When step 3 makes the database the publication source,
+        this becomes a hard failure instead.
+
+        For ``EQ`` and ``SME`` the internal frame is written rather than the
+        public one, because it is the only one carrying ``SERIES``, ``ISIN``
+        and ``SECURITY_ID`` -- the columns that let a rename be recognised
+        later.  ``INDEX`` and ``FO`` publish no identity at all, so their
+        public frame is all there is.
+
+        Rows are stored per segment, not per published file.  A combined
+        ``NSE/EQ`` file also carries appended SME and index rows, so
+        regenerating it is a union of segments rather than one query; that
+        belongs to the export step, which is where the append options are
+        already modelled.
+        """
+
+        if self.segment not in SUPPORTED_SEGMENTS:
+            return
+        try:
+            store = self._eod_store()
+            if store is None:
+                return
+            internal = getattr(self, "_internal_equity_data", None)
+            frame = (
+                internal
+                if internal is not None and self.segment in {"EQ", "SME"}
+                else df
+            )
+            rows = store.upsert_frame(self.exchange, self.segment, frame)
+            self.logger.info(
+                "Mirrored %s %s %s rows into the EOD database",
+                rows, self.exchange_segment, target_date,
+            )
+        except Exception as error:
+            self.logger.error(
+                "EOD dual-write failed for %s %s; the published files are "
+                "unaffected: %s",
+                self.exchange_segment, target_date, error,
+            )
+
     def _combined_builder(self) -> CombinedFileBuilder:
         """Return the persisted-component builder for lightweight subclasses."""
 
@@ -661,6 +727,7 @@ class BaseDownloader(ABC):
                 **component_metadata,
             )
             self._record_delivery_match(target_date)
+            self._dual_write_eod(target_date, df)
 
             coordinator = getattr(self.config, "date_join_coordinator", None)
             if coordinator is not None and component is not None:

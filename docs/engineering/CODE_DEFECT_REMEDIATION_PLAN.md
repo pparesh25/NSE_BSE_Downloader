@@ -1663,6 +1663,26 @@ finish a backfill; this is the durable fix, and it should be built against a cod
 whose correctness defects are already closed. **That precondition was met on
 2026-08-08**, when 3.5 closed Phase 3.
 
+The migration is four independently shippable steps, from §7 of the review:
+
+- [x] **1. Dual-write — done 2026-08-20.** `src/services/eod_store.py` mirrors every
+      published frame into `.state/eod.sqlite3` from the canonical frames already in
+      memory. Nothing reads it, a write failure is logged rather than raised, and
+      `dual_write_eod_database` turns it off. Measuring the real tree before writing
+      the schema corrected the key proposed in the review — neither `SECURITY_ID` nor
+      `ISIN` alone identifies a security — and found that a clustered table without
+      statistics silently scans every date an exchange ever published. Evidence:
+      [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md).
+- [ ] **2. Prove parity.** `export_daily(date)` / `export_symbol(symbol)` regenerate
+      text from the database; re-export and SHA-diff against the existing files. Needs
+      a populated database, so seeding it from the 84 existing `.state/raw` snapshots
+      is its natural first task.
+- [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
+      7,426-files-per-run cost dies and appending one day stops rewriting the store.
+      Consumers still see identical `.txt` files at identical paths.
+- [ ] **4. Retire the redundant copies.** Once parity holds for one release, make
+      `.state/raw` snapshots optional and drop `.state/backups/history`.
+
 ---
 
 ## Sequencing
@@ -1687,7 +1707,8 @@ Phase 4  verifiability           ← done.  4.1 --audit answers "can I trust
                                    was closed as "will not do"; 4.3 logging
    ↓
 Phase 5  storage model           ← the durable fix, built on a correct base.
-                                   The only phase still open.
+                                   The only phase still open.  Step 1 of 4
+                                   (dual-write) done 2026-08-20.
 ```
 
 Phases 1 and 3 can proceed in parallel if convenient — they touch disjoint files.

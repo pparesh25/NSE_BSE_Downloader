@@ -59,6 +59,10 @@ class UserPreferences:
                 "include_fo_open_interest": True,
                 "generate_symbol_files": True,
                 "apply_corporate_actions": True,
+                # Phase 5 step 1.  Mirrors every published frame into
+                # ``.state/eod.sqlite3``.  Nothing reads that database yet, so
+                # turning this off costs nothing but the mirror.
+                "dual_write_eod_database": True,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,

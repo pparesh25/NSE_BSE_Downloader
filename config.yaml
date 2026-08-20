@@ -66,6 +66,12 @@ download_options:
   generate_symbol_files: true
   apply_corporate_actions: true
 
+  # Phase 5 step 1: write every published frame into .state/eod.sqlite3 as
+  # well as to the text files.  Nothing reads that database yet -- the text
+  # files remain the system of record -- so this can be turned off at any
+  # time and the only loss is the mirror.
+  dual_write_eod_database: true
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 

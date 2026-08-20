@@ -40,6 +40,7 @@ formatting alone; three of the older audits are largely in Gujarati for that rea
 |---|---|
 | [CODE_REVIEW_REMEDIATION_PLAN.md](CODE_REVIEW_REMEDIATION_PLAN.md) | Findings from a full code review and their fixes |
 | [DOWNLOAD_PIPELINE_ARCHITECTURE_PLAN.md](DOWNLOAD_PIPELINE_ARCHITECTURE_PLAN.md) | Evidence-based audit behind the Phase 7 pipeline work |
+| [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md) | Phase 5 step 1: the dual-written EOD database and what measuring changed |
 | [BSE_SME_STARTUP_SUFFIX_FINDINGS.md](BSE_SME_STARTUP_SUFFIX_FINDINGS.md) | BSE SME/Startup group classification research |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Original unified-downloader implementation plan |
 

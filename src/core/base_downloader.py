@@ -127,6 +127,10 @@ class BaseDownloader(ABC):
         self.combined_builder = CombinedFileBuilder(config)
         self.settings = SettingsService(config)
         self.pipeline_manifest = PipelineManifest(config.base_data_path)
+        #: How much of each date's delivery report actually joined.  Measured
+        #: in the transform and recorded when the date publishes, because the
+        #: delivery stage is marked complete long before the join happens.
+        self._delivery_matches: dict[date, tuple[int, int]] = {}
         self.last_segment_result: Optional[SegmentResult] = None
 
         # Get exchange-specific configuration
@@ -507,6 +511,49 @@ class BaseDownloader(ABC):
             )
         return [target_date for target_date, _ in settled]
 
+    def note_delivery_match(self, target_date: date, frame) -> None:
+        """Remember how much of this date's delivery report joined.
+
+        Called by the cash downloaders straight after the join, since only
+        they hold the merged frame; recorded against the pipeline when the
+        date publishes.
+        """
+
+        from ..services.canonical_data import delivery_match
+
+        matches = getattr(self, "_delivery_matches", None)
+        if matches is None:
+            matches = {}
+            self._delivery_matches = matches
+        matches[target_date] = delivery_match(frame)
+
+    def _record_delivery_match(self, target_date: date) -> None:
+        """Put the measured match rate beside the delivery report's digest."""
+
+        matches = getattr(self, "_delivery_matches", None)
+        if not matches:
+            return
+        measured = matches.pop(target_date, None)
+        if measured is None:
+            return
+        matched, rows = measured
+        try:
+            self._pipeline().annotate(
+                self.exchange,
+                self.segment,
+                target_date,
+                "delivery",
+                matched_rows=matched,
+                joined_rows=rows,
+                match_rate=round(matched / rows, 4) if rows else 0.0,
+            )
+        except Exception as error:  # pragma: no cover - defensive
+            # Telemetry must never cost a published date.
+            self.logger.warning(
+                "Could not record the delivery match rate for %s %s: %s",
+                self.exchange_segment, target_date, error,
+            )
+
     def _quarantine_download_payload(
         self, payload: Optional[bytes], target_date: date, label: str
     ) -> Optional[Path]:
@@ -599,6 +646,7 @@ class BaseDownloader(ABC):
                 publication_deferred=publication_deferred,
                 **component_metadata,
             )
+            self._record_delivery_match(target_date)
 
             coordinator = getattr(self.config, "date_join_coordinator", None)
             if coordinator is not None and component is not None:

@@ -860,6 +860,24 @@ def merge_delivery(
     return _finalize_equity(result)
 
 
+def delivery_match(frame: pd.DataFrame) -> tuple[int, int]:
+    """How many published rows the delivery join actually reached.
+
+    The delivery stage is marked complete the moment the report downloads,
+    which says nothing about whether a single row of it joined.  An exchange
+    that renames a series or changes a scrip code produces a report that
+    downloads perfectly and matches nothing, and until this was measured that
+    date published with every delivery field empty and no complaint anywhere.
+    """
+
+    if "DELIVERY_QTY" not in frame.columns:
+        return 0, len(frame)
+    matched = int(
+        pd.to_numeric(frame["DELIVERY_QTY"], errors="coerce").notna().sum()
+    )
+    return matched, len(frame)
+
+
 def _roman(value: int) -> str:
     values = (
         (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),

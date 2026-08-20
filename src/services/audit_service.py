@@ -31,6 +31,7 @@ import os
 import re
 import socket
 import sqlite3
+import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -42,6 +43,7 @@ from ..utils import holiday_calendar
 from ..utils.date_utils import DateUtils
 from .canonical_data import (
     BAND_SESSIONS,
+    MIN_BAND_SESSIONS,
     LEGACY_SYMBOL_HISTORY_COLUMNS,
     PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
@@ -1107,6 +1109,65 @@ class DatabaseAudit:
                     path=published[target_date],
                 )
 
+    # -------------------------------------------------------- delivery joins
+
+    #: A date whose delivery report joined less than this share of what its
+    #: neighbours managed did not really deliver, whatever its HTTP status.
+    DELIVERY_DROP = 0.5
+
+    def _check_delivery_match(
+        self,
+        exchange_segment: str,
+        entries: list[tuple[date, dict[str, Any]]],
+    ) -> None:
+        """Find dates whose delivery report downloaded but did not join.
+
+        The stage is marked complete on HTTP success, before the join.  An
+        exchange that renames a series or changes a scrip code publishes a
+        report that downloads perfectly and matches nothing, and every
+        delivery field for that date is then quietly empty.  As with row
+        counts, the judgement is against the neighbouring sessions rather than
+        a fixed threshold: what a healthy match rate looks like is a property
+        of the segment and the era, not a number to guess.
+        """
+
+        rates: dict[date, float] = {}
+        for target_date, record in entries:
+            stage = record.get("stages", {}).get("delivery")
+            if not isinstance(stage, dict) or stage.get("status") != "complete":
+                continue
+            rate = stage.get("match_rate")
+            joined = stage.get("joined_rows")
+            if isinstance(rate, (int, float)) and isinstance(joined, int) and joined > 0:
+                rates[target_date] = float(rate)
+        if len(rates) <= MIN_BAND_SESSIONS:
+            return
+
+        for target_date, rate in sorted(rates.items()):
+            neighbours = [
+                value for _distance, value in sorted(
+                    (abs((other - target_date).days), value)
+                    for other, value in rates.items()
+                    if other != target_date
+                    and abs((other - target_date).days)
+                    <= BAND_MAX_DISTANCE_DAYS
+                )[:BAND_SESSIONS]
+            ]
+            if len(neighbours) < MIN_BAND_SESSIONS:
+                continue
+            median = statistics.median(neighbours)
+            if median <= 0 or rate >= median * self.DELIVERY_DROP:
+                continue
+            self._add(
+                WARNING,
+                "delivery-match-drop",
+                f"the delivery report joined {rate:.0%} of this date's rows "
+                f"where the {len(neighbours)} nearest sessions averaged "
+                f"{median:.0%}; it downloaded but did not match",
+                exchange_segment=exchange_segment,
+                target_date=target_date,
+            )
+
     # ----------------------------------------------------------- symbol files
 
     def _registry(self) -> dict[str, Any]:
@@ -1656,6 +1717,7 @@ class DatabaseAudit:
             self._check_schema_marker(exchange, segment, published)
             self._check_coverage(exchange_segment, published, entries)
             self._check_row_counts(exchange_segment, published, entries)
+            self._check_delivery_match(exchange_segment, entries)
             summaries.append(summary)
 
         # Every raw snapshot for the exchange is used, whichever of its

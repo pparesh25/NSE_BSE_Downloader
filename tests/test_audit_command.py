@@ -1106,3 +1106,87 @@ def test_the_marker_itself_is_not_reported_as_a_stray_file(healthy):
 
     assert _categories(report, "unrecognised-file") == []
     assert report.findings == ()
+
+
+def _record_with_delivery(base, day, path, *, matched, rows):
+    """One complete EQ date whose delivery report joined `matched` of `rows`."""
+
+    manifest = PipelineManifest(base)
+    manifest.begin(
+        "NSE",
+        "EQ",
+        day,
+        ("downloaded", "validated", "daily", "delivery"),
+        ("symbols", "actions", "combined"),
+    )
+    manifest.mark("NSE", "EQ", day, "downloaded", "complete")
+    manifest.mark("NSE", "EQ", day, "validated", "complete", rows=rows)
+    manifest.mark("NSE", "EQ", day, "delivery", "complete", sha256="a" * 64)
+    manifest.mark(
+        "NSE", "EQ", day, "daily", "complete",
+        path=str(path), sha256=_digest(path), rows=rows,
+    )
+    manifest.annotate(
+        "NSE", "EQ", day, "delivery",
+        matched_rows=matched, joined_rows=rows,
+        match_rate=round(matched / rows, 4),
+    )
+
+
+def test_a_delivery_report_that_downloaded_but_did_not_join_is_caught(
+    tmp_path,
+):
+    """The stage is marked complete on HTTP success, before the join."""
+
+    config = _config(date(2026, 7, 20))
+    days = [date(2026, 7, day) for day in (20, 21, 22, 23, 24, 27, 28, 29, 30)]
+    for day in days:
+        published = _publish(config, "EQ", day, ROW * 10)
+        matched = 1 if day == date(2026, 7, 28) else 10
+        _record_with_delivery(
+            config.base_data_path, day, published, matched=matched, rows=10
+        )
+
+    report = DatabaseAudit(config, ["NSE_EQ"]).run()
+
+    drops = _categories(report, "delivery-match-drop")
+    assert len(drops) == 1
+    assert drops[0].target_date == date(2026, 7, 28)
+    assert "10%" in drops[0].message
+    assert report.failed
+
+
+def test_a_steady_delivery_match_rate_is_not_reported(tmp_path):
+    config = _config(date(2026, 7, 20))
+    for day in [date(2026, 7, d) for d in (20, 21, 22, 23, 24, 27, 28, 29, 30)]:
+        published = _publish(config, "EQ", day, ROW * 10)
+        _record_with_delivery(
+            config.base_data_path, day, published, matched=9, rows=10
+        )
+
+    report = DatabaseAudit(config, ["NSE_EQ"]).run()
+
+    assert _categories(report, "delivery-match-drop") == []
+
+
+def test_dates_recorded_before_the_match_rate_existed_are_skipped(tmp_path):
+    config = _config(date(2026, 7, 20))
+    for day in [date(2026, 7, d) for d in (20, 21, 22, 23, 24, 27, 28, 29, 30)]:
+        published = _publish(config, "EQ", day, ROW * 10)
+        manifest = PipelineManifest(config.base_data_path)
+        manifest.begin(
+            "NSE", "EQ", day,
+            ("downloaded", "validated", "daily", "delivery"),
+            ("symbols", "actions", "combined"),
+        )
+        for stage in ("downloaded", "validated", "delivery"):
+            manifest.mark("NSE", "EQ", day, stage, "complete")
+        manifest.mark(
+            "NSE", "EQ", day, "daily", "complete",
+            path=str(published), sha256=_digest(published), rows=10,
+        )
+
+    report = DatabaseAudit(config, ["NSE_EQ"]).run()
+
+    assert _categories(report, "delivery-match-drop") == []
+    assert not report.failed

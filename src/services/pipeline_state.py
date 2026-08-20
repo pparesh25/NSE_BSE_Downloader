@@ -286,6 +286,44 @@ class PipelineManifest:
                 (key for key, _, _, _ in keyed), update
             )
 
+    def annotate(
+        self,
+        exchange: str,
+        segment: str,
+        target_date: date,
+        stage: str,
+        **metadata: Any,
+    ) -> None:
+        """Add measurements to a stage that has already been recorded.
+
+        ``mark`` replaces a stage record, which is right for a transition and
+        wrong for a measurement that can only be taken later: the delivery
+        report's digest is known when it downloads, but how much of it
+        actually joined is known only after the join.  Merging keeps both
+        without one erasing the other.
+        """
+
+        if stage not in PIPELINE_STAGES:
+            raise ValueError(f"Unknown pipeline stage: {stage}")
+        key = self._key(exchange, segment, target_date)
+
+        def update(records: dict[str, Optional[dict[str, Any]]]) -> None:
+            record = records[key]
+            if record is None:
+                return
+            stage_record = record["stages"].get(stage)
+            if not isinstance(stage_record, dict) or not stage_record:
+                return
+            for name, value in metadata.items():
+                if value is not None:
+                    stage_record[name] = value
+            stage_record["updated_at"] = self._timestamp()
+            record["stages"][stage] = stage_record
+            self._refresh(record)
+
+        with self._lock:
+            self._state.update_records((key,), update)
+
     def has_date(
         self, exchange: str, segment: str, target_date: date
     ) -> bool:

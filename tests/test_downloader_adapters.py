@@ -228,3 +228,66 @@ def test_cash_adapters_delegate_to_shared_delivery_pipeline():
         downloader._download_equity_implementation = shared
         assert asyncio.run(downloader._download_implementation([day]))
         assert calls == [day]
+
+
+def test_a_delivery_report_that_joins_nothing_is_measured_not_assumed():
+    """The delivery stage is marked complete on HTTP success, before the join.
+
+    A report that downloads perfectly and matches nothing used to publish a
+    date with every delivery field empty and no complaint anywhere.
+    """
+
+    day = date(2024, 7, 8)
+    price = (
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123,11000,10\n"
+        "2024-07-08,DEF,EQ,10,12,9,11,1000,20,INEDEF000009,124,11000,10\n"
+    ).encode()
+    joins = (
+        "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "ABC,EQ,20,600,60\n"
+        "DEF,EQ,20,600,60\n"
+    ).encode()
+    misses = (
+        "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "RENAMED,EQ,20,600,60\n"
+    ).encode()
+
+    matched = _bare(NSEEQDownloader, include_delivery_data=True)
+    matched.process_downloaded_data(price, day, joins)
+    assert matched._delivery_matches[day] == (2, 2)
+
+    unmatched = _bare(NSEEQDownloader, include_delivery_data=True)
+    unmatched.process_downloaded_data(price, day, misses)
+    assert unmatched._delivery_matches[day] == (0, 2)
+
+
+def test_the_measured_rate_is_recorded_without_losing_the_digest(tmp_path):
+    from src.services.pipeline_state import PipelineManifest
+
+    day = date(2024, 7, 8)
+    manifest = PipelineManifest(tmp_path)
+    manifest.begin(
+        "NSE", "EQ", day,
+        ("downloaded", "validated", "daily", "delivery"),
+        ("symbols", "actions", "combined"),
+    )
+    manifest.mark("NSE", "EQ", day, "delivery", "complete", sha256="b" * 64)
+
+    downloader = _bare(NSEEQDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "EQ"
+    downloader.exchange_segment = "NSE_EQ"
+    downloader.pipeline_manifest = manifest
+    downloader._delivery_matches = {day: (3, 4)}
+
+    downloader._record_delivery_match(day)
+
+    stage = manifest.manifest_data()["dates"]["NSE_EQ:2024-07-08"]["stages"]
+    assert stage["delivery"]["sha256"] == "b" * 64
+    assert stage["delivery"]["status"] == "complete"
+    assert stage["delivery"]["matched_rows"] == 3
+    assert stage["delivery"]["joined_rows"] == 4
+    assert stage["delivery"]["match_rate"] == 0.75

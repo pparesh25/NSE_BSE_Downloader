@@ -32,6 +32,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
 - A read-only `--audit` command that verifies digests, coverage, row counts and
   symbol histories without changing a single byte of the data folder.
+- Turnover and previous close from every supported report era, normalised to rupees,
+  with a per-segment schema marker beside the data.
 - Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
@@ -43,6 +45,14 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Automatic/manual version checks, remembered skipped versions and a reset action.
 
 Daily bhavcopy files remain official unadjusted market records. Corporate-action adjustments are applied only to symbol-wise histories.
+
+Every file carries `TURNOVER` and `PREV_CLOSE` as its last two columns, in rupees —
+NSE publishes F&O turnover in lakhs before 2024-07-08 and index turnover in crores, and
+both are converted. Where an exchange publishes neither (BSE index turnover, NSE F&O
+previous close before 2024-07-08, NSE index previous close) the field is left empty
+rather than zero. Daily files stay headerless; each segment folder carries a
+`SCHEMA.json` naming the columns of every width this application has published, so a
+file can be read by counting its columns and looking the width up.
 
 ## Installation
 

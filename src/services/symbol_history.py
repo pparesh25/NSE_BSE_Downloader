@@ -14,7 +14,10 @@ from typing import Any, Callable, Iterable, List, Optional, Sequence
 import pandas as pd
 
 from .canonical_data import (
+    EXTENDED_MARKET_COLUMNS,
     INTERNAL_EQUITY_COLUMNS,
+    PRE_EXTENDED_INTERNAL_EQUITY_COLUMNS,
+    PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
     ISIN_PATTERN,
     LEGACY_SYMBOL_HISTORY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
@@ -419,11 +422,24 @@ class SymbolHistoryStore:
 
     @staticmethod
     def _upgrade_legacy_history(frame: pd.DataFrame) -> pd.DataFrame:
-        """Bring a pre-ISIN 11-column history up to the current schema."""
+        """Bring an older history up to the current schema, in order.
 
-        if list(frame.columns) == LEGACY_SYMBOL_HISTORY_COLUMNS:
+        Two generations precede the current one: the pre-ISIN eleven-column
+        file, and the twelve-column file written before turnover and previous
+        close existed.  Both upgrade by adding empty columns, because an empty
+        field says "this file was written before the exchange value was
+        collected" while a zero would claim the session had no turnover.
+        """
+
+        columns = list(frame.columns)
+        if columns == LEGACY_SYMBOL_HISTORY_COLUMNS:
             frame = frame.copy()
             frame["ISIN"] = ""
+            columns = list(frame.columns)
+        if columns == PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS:
+            frame = frame.copy()
+            for column in EXTENDED_MARKET_COLUMNS:
+                frame[column] = ""
         return frame
 
     @staticmethod
@@ -839,7 +855,16 @@ class SymbolHistoryStore:
         path = Path(path)
         try:
             frame = pd.read_csv(path, dtype=str)
-            if list(frame.columns) != INTERNAL_EQUITY_COLUMNS:
+            columns = list(frame.columns)
+            if columns == PRE_EXTENDED_INTERNAL_EQUITY_COLUMNS:
+                # Written before turnover and previous close were collected.
+                # Refusing it would send every snapshot already on disk to
+                # quarantine the first time a rebuild ran, and the snapshots
+                # are the only thing a rebuild has to work from.
+                for column in EXTENDED_MARKET_COLUMNS:
+                    frame[column] = pd.NA
+                frame = frame.loc[:, INTERNAL_EQUITY_COLUMNS]
+            elif columns != INTERNAL_EQUITY_COLUMNS:
                 raise ValueError("raw snapshot schema mismatch")
             actual_digest = file_sha256(path)
             metadata_path = path.with_suffix(".csv.meta.json")

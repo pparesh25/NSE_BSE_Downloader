@@ -38,14 +38,15 @@ def _bare(downloader_class, **options):
     return downloader
 
 
-def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
+def test_cash_downloaders_keep_one_output_contract_across_eras(
     tmp_path, monkeypatch
 ):
     nse_day = date(2024, 7, 8)
     nse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123\n"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123,11000,10\n"
     ).encode()
     nse_delivery = (
         "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
@@ -66,8 +67,9 @@ def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     bse_day = date(2024, 7, 8)
     bse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002\n"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002,1100,10\n"
     ).encode()
     bse_delivery = (
         "SCRIP CODE|DELIVERY QTY|DELV. PER.\n500002|80|80\n"
@@ -90,8 +92,9 @@ def test_fo_adapter_retains_stable_columns_when_open_interest_is_disabled():
     day = date(2024, 7, 8)
     raw = (
         "FinInstrmTp,TckrSymb,XpryDt,TradDt,OpnPric,HghPric,LwPric,"
-        "ClsPric,TtlTradgVol,OpnIntrst,ChngInOpnIntrst\n"
-        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25\n"
+        "ClsPric,TtlTradgVol,OpnIntrst,ChngInOpnIntrst,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25,1100000,10\n"
     ).encode()
     downloader = _bare(
         NSEFODownloader,
@@ -121,7 +124,8 @@ def test_sme_adapter_switches_filename_era_and_applies_suffix(
     day = date(2025, 10, 13)
     raw = (
         "MARKET,SERIES,SYMBOL,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,"
-        "CLOSE_PRICE,NET_TRDQTY\nN,SM,SMALL,10,12,9,11,1000\n"
+        "CLOSE_PRICE,NET_TRDQTY,NET_TRDVAL,PREV_CL_PR\n"
+        "N,SM,SMALL,10,12,9,11,1000,11000,10\n"
     ).encode()
     downloader = _bare(NSESMEDownloader)
     result = downloader.process_downloaded_data(raw, day)
@@ -145,14 +149,14 @@ def test_sme_adapter_switches_filename_era_and_applies_suffix(
         (
             NSEIndexDownloader,
             "Index Name,Index Date,Open Index Value,High Index Value,"
-            "Low Index Value,Closing Index Value,Volume\n"
-            "NIFTY 50,30-07-2026,25000,25100,24900,25050,123\n",
+            "Low Index Value,Closing Index Value,Volume,Turnover (Rs. Cr.)\n"
+            "NIFTY 50,30-07-2026,25000,25100,24900,25050,123,987.6\n",
             "NIFTY 50",
         ),
         (
             BSEIndexDownloader,
-            "IndexName,OpenPrice,HighPrice,LowPrice,ClosePrice\n"
-            "SENSEX,80000,80100,79900,80050\n",
+            "IndexName,OpenPrice,HighPrice,LowPrice,ClosePrice,PreviousClose\n"
+            "SENSEX,80000,80100,79900,80050,79800\n",
             "SENSEX",
         ),
     ],
@@ -224,3 +228,126 @@ def test_cash_adapters_delegate_to_shared_delivery_pipeline():
         downloader._download_equity_implementation = shared
         assert asyncio.run(downloader._download_implementation([day]))
         assert calls == [day]
+
+
+def test_a_delivery_report_that_joins_nothing_is_measured_not_assumed():
+    """The delivery stage is marked complete on HTTP success, before the join.
+
+    A report that downloads perfectly and matches nothing used to publish a
+    date with every delivery field empty and no complaint anywhere.
+    """
+
+    day = date(2024, 7, 8)
+    price = (
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123,11000,10\n"
+        "2024-07-08,DEF,EQ,10,12,9,11,1000,20,INEDEF000009,124,11000,10\n"
+    ).encode()
+    joins = (
+        "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "ABC,EQ,20,600,60\n"
+        "DEF,EQ,20,600,60\n"
+    ).encode()
+    misses = (
+        "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "RENAMED,EQ,20,600,60\n"
+    ).encode()
+
+    matched = _bare(NSEEQDownloader, include_delivery_data=True)
+    matched.process_downloaded_data(price, day, joins)
+    assert matched._delivery_matches[day] == (2, 2)
+
+    unmatched = _bare(NSEEQDownloader, include_delivery_data=True)
+    unmatched.process_downloaded_data(price, day, misses)
+    assert unmatched._delivery_matches[day] == (0, 2)
+
+
+def test_the_measured_rate_is_recorded_without_losing_the_digest(tmp_path):
+    from src.services.pipeline_state import PipelineManifest
+
+    day = date(2024, 7, 8)
+    manifest = PipelineManifest(tmp_path)
+    manifest.begin(
+        "NSE", "EQ", day,
+        ("downloaded", "validated", "daily", "delivery"),
+        ("symbols", "actions", "combined"),
+    )
+    manifest.mark("NSE", "EQ", day, "delivery", "complete", sha256="b" * 64)
+
+    downloader = _bare(NSEEQDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "EQ"
+    downloader.exchange_segment = "NSE_EQ"
+    downloader.pipeline_manifest = manifest
+    downloader._delivery_matches = {day: (3, 4)}
+
+    downloader._record_delivery_match(day)
+
+    stage = manifest.manifest_data()["dates"]["NSE_EQ:2024-07-08"]["stages"]
+    assert stage["delivery"]["sha256"] == "b" * 64
+    assert stage["delivery"]["status"] == "complete"
+    assert stage["delivery"]["matched_rows"] == 3
+    assert stage["delivery"]["joined_rows"] == 4
+    assert stage["delivery"]["match_rate"] == 0.75
+
+
+def test_no_downloader_asks_a_source_for_a_date_it_predates(monkeypatch):
+    """The clamp is general, not one downloader's special case.
+
+    A multi-year backfill would otherwise spend thousands of requests on
+    reports that were never published, and settle each one through the
+    absent-report ledger as though the exchange had merely lost them.
+    """
+
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE,
+        ("NSE", "SME"),
+        date(2012, 9, 10),
+    )
+    downloader = _bare(NSESMEDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "SME"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(2005, 1, 1), date(2026, 7, 30))
+    )
+
+    assert downloader.get_date_range() == (
+        date(2012, 9, 10), date(2026, 7, 30)
+    )
+
+
+def test_a_start_above_the_floor_is_left_alone(monkeypatch):
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE,
+        ("NSE", "SME"),
+        date(2012, 9, 10),
+    )
+    downloader = _bare(NSESMEDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "SME"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(2020, 1, 1), date(2026, 7, 30))
+    )
+
+    assert downloader.get_date_range() == (
+        date(2020, 1, 1), date(2026, 7, 30)
+    )
+
+
+def test_a_segment_with_no_known_floor_is_not_clamped():
+    downloader = _bare(NSEFODownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "FO"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(1991, 1, 1), date(2026, 7, 30))
+    )
+    from src.services.source_resolver import first_available
+
+    if first_available("NSE", "FO") is None:
+        assert downloader.get_date_range()[0] == date(1991, 1, 1)

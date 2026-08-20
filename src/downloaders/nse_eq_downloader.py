@@ -100,6 +100,7 @@ class NSEEQDownloader(BaseDownloader):
                     df, file_date, era=source.era
                 )
                 internal = merge_delivery(internal, delivery_df, "NSE")
+                self.note_delivery_match(file_date, internal)
                 self._internal_equity_data = internal
                 output = public_equity(internal)
                 output = self.memory_optimizer.optimize_dataframe(output)

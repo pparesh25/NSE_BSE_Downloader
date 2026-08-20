@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Iterable, Optional
 
 
 NSE_UDIFF_START = date(2024, 7, 8)
@@ -27,8 +27,43 @@ NSE_SME_FOUR_DIGIT_YEAR_START = date(2025, 10, 13)
 #: Earliest date each segment has an official report for.  A segment is not a
 #: missing dependency before this date -- it never existed -- so a combined file
 #: must still publish rather than waiting forever for a component the exchange
-#: never produced.  Segments absent from this mapping have no known floor.
+#: never produced.  It is also the floor every download clamps to, and the
+#: earliest date the date picker offers.  Segments absent from this mapping
+#: have no known floor, which is not the same as an early one: a caller must
+#: keep its own default rather than assume.
+#:
+#: Pinned against the archives on 2026-08-20 the same way the delivery floors
+#: were -- the date itself downloads and the previous weekday does not:
+#:
+#: * NSE EQ 1994-11-03, which is the exchange's own first trading day;
+#: * NSE FO 2000-06-12, the day index futures launched;
+#: * NSE INDEX 2012-02-21;
+#: * NSE SME 2012-09-18, shortly after the Emerge platform opened.
+#:
+#: BSE EQ is deliberately absent, and not for want of measuring. Its archive
+#: is not contiguous, so no single date describes it. Five attempts per date
+#: on 2026-08-20:
+#:
+#: * 2016-12-08, 12-09 and 12-12 each served a complete bhavcopy of roughly
+#:   2,900 rows, five times out of five;
+#: * 2016-12-13 served nothing, five times out of five -- and it is a trading
+#:   day, not a holiday in the bundled 2016 calendar, whose only December
+#:   entry is the 25th;
+#: * 2017-03-15, 2019-07-10 and 2021-04-08 served complete bhavcopies again;
+#: * 2006-01-02, 2010-06-15, 2013-02-11, 2015-06-10, 2016-06-10 and every
+#:   sampled day of November and early December 2016 served nothing.
+#:
+#: So the boundary a binary search converges on is the edge of a hole rather
+#: than the start of the archive. A floor stops the application from even
+#: trying earlier dates, which puts real data permanently out of reach if it
+#: is wrong; leaving the segment unbounded only costs some doomed requests at
+#: the start of a backfill, and the absent-report ledger settles each of them
+#: once. Worth revisiting only with evidence of a contiguous start.
 SEGMENT_FIRST_AVAILABLE = {
+    ("NSE", "EQ"): date(1994, 11, 3),
+    ("NSE", "FO"): date(2000, 6, 12),
+    ("NSE", "INDEX"): date(2012, 2, 21),
+    ("NSE", "SME"): date(2012, 9, 18),
     ("BSE", "INDEX"): date(2025, 4, 17),
 }
 
@@ -37,6 +72,25 @@ def first_available(exchange: str, segment: str) -> Optional[date]:
     """Return the first date this segment can be downloaded, if bounded."""
 
     return SEGMENT_FIRST_AVAILABLE.get((exchange.upper(), segment.upper()))
+
+
+def earliest_available(
+    segments: Iterable[tuple[str, str]]
+) -> Optional[date]:
+    """The earliest date any of these segments can be downloaded at all.
+
+    ``None`` when even one of them has no established floor.  An unknown
+    floor is not the same as an early one, so a caller bounding a date picker
+    keeps its own default rather than guessing a security's history away.
+    """
+
+    floors = []
+    for exchange, segment in segments:
+        floor = first_available(exchange, segment)
+        if floor is None:
+            return None
+        floors.append(floor)
+    return min(floors) if floors else None
 
 
 def is_available(exchange: str, segment: str, target_date: date) -> bool:

@@ -13,6 +13,7 @@ import json
 import pandas as pd
 import pytest
 
+from src.services.canonical_data import SYMBOL_HISTORY_COLUMNS
 from src.services.corporate_actions import (
     CorporateAction,
     CorporateActionEngine,
@@ -277,7 +278,7 @@ def test_history_carries_its_isin_and_blank_when_absent(tmp_path):
     store.upsert("NSE", "SME", date(2025, 1, 1), _rows("20250101", "SME_CO"))
 
     aaa = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "aaa.txt", dtype=str)
-    assert list(aaa.columns)[-1] == "ISIN"
+    assert list(aaa.columns) == SYMBOL_HISTORY_COLUMNS
     assert aaa["ISIN"].iloc[0] == ISIN_A
     sme = pd.read_csv(tmp_path / "NSE" / "SYMBOLS" / "sme_co.txt", dtype=str)
     assert sme["ISIN"].isna().all()
@@ -297,7 +298,7 @@ def test_legacy_history_upgrades_on_next_write(tmp_path):
     store.upsert("NSE", "EQ", date(2025, 1, 2), _rows("20250102", "AAA", isin=ISIN_A, close=11))
 
     upgraded = pd.read_csv(symbols_dir / "aaa.txt", dtype=str)
-    assert list(upgraded.columns)[-1] == "ISIN"
+    assert list(upgraded.columns) == SYMBOL_HISTORY_COLUMNS
     assert upgraded["DATE"].tolist() == ["20250101", "20250102"]
     assert upgraded["ISIN"].isna().iloc[0]
     assert upgraded["ISIN"].iloc[1] == ISIN_A

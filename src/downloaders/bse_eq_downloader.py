@@ -133,6 +133,7 @@ class BSEEQDownloader(BaseDownloader):
                         ~internal["SYMBOL"].isin(self.mutual_fund_symbols)
                     ].copy()
                 internal = merge_delivery(internal, delivery_df, "BSE")
+                self.note_delivery_match(file_date, internal)
                 self._internal_equity_data = internal
                 output = public_equity(internal)
                 output = self.memory_optimizer.optimize_dataframe(output)

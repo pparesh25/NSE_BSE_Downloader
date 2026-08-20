@@ -1467,22 +1467,147 @@ simply did not publish that far back will report a head gap that no download can
 
 ### 4.2 Missing fields and metadata — effort M
 
-- [ ] `TURNOVER` and `PREV_CLOSE`. Grepping all of `src/` for
-      `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returns **zero hits**. The
-      prototypes prove the source files carry them. These are the only genuinely
-      unrecoverable fields — everything else is already in `.state/raw` at full
-      fidelity and can be re-published offline.
-- [ ] A header row, a schema version, and a per-segment manifest. Files are headerless
-      and `validate_daily_output` accepts *either* 7 or 9 columns, so two schema
-      generations coexist as "valid" with no marker.
-- [ ] A per-segment earliest-available floor, so "how far back can I go?" is answerable
-      from the UI. Today the picker offers 1990 and
-      `price_source('NSE','SME',date(1995,1,1))` returns a URL.
-- [ ] Delivery match-rate telemetry — the stage is marked complete on HTTP success,
-      before the join.
+- [x] `TURNOVER` and `PREV_CLOSE` — **done 2026-08-20**. Grepping all of `src/` for
+      `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returned **zero hits**,
+      but that pattern searches for the wrong names: six of the columns that actually
+      carry these fields are not in it. These are the only genuinely unrecoverable
+      fields — everything else is already in `.state/raw` at full fidelity and can be
+      re-published offline.
+- [x] A schema version and a per-segment manifest — **done 2026-08-20**. A header row
+      was **not** added; see below. Files are headerless and `validate_daily_output`
+      accepts 7, 9 or 11 columns, so three schema generations coexist as "valid" and
+      the marker is what tells them apart.
+- [x] A per-segment earliest-available floor — **done 2026-08-20**, for NSE. The
+      picker offered 1990 and `price_source('NSE','SME',date(1995,1,1))` returned a
+      URL. Four floors are pinned: NSE EQ 1994-11-03 (the exchange's own first
+      trading day), NSE FO 2000-06-12 (the day index futures launched), NSE INDEX
+      2012-02-21 and NSE SME 2012-09-18. **BSE EQ is left unbounded on purpose** —
+      see below.
+- [x] Delivery match-rate telemetry — **done 2026-08-20**. The stage was marked
+      complete on HTTP success, before the join, so a report that downloaded and
+      matched nothing published a date with every delivery field empty and no
+      complaint anywhere. The rate is now recorded against the stage and `--audit`
+      judges it against the neighbouring sessions rather than a fixed threshold.
 - [ ] Add `'TS'` to `BSE_EQUITY_SERIES`. BSE Startup scrips are silently absent from
       every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
       changing it later forces a migration of published files.
+
+#### Sampled evidence, 2026-08-20
+
+One real report was downloaded from every supported era before any code was written,
+because the grep in the box above searches for the wrong names and therefore makes this
+look simpler than it is. Six of the columns that actually carry these fields are not in
+that pattern at all.
+
+| Era | Turnover column | Unit | Previous-close column |
+| --- | --- | --- | --- |
+| `nse-equity-legacy` | `TOTTRDVAL` | rupees | `PREVCLOSE` |
+| `nse-equity-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `nse-fo-legacy` | `VAL_INLAKH` | **lakhs** | **absent** |
+| `nse-fo-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `nse-sme-two-digit-year` | `NET_TRDVAL` | rupees | `PREV_CL_PR` |
+| `nse-sme-four-digit-year` | `NET_TRDVAL` | rupees | `PREV_CL_PR` |
+| `nse-index` | `Turnover (Rs. Cr.)` | **crores** | **absent** |
+| `bse-equity-isin-legacy` | `NET_TURNOV` | rupees | `PREVCLOSE` |
+| `bse-equity-bhavcopy-legacy` | `NET_TURNOV` | rupees | `PREVIOUS CLOSE PRICE` |
+| `bse-equity-udiff-zip` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `bse-equity-udiff` | `TtlTrfVal` | rupees | `PrvsClsgPric` |
+| `bse-index` | **absent** | — | `PreviousClose` |
+| `nse-delivery` | `TURNOVER_LACS` | **lakhs** | `PREV_CLOSE` |
+| `bse-delivery` | `DAY'S TURNOVER` | rupees | absent |
+
+Units were decided by arithmetic rather than by the column's name, because a name is a
+claim and three different units are in play:
+
+* every equity era gives `turnover / (volume * close)` a median of **1.000**, over
+  2,775 to 4,939 rows each — rupees, including BSE's `NET_TURNOV`;
+* NSE F&O cannot be checked that way, since no lot size is in the file. Read as lakhs,
+  2024-07-05 totals Rs 13,626,112 crore; read as rupees, Rs 136 crore. The next
+  schema's `TtlTrfVal` totals Rs 11,979,608 crore for 2026-08-07. Lakhs it is, and the
+  boundary at 2024-07-08 is a five-order-of-magnitude discontinuity if missed;
+* an index value is not a price per share, so the index turnover was checked against
+  the whole cash market instead: "Nifty Total Market" read as crores is 83.8% of that
+  day's NSE turnover, and read as lakhs 0.84%;
+* BSE's `DAY'S TURNOVER` matches the same day's bhavcopy `TtlTrfVal` with a median
+  ratio of 1.0000 across 4,938 scrips.
+
+Two corrections to what the box above assumes:
+
+* the 2022-08-17 to 2022-12-31 BSE era names it `PREVIOUS CLOSE PRICE`, with spaces,
+  not `PREVCLOSE`;
+* **the NSE index previous close cannot be derived.** `Closing - Points Change` agrees
+  with the previous session's own close to the paisa for 162 of 163 indices, but NSE
+  publishes `Points Change = 0.0` and `Change(%) = "-"` for *Nifty50 Dividend Points*,
+  where the derivation gives 187.24 against an actual 182.42. The other six
+  disagreements are 0.01 rounding. A rule that is silently wrong for one index in a
+  hundred and sixty is not a rule worth having, so this field stays empty.
+
+NSE equity's `PrvsClsgPric` was confirmed to be the raw previous close, agreeing with
+the previous session's `ClsPric` for 3,325 of 3,325 instruments.
+
+#### How 4.2's first two boxes were closed
+
+Both fields are published to daily files and symbol histories, in rupees
+throughout. `TURNOVER_SOURCES` and `PREV_CLOSE_SOURCES` in `canonical_data.py` hold the
+per-era column names and the factor that turns each era's value into rupees; both are
+listed as *required* in `SOURCE_SCHEMAS` wherever the era publishes them, so a source
+that stops publishing one stops that date with the column named rather than filling a
+decade with silently empty turnover.
+
+Two migrations had to be handled or the change would have destroyed data rather than
+added it. `read_internal_snapshot` matches the snapshot column list exactly and
+quarantines what it cannot match, and the snapshots are the only thing a rebuild has to
+work from, so the previous column set is accepted and filled with empty values; symbol
+histories upgrade through both earlier generations the same way. Running `--audit`
+against the owner's real root immediately afterwards produced **8,096 errors** — every
+history there was the middle generation, which the audit did not know — and that is now
+two notices, one per exchange.
+
+**No header row.** The plan's box asked for one, and it was not added: it would break
+every tool that reads these files positionally, including the owner's own downstream
+scripts, for no gain the marker does not already give. `<EX>/<SEG>/SCHEMA.json` names
+the columns of every width the application has published, so a reader counts a row's
+columns and looks the width up. It describes generations rather than claiming one,
+because a folder legitimately holds more than one at a time: a backfill writes old
+dates in the current format while yesterday's file is still in the previous one. It is
+rewritten only when its content changes, so a launch does not restamp a file in the
+user's data folder for nothing.
+
+#### What the BSE equity archive actually serves
+
+Worth knowing before any backfill is planned, because it bounds what a BSE history
+can contain. Measured on 2026-08-20, five attempts per date:
+
+| Date | Trading day | Served |
+| --- | --- | --- |
+| 2006-01-02, 2010-06-15, 2013-02-11, 2015-06-10, 2016-06-10 | yes | 0/5 |
+| 2016-11-30, 12-01, 12-02, 12-05, 12-06, 12-07 | yes | 0/5 |
+| 2016-12-08, 12-09, 12-12 | yes | **5/5**, ~2,900-row bhavcopies |
+| 2016-12-13 | **yes**, and not a holiday | **0/5** |
+| 2017-03-15, 2019-07-10, 2021-04-08 | yes | 5/5 |
+
+The hole at 2016-12-13, with complete files on either side of it, is what settles
+this: the archive is not contiguous, so a binary search converges on the edge of a
+hole and calls it a floor. No BSE floor is recorded, and none should be without
+evidence of a contiguous start. It also means a BSE equity backfill cannot reach much
+before December 2016 through this URL, whatever date the picker allows.
+
+#### Decided output contract
+
+* Both fields are published to daily files **and** symbol histories.
+* Stored in **rupees** everywhere: NSE F&O legacy is multiplied by 100,000 and NSE index
+  by 10,000,000, so one column never holds three units.
+* Where the exchange published nothing, the field is **empty**, not zero. Zero would
+  claim a BSE index has no turnover rather than that none is published.
+* Daily files stay **headerless**; a per-segment schema manifest records the column
+  names and generation instead, so the two schema generations become distinguishable
+  without breaking any consumer that reads the files positionally.
+* In symbol histories the new columns go **after** `ISIN`, so no column that has
+  already been written moves.
+* `.state/raw` snapshots gain both columns, and `read_internal_snapshot` must accept
+  the previous column set as well — it validates the list exactly and quarantines what
+  it cannot match, so a strict change would send every existing snapshot to quarantine
+  the first time a rebuild ran.
 
 ### 4.3 Diagnostics — effort S — **done 2026-08-19**
 

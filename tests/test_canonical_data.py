@@ -24,13 +24,14 @@ def _csv(text):
 
 def test_nse_equity_legacy_and_udiff_share_one_output_contract():
     legacy = _csv(
-        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,TOTTRDQTY,TIMESTAMP,TOTALTRADES,ISIN\n"
-        "ABC,EQ,10,12,9,11,1000,05-JUL-2024,20,INEABC000009\n"
+        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,TOTTRDQTY,TIMESTAMP,TOTALTRADES,ISIN,"
+        "TOTTRDVAL,PREVCLOSE\n"
+        "ABC,EQ,10,12,9,11,1000,05-JUL-2024,20,INEABC000009,11000,10\n"
     )
     udiff = _csv(
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123\n"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123,11000,10\n"
     )
     old_result = public_equity(normalize_nse_equity(legacy, date(2024, 7, 5)))
     new_result = public_equity(normalize_nse_equity(udiff, date(2024, 7, 8)))
@@ -41,9 +42,10 @@ def test_nse_equity_legacy_and_udiff_share_one_output_contract():
 
 def test_nse_delivery_uses_symbol_and_series_not_symbol_alone():
     prices = _csv(
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,ISIN\n"
-        "2025-01-01,ABC,EQ,1,2,1,2,100,INE111111111\n"
-        "2025-01-01,ABC,BE,1,2,1,2,200,INE222222222\n"
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,ISIN,"
+        "TtlTrfVal,PrvsClsgPric\n"
+        "2025-01-01,ABC,EQ,1,2,1,2,100,INE111111111,200,2\n"
+        "2025-01-01,ABC,BE,1,2,1,2,200,INE222222222,400,2\n"
     )
     delivery = _csv(
         "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
@@ -60,21 +62,22 @@ def test_nse_delivery_uses_symbol_and_series_not_symbol_alone():
 
 def test_nse_sme_and_fo_retain_new_columns():
     sme = _csv(
-        "MARKET,SERIES,SYMBOL,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,CLOSE_PRICE,NET_TRDQTY\n"
-        "N,SM,SMALL,10,12,9,11,1000\n"
+        "MARKET,SERIES,SYMBOL,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,CLOSE_PRICE,"
+        "NET_TRDQTY,NET_TRDVAL,PREV_CL_PR\n"
+        "N,SM,SMALL,10,12,9,11,1000,11000,10\n"
     )
     sme_result = normalize_nse_sme(sme, date(2025, 10, 13), add_suffix=True)
     assert sme_result.loc[0, "SYMBOL"] == "SMALL_SME"
 
     legacy_fo = _csv(
         "INSTRUMENT,SYMBOL,EXPIRY_DT,OPEN,HIGH,LOW,CLOSE,CONTRACTS,"
-        "OPEN_INT,CHG_IN_OI,TIMESTAMP\n"
-        "FUTSTK,ABC,25-Jul-2024,10,12,9,11,100,500,25,05-JUL-2024\n"
+        "OPEN_INT,CHG_IN_OI,TIMESTAMP,VAL_INLAKH\n"
+        "FUTSTK,ABC,25-Jul-2024,10,12,9,11,100,500,25,05-JUL-2024,11\n"
     )
     udiff_fo = _csv(
         "FinInstrmTp,TckrSymb,XpryDt,TradDt,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,OpnIntrst,ChngInOpnIntrst\n"
-        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25\n"
+        "TtlTradgVol,OpnIntrst,ChngInOpnIntrst,TtlTrfVal,PrvsClsgPric\n"
+        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25,1100000,10\n"
     )
     for raw, day in ((legacy_fo, date(2024, 7, 5)), (udiff_fo, date(2024, 7, 8))):
         result = normalize_nse_fo(raw, day)
@@ -88,18 +91,18 @@ def test_nse_sme_and_fo_retain_new_columns():
     "raw,target_date",
     [
         (
-            "SC_CODE,SC_NAME,SC_GROUP,OPEN,HIGH,LOW,CLOSE,NO_OF_SHRS,NO_TRADES,ISIN_CODE,TRADING_DATE\n"
-            "500002,ABB LTD.,A,10,12,9,11,100,5,INE111111111,16-Aug-22\n",
+            "SC_CODE,SC_NAME,SC_GROUP,OPEN,HIGH,LOW,CLOSE,NO_OF_SHRS,NO_TRADES,ISIN_CODE,TRADING_DATE,NET_TURNOV,PREVCLOSE\n"
+            "500002,ABB LTD.,A,10,12,9,11,100,5,INE111111111,16-Aug-22,1100,10\n",
             date(2022, 8, 16),
         ),
         (
-            "ISIN,SCRIP ID,SCRIP_CODE,SC_GROUP,OPEN PRICE,HIGH PRICE,LOW PRICE,CLOSING PRICE,NO_OF_SHRS,NO_TRADES,TRADING_DATE\n"
-            "INE111111111,ABB,500002,A,10,12,9,11,100,5,17-Aug-22\n",
+            "ISIN,SCRIP ID,SCRIP_CODE,SC_GROUP,OPEN PRICE,HIGH PRICE,LOW PRICE,CLOSING PRICE,NO_OF_SHRS,NO_TRADES,TRADING_DATE,NET_TURNOV,PREVIOUS CLOSE PRICE\n"
+            "INE111111111,ABB,500002,A,10,12,9,11,100,5,17-Aug-22,1100,10\n",
             date(2022, 8, 17),
         ),
         (
-            "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-            "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002\n",
+            "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,PrvsClsgPric\n"
+            "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002,1100,10\n",
             date(2024, 7, 8),
         ),
     ],
@@ -138,8 +141,9 @@ def test_unknown_schema_and_wrong_source_date_fail_closed():
         )
 
     wrong_date = _csv(
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
-        "2024-07-09,ABC,EQ,10,12,9,11,1000\n"
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,"
+        "TtlTrfVal,PrvsClsgPric\n"
+        "2024-07-09,ABC,EQ,10,12,9,11,1000,11000,10\n"
     )
     with pytest.raises(DataProcessingError, match="date mismatch"):
         normalize_nse_equity(
@@ -149,8 +153,9 @@ def test_unknown_schema_and_wrong_source_date_fail_closed():
 
 def test_invalid_ohlcv_and_duplicate_keys_are_rejected():
     invalid = _csv(
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
-        "2024-07-08,ABC,EQ,broken,12,9,11,1000\n"
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,"
+        "TtlTrfVal,PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,broken,12,9,11,1000,11000,10\n"
     )
     with pytest.raises(DataProcessingError, match="numeric OPEN"):
         normalize_nse_equity(
@@ -158,9 +163,10 @@ def test_invalid_ohlcv_and_duplicate_keys_are_rejected():
         )
 
     duplicate = _csv(
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,"
+        "TtlTrfVal,PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,11000,10\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,11000,10\n"
     )
     with pytest.raises(DataProcessingError, match="duplicate keys"):
         normalize_nse_equity(
@@ -170,9 +176,10 @@ def test_invalid_ohlcv_and_duplicate_keys_are_rejected():
 
 def test_mixed_udiff_report_allows_unselected_rows_without_a_series():
     mixed = _csv(
-        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000\n"
-        "2024-07-08,865BOND29,,100,100,100,100,1\n"
+        "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,"
+        "TtlTrfVal,PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,11000,10\n"
+        "2024-07-08,865BOND29,,100,100,100,100,1,100,100\n"
     )
     result = normalize_nse_equity(
         mixed, date(2024, 7, 8), era="nse-equity-udiff"
@@ -187,6 +194,7 @@ def _bse_legacy_row(isin, scrip_id, scrip_code, name, group, close):
         "HIGH PRICE": close, "LOW PRICE": close, "CLOSING PRICE": close,
         "NO_OF_SHRS": "100", "NO_TRADES": "10",
         "TRADING_DATE": "2022-12-30",
+        "NET_TURNOV": "100", "PREVIOUS CLOSE PRICE": close,
     }
 
 
@@ -197,6 +205,7 @@ def _bse_udiff_zip_row(isin, ticker, instrument_id, name, series, close):
         "HghPric": close, "LwPric": close, "ClsPric": close,
         "TtlTradgVol": "100", "TtlNbOfTxsExctd": "10",
         "TradDt": "2023-01-02",
+        "TtlTrfVal": "100", "PrvsClsgPric": close,
     }
 
 

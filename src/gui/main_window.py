@@ -40,6 +40,7 @@ from ..core.exceptions import GUIError
 from ..services.combined_file_builder import CombinedFileBuilder
 from ..services.date_join_coordinator import DateJoinCoordinator
 from ..services.history_batch import HistoryBatchCoordinator
+from ..services.source_resolver import earliest_available
 from ..services.pipeline_telemetry import (
     PipelineEvent,
     PipelineStatusPresenter,
@@ -1399,7 +1400,15 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.custom_date_checkbox, 0, 0, 1, 4)
 
+        # 1990 offered dates every one of these sources predates.  Where the
+        # floors are known, the picker starts at the earliest of them instead.
         minimum = QDate(1990, 1, 1)
+        floor = earliest_available(
+            (value.split("_", 1)[0], value.split("_", 1)[1])
+            for value in self.config.get_available_exchanges()
+        )
+        if floor is not None:
+            minimum = QDate(floor.year, floor.month, floor.day)
         maximum = QDate.currentDate()
         default_start = QDate.fromString(
             self.config.date_settings.base_start_date, "yyyy-MM-dd"

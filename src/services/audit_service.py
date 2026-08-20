@@ -31,6 +31,7 @@ import os
 import re
 import socket
 import sqlite3
+import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -42,7 +43,9 @@ from ..utils import holiday_calendar
 from ..utils.date_utils import DateUtils
 from .canonical_data import (
     BAND_SESSIONS,
+    MIN_BAND_SESSIONS,
     LEGACY_SYMBOL_HISTORY_COLUMNS,
+    PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
     row_count_band_error,
     valid_isin,
@@ -50,6 +53,13 @@ from .canonical_data import (
 )
 from .instance_lock import SingleInstanceLock
 from .pipeline_sqlite import ReadOnlyPipelineStore
+from .schema_manifest import (
+    SCHEMA_FILENAME,
+    daily_columns_for,
+    generations_for,
+    read_manifest,
+)
+from .source_resolver import first_available
 from .symbol_history import SymbolHistoryStore
 
 ERROR = "error"
@@ -713,6 +723,8 @@ class DatabaseAudit:
                 continue
             match = pattern.fullmatch(path.name)
             if match is None:
+                if path.name == SCHEMA_FILENAME:
+                    continue  # Checked by _check_schema_marker, not stray.
                 if path.name.endswith(".tmp"):
                     self._add(
                         WARNING,
@@ -788,6 +800,85 @@ class DatabaseAudit:
                     path=path,
                 )
 
+    # ----------------------------------------------------------- schema marker
+
+    def _check_schema_marker(
+        self, exchange: str, segment: str, published: dict[date, Path]
+    ) -> None:
+        """Confirm the folder says what its headerless files mean.
+
+        Every width the application has ever published is still accepted as
+        valid, so without this marker "valid" tells a reader nothing about
+        which generation a file is -- whether column nine is a delivery
+        quantity or a turnover.
+        """
+
+        exchange_segment = f"{exchange}_{segment}"
+        folder = self.config.resolve_data_path(exchange, segment)
+        if not folder.is_dir() or not published:
+            return
+        path = folder / SCHEMA_FILENAME
+        manifest = read_manifest(folder)
+        if manifest is None:
+            self._add(
+                NOTICE if not path.exists() else ERROR,
+                "schema-marker-missing" if not path.exists()
+                else "schema-marker-unreadable",
+                "this folder has no readable marker saying what its "
+                "headerless columns mean; the next run of the application "
+                "writes one",
+                exchange_segment=exchange_segment,
+                path=folder,
+            )
+            return
+
+        expected = daily_columns_for(segment)
+        recorded = manifest.get("columns")
+        if recorded != expected:
+            self._add(
+                NOTICE,
+                "schema-marker-stale",
+                "the marker describes a different column set from the one "
+                "this version publishes, so the folder was last written by "
+                f"another build ({manifest.get('written_by', 'unknown')})",
+                exchange_segment=exchange_segment,
+                path=path,
+            )
+            return
+
+        known = {
+            len(names)
+            for names in manifest.get("generations", {}).values()
+            if isinstance(names, list)
+        } or {len(names) for names in generations_for(segment).values()}
+        unexplained: list[date] = []
+        for target_date, published_path in sorted(published.items()):
+            width = self._published_width(published_path)
+            if width is not None and width not in known:
+                unexplained.append(target_date)
+        if unexplained:
+            self._add(
+                ERROR,
+                "unexplained-generation",
+                f"{len(unexplained)} file(s) have a column count the marker "
+                f"does not describe: {_describe(unexplained)}",
+                exchange_segment=exchange_segment,
+                path=path,
+            )
+
+    @staticmethod
+    def _published_width(path: Path) -> Optional[int]:
+        """Column count of a published file, from its first row alone."""
+
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                first = handle.readline()
+        except OSError:
+            return None
+        if not first.strip():
+            return None
+        return len(next(csv.reader([first.rstrip("\r\n")]), []))
+
     # --------------------------------------------------------------- coverage
 
     def _configured_start(self) -> Optional[date]:
@@ -846,6 +937,15 @@ class DatabaseAudit:
         configured = self._configured_start()
         if configured is None:
             return
+
+        # `base_start_date` is one setting for every segment, but the
+        # exchanges did not all begin publishing on the same day.  Measuring a
+        # segment against a date its source never covered would report a gap
+        # no download could ever close.
+        exchange, segment = exchange_segment.split("_", 1)
+        published_from = first_available(exchange, segment)
+        if published_from is not None and configured < published_from:
+            configured = published_from
 
         floor = min([configured, *published]) if published else configured
         ceiling = self.calendar.expected_last_trading_date()
@@ -1018,6 +1118,65 @@ class DatabaseAudit:
                     target_date=target_date,
                     path=published[target_date],
                 )
+
+    # -------------------------------------------------------- delivery joins
+
+    #: A date whose delivery report joined less than this share of what its
+    #: neighbours managed did not really deliver, whatever its HTTP status.
+    DELIVERY_DROP = 0.5
+
+    def _check_delivery_match(
+        self,
+        exchange_segment: str,
+        entries: list[tuple[date, dict[str, Any]]],
+    ) -> None:
+        """Find dates whose delivery report downloaded but did not join.
+
+        The stage is marked complete on HTTP success, before the join.  An
+        exchange that renames a series or changes a scrip code publishes a
+        report that downloads perfectly and matches nothing, and every
+        delivery field for that date is then quietly empty.  As with row
+        counts, the judgement is against the neighbouring sessions rather than
+        a fixed threshold: what a healthy match rate looks like is a property
+        of the segment and the era, not a number to guess.
+        """
+
+        rates: dict[date, float] = {}
+        for target_date, record in entries:
+            stage = record.get("stages", {}).get("delivery")
+            if not isinstance(stage, dict) or stage.get("status") != "complete":
+                continue
+            rate = stage.get("match_rate")
+            joined = stage.get("joined_rows")
+            if isinstance(rate, (int, float)) and isinstance(joined, int) and joined > 0:
+                rates[target_date] = float(rate)
+        if len(rates) <= MIN_BAND_SESSIONS:
+            return
+
+        for target_date, rate in sorted(rates.items()):
+            neighbours = [
+                value for _distance, value in sorted(
+                    (abs((other - target_date).days), value)
+                    for other, value in rates.items()
+                    if other != target_date
+                    and abs((other - target_date).days)
+                    <= BAND_MAX_DISTANCE_DAYS
+                )[:BAND_SESSIONS]
+            ]
+            if len(neighbours) < MIN_BAND_SESSIONS:
+                continue
+            median = statistics.median(neighbours)
+            if median <= 0 or rate >= median * self.DELIVERY_DROP:
+                continue
+            self._add(
+                WARNING,
+                "delivery-match-drop",
+                f"the delivery report joined {rate:.0%} of this date's rows "
+                f"where the {len(neighbours)} nearest sessions averaged "
+                f"{median:.0%}; it downloaded but did not match",
+                exchange_segment=exchange_segment,
+                target_date=target_date,
+            )
 
     # ----------------------------------------------------------- symbol files
 
@@ -1270,12 +1429,15 @@ class DatabaseAudit:
             return None
         header = lines[0].split(",")
         current_schema = header == SYMBOL_HISTORY_COLUMNS
-        if not current_schema and header != LEGACY_SYMBOL_HISTORY_COLUMNS:
+        if not current_schema and header not in (
+            PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
+            LEGACY_SYMBOL_HISTORY_COLUMNS,
+        ):
             self._add(
                 ERROR,
                 "symbol-schema-unknown",
-                "this symbol history's header matches neither the current nor "
-                "the previous column set, so a consumer cannot read it",
+                "this symbol history's header matches none of the column sets "
+                "this application has written, so a consumer cannot read it",
                 path=path,
             )
             return None
@@ -1409,8 +1571,9 @@ class DatabaseAudit:
             self._add(
                 NOTICE,
                 "legacy-symbol-schema",
-                f"{legacy_schema} symbol file(s) still carry the pre-ISIN "
-                "column set, so two schema generations coexist here",
+                f"{legacy_schema} symbol file(s) carry an earlier column "
+                "set, so more than one schema generation coexists here; the "
+                "next write upgrades each file it touches",
                 exchange_segment=exchange,
             )
 
@@ -1561,8 +1724,10 @@ class DatabaseAudit:
                 published,
                 {target_date for target_date, _ in entries},
             )
+            self._check_schema_marker(exchange, segment, published)
             self._check_coverage(exchange_segment, published, entries)
             self._check_row_counts(exchange_segment, published, entries)
+            self._check_delivery_match(exchange_segment, entries)
             summaries.append(summary)
 
         # Every raw snapshot for the exchange is used, whichever of its

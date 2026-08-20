@@ -203,7 +203,7 @@ def test_combined_rerun_defers_publication_and_resets_manifest(tmp_path):
         "NSE", "EQ", day
     ).status == "partial"
     frame = pd.DataFrame([[
-        "FRESH", "20260731", 1, 2, 1, 2, 100, 50, 50,
+        "FRESH", "20260731", 1, 2, 1, 2, 100, 50, 50, 200, 1,
     ]], columns=EQUITY_DAILY_COLUMNS)
     downloader.save_processed_data(frame, day)
 

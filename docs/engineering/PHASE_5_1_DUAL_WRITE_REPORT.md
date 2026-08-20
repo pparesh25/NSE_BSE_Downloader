@@ -17,6 +17,12 @@ Nothing in this step changes a published byte. Every measurement below was taken
 either in a pytest temporary directory or in a scratch directory outside the data
 root; `~/NSE_BSE_Data` was read and never written.
 
+> **The measured tree no longer exists.** On 2026-08-21 the owner identified those
+> 29 dates as download-test files with no further use and had them deleted. The
+> numbers below were taken while it existed and stand as the evidence for the design
+> decisions they justify, but they cannot be re-run against the same input. Anything
+> re-measured later will be against a differently-shaped archive.
+
 ## What the measurements changed about the proposed design
 
 The schema in §7 of the review proposes `PRIMARY KEY (exchange, segment,
@@ -137,8 +143,9 @@ run with the mirror switched off.
   also carries appended SME and index rows, so regenerating it is a union of segments;
   that belongs to the export step, where the append options are already modelled.
 - **No backfill of existing dates.** The mirror fills as dates are downloaded. The
-  84 snapshots already on disk can seed it, which is a natural first task for step 2
-  since it needs a populated database to diff against.
+  84 snapshots that could have seeded it were deleted with the rest of the test tree
+  on 2026-08-21, so step 2 begins by downloading a handful of dates to have something
+  to diff against.
 - **`sme_add_suffix` remains a naming input.** NSE SME publishes no identifier, so its
   key is `SYM:<published name>`; flipping that preference mid-history would create a
   second key for the same security. Pre-existing, and surfaced here because step 2 is
@@ -147,6 +154,11 @@ run with the mirror switched off.
 ## Next
 
 Step 2 — `export_daily(date)` / `export_symbol(symbol)` regenerating text from the
-database, re-exported and SHA-diffed against the existing files. The formatting
-question this step defers (`7` versus `7.0`, per exchange) is the first thing that
-harness will answer.
+database, re-exported and SHA-diffed against the files the same run published. The
+formatting question this step defers (`7` versus `7.0`, per exchange) is the first
+thing that harness will answer.
+
+With the test tree gone there is no existing corpus to diff against, which makes step
+2 cleaner rather than harder: download a small date range once, and every file it
+publishes is both the mirror's input and the parity target, produced by the same run
+from the same frame.

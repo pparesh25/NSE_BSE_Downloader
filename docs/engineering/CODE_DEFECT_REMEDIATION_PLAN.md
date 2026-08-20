@@ -1674,9 +1674,10 @@ The migration is four independently shippable steps, from §7 of the review:
       statistics silently scans every date an exchange ever published. Evidence:
       [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md).
 - [ ] **2. Prove parity.** `export_daily(date)` / `export_symbol(symbol)` regenerate
-      text from the database; re-export and SHA-diff against the existing files. Needs
-      a populated database, so seeding it from the 84 existing `.state/raw` snapshots
-      is its natural first task.
+      text from the database; re-export and SHA-diff against what the same run
+      published. The data root was deleted on 2026-08-21 — it held download-test files
+      only — so this begins by downloading a small date range, which then serves as
+      both the mirror's input and the parity target.
 - [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
       7,426-files-per-run cost dies and appending one day stops rewriting the store.
       Consumers still see identical `.txt` files at identical paths.

@@ -10,6 +10,7 @@ caught SQLite's own `mode=ro` rewriting `pipeline_state.sqlite3-shm`.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +19,11 @@ import pytest
 import main
 from src.core.config import Config
 from src.services.audit_service import AuditError, DatabaseAudit
+from src.services.canonical_data import (
+    INTERNAL_EQUITY_COLUMNS,
+    LEGACY_SYMBOL_HISTORY_COLUMNS,
+    SYMBOL_HISTORY_COLUMNS,
+)
 from src.services.pipeline_state import PipelineManifest
 
 DAY = date(2026, 7, 30)
@@ -112,7 +118,7 @@ def _record_simple(base: Path, segment: str, target_date: date, path: Path):
         "complete",
         path=str(path),
         sha256=_digest(path),
-        rows=1,
+        rows=len(path.read_text(encoding="utf-8").splitlines()),
     )
     return manifest
 
@@ -720,3 +726,258 @@ def test_a_file_that_gained_rows_since_publication_says_how(healthy):
     }
     drift = _categories(report, "row-count-drift")[0]
     assert "holds 2 rows but the pipeline recorded 1" in drift.message
+
+
+# --------------------------------------------------------------------------
+# Symbol histories, raw snapshots and orphans
+# --------------------------------------------------------------------------
+
+ACME = ("ACME", "INE000A01001", "1")
+BOLT = ("BOLT", "INE000B01002", "2")
+
+
+def _write_snapshot(config, exchange, segment, day, securities) -> Path:
+    """One checksummed raw snapshot, written the way the store writes it."""
+
+    folder = config.base_data_path / ".state" / "raw" / exchange / segment
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = [",".join(INTERNAL_EQUITY_COLUMNS)]
+    for symbol, isin, security_id in securities:
+        values = {
+            "SYMBOL": symbol,
+            "DATE": day.strftime("%Y%m%d"),
+            "ISIN": isin,
+            "SECURITY_ID": security_id,
+            "SERIES": "EQ",
+        }
+        lines.append(
+            ",".join(values.get(column, "1") for column in
+                     INTERNAL_EQUITY_COLUMNS)
+        )
+    body = "\n".join(lines) + "\n"
+    path = folder / f"{day.isoformat()}.csv"
+    path.write_text(body, encoding="utf-8")
+    path.with_suffix(".csv.meta.json").write_text(
+        json.dumps({
+            "version": 1,
+            "exchange": exchange,
+            "segment": segment,
+            "target_date": day.isoformat(),
+            "row_count": len(securities),
+            "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_history(config, exchange, filename, days, *, legacy=False) -> Path:
+    columns = (
+        LEGACY_SYMBOL_HISTORY_COLUMNS if legacy else SYMBOL_HISTORY_COLUMNS
+    )
+    folder = config.base_data_path / exchange / "SYMBOLS"
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = [",".join(columns)]
+    for day in days:
+        lines.append(
+            ",".join([day.strftime("%Y%m%d")] + ["1"] * (len(columns) - 1))
+        )
+    path = folder / filename
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def symbols_root(tmp_path):
+    """Two NSE EQ sessions, published, recorded, snapshotted and historied."""
+
+    config = _config(EARLIER)
+    for day in (EARLIER, DAY):
+        published = _publish(config, "EQ", day, "ACME,1\nBOLT,1\n")
+        _record_simple(config.base_data_path, "EQ", day, published)
+        _write_snapshot(config, "NSE", "EQ", day, [ACME, BOLT])
+    _write_history(config, "NSE", "acme.txt", [EARLIER, DAY])
+    _write_history(config, "NSE", "bolt.txt", [EARLIER, DAY])
+    return config
+
+
+def test_a_consistent_symbol_tree_reports_nothing(symbols_root):
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert report.findings == ()
+
+
+def test_a_symbol_history_missing_a_snapshot_date_is_caught(symbols_root):
+    # Nothing enumerated `<EX>/SYMBOLS/` before this, so a history could lose
+    # a session and only a rebuild would ever notice.
+    _write_history(symbols_root, "NSE", "bolt.txt", [EARLIER])
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    gaps = _categories(report, "symbol-coverage-gap")
+    assert len(gaps) == 1
+    assert gaps[0].path.name == "bolt.txt"
+    assert DAY.isoformat() in gaps[0].message
+    assert report.failed
+
+
+def test_a_symbol_file_the_snapshots_require_is_reported_when_absent(
+    symbols_root,
+):
+    (symbols_root.base_data_path / "NSE" / "SYMBOLS" / "bolt.txt").unlink()
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    missing = _categories(report, "missing-symbol-file")
+    assert len(missing) == 1
+    assert "bolt.txt" in missing[0].message
+
+
+def test_a_renamed_security_is_followed_by_identity_not_by_ticker(
+    symbols_root,
+):
+    """A rename merges the history into the new name's file.
+
+    Resolving an old snapshot row by its own ticker would look for a file the
+    merge deleted, and report a healthy database as missing thousands of them.
+    """
+
+    history = symbols_root.base_data_path / "NSE" / "SYMBOLS"
+    (history / "acme.txt").rename(history / "acmecorp.txt")
+    registry = symbols_root.base_data_path / ".state" / "symbol_registry.json"
+    registry.write_text(
+        json.dumps({
+            "version": 3,
+            "exchanges": {"NSE": {"ISIN:INE000A01001": "ACMECORP"}},
+            "files": {"NSE": {"ACMECORP": "acmecorp.txt"}},
+            "identities": {},
+        }),
+        encoding="utf-8",
+    )
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert report.findings == ()
+
+
+def test_a_damaged_raw_snapshot_is_caught_by_its_own_metadata(symbols_root):
+    # These digests are written and then never read until a `--rebuild-*`
+    # needs them, which is the worst moment to find the snapshot damaged.
+    snapshot = (
+        symbols_root.base_data_path / ".state" / "raw" / "NSE" / "EQ"
+        / f"{DAY.isoformat()}.csv"
+    )
+    snapshot.write_text(
+        snapshot.read_text(encoding="utf-8").replace("BOLT", "BOLTX"),
+        encoding="utf-8",
+    )
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert [
+        finding.category for finding in _categories(
+            report, "raw-digest-mismatch"
+        )
+    ] == ["raw-digest-mismatch"]
+    assert report.failed
+
+
+def test_a_raw_snapshot_without_metadata_cannot_be_rebuilt_from(symbols_root):
+    (
+        symbols_root.base_data_path / ".state" / "raw" / "NSE" / "EQ"
+        / f"{DAY.isoformat()}.csv.meta.json"
+    ).unlink()
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert len(_categories(report, "raw-metadata-missing")) == 1
+
+
+def test_metadata_left_without_its_snapshot_is_reported(symbols_root):
+    (
+        symbols_root.base_data_path / ".state" / "raw" / "NSE" / "EQ"
+        / f"{DAY.isoformat()}.csv"
+    ).unlink()
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    orphans = _categories(report, "orphan-working-file")
+    assert any("metadata" in finding.message for finding in orphans)
+
+
+def test_repeated_dates_in_a_symbol_history_are_reported(symbols_root):
+    _write_history(symbols_root, "NSE", "acme.txt", [EARLIER, DAY, DAY])
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    duplicates = _categories(report, "duplicate-symbol-dates")
+    assert len(duplicates) == 1
+    assert DAY.isoformat() in duplicates[0].message
+
+
+def test_a_symbol_history_with_an_unknown_header_is_refused(symbols_root):
+    path = symbols_root.base_data_path / "NSE" / "SYMBOLS" / "acme.txt"
+    path.write_text("WHO,KNOWS\n20260730,1\n", encoding="utf-8")
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    assert len(_categories(report, "symbol-schema-unknown")) == 1
+
+
+def test_the_older_symbol_schema_is_noted_rather_than_failed(symbols_root):
+    _write_history(
+        symbols_root, "NSE", "acme.txt", [EARLIER, DAY], legacy=True
+    )
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    legacy = _categories(report, "legacy-symbol-schema")
+    assert len(legacy) == 1
+    assert legacy[0].severity == "notice"
+    assert not report.failed
+
+
+def test_a_symbol_file_no_snapshot_covers_is_a_notice(symbols_root):
+    _write_history(symbols_root, "NSE", "ghost.txt", [EARLIER])
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    unaccounted = _categories(report, "unaccounted-symbol-file")
+    assert len(unaccounted) == 1
+    assert "ghost.txt" in unaccounted[0].message
+    assert not report.failed
+
+
+def test_a_working_file_for_an_unpublished_date_is_an_orphan(symbols_root):
+    stray = date(2026, 7, 28)
+    _write_snapshot(symbols_root, "NSE", "EQ", stray, [ACME])
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    orphans = [
+        finding for finding in _categories(report, "orphan-working-file")
+        if "raw snapshot" in finding.message
+    ]
+    assert len(orphans) == 1
+    assert stray.isoformat() in orphans[0].message
+
+
+def test_a_registry_naming_a_file_that_does_not_exist_is_reported(
+    symbols_root,
+):
+    registry = symbols_root.base_data_path / ".state" / "symbol_registry.json"
+    registry.write_text(
+        json.dumps({
+            "version": 3,
+            "exchanges": {},
+            "files": {"NSE": {"GONE": "gone.txt"}},
+            "identities": {},
+        }),
+        encoding="utf-8",
+    )
+
+    report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
+
+    missing = _categories(report, "missing-registered-file")
+    assert len(missing) == 1
+    assert "gone.txt" in missing[0].message

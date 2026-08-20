@@ -24,6 +24,7 @@ none of the ordinary routes into the data root are used here:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -39,9 +40,17 @@ from ..core.config import Config
 from ..core.data_manager import DAILY_FILE_PATTERNS
 from ..utils import holiday_calendar
 from ..utils.date_utils import DateUtils
-from .canonical_data import BAND_SESSIONS, row_count_band_error
+from .canonical_data import (
+    BAND_SESSIONS,
+    LEGACY_SYMBOL_HISTORY_COLUMNS,
+    SYMBOL_HISTORY_COLUMNS,
+    row_count_band_error,
+    valid_isin,
+    valid_security_id,
+)
 from .instance_lock import SingleInstanceLock
 from .pipeline_sqlite import ReadOnlyPipelineStore
+from .symbol_history import SymbolHistoryStore
 
 ERROR = "error"
 WARNING = "warning"
@@ -66,6 +75,20 @@ BAND_MAX_DISTANCE_DAYS = 180
 
 #: Read size for the single pass that produces both a digest and a row count.
 _READ_BLOCK = 1024 * 1024
+
+#: How many individual dates or filenames one aggregated finding names before
+#: it falls back to a count.  A finding nobody can read is not a finding.
+_LISTED = 5
+
+
+def _describe(values: Sequence[Any], total: Optional[int] = None) -> str:
+    """Name the first few of ``values`` and count the rest."""
+
+    total = len(values) if total is None else total
+    listed = ", ".join(str(value) for value in values[:_LISTED])
+    if total > len(values[:_LISTED]):
+        listed += f", and {total - len(values[:_LISTED])} more"
+    return listed
 
 
 @dataclass(frozen=True)
@@ -227,11 +250,29 @@ class SegmentSummary:
 
 
 @dataclass
+class SymbolSummary:
+    """What the symbol cross-check looked at for one exchange."""
+
+    exchange: str
+    histories: int = 0
+    snapshots: int = 0
+    pairs: int = 0
+
+    def render(self) -> str:
+        return (
+            f"  {self.exchange + ' SYMBOLS':<10} {self.histories:>6} history "
+            f"files, {self.snapshots:>6} raw snapshots, {self.pairs:>7} "
+            "(symbol, date) pairs checked"
+        )
+
+
+@dataclass
 class AuditReport:
     """Everything one ``--audit`` run established."""
 
     base_data_path: Path
     summaries: tuple[SegmentSummary, ...] = ()
+    symbols: tuple[SymbolSummary, ...] = ()
     findings: tuple[AuditFinding, ...] = ()
     notes: tuple[str, ...] = ()
 
@@ -256,6 +297,8 @@ class AuditReport:
             lines.append("")
         for summary in self.summaries:
             lines.append(summary.render())
+        for symbol_summary in self.symbols:
+            lines.append(symbol_summary.render())
         lines.append("")
 
         if not self.findings:
@@ -304,6 +347,7 @@ class DatabaseAudit:
         self._notes: list[str] = []
         self._relocated_reported = False
         self._unknown_calendar_years: set[int] = set()
+        self._registry_cache: Optional[dict[str, Any]] = None
         # One read per file, however many checks want to look at it.
         self._measurements: dict[Path, Optional[FileMeasurement]] = {}
 
@@ -952,6 +996,491 @@ class DatabaseAudit:
                     path=published[target_date],
                 )
 
+    # ----------------------------------------------------------- symbol files
+
+    def _registry(self) -> dict[str, Any]:
+        """The symbol registry, read without the store's quarantine behaviour."""
+
+        if self._registry_cache is not None:
+            return self._registry_cache
+        empty: dict[str, Any] = {
+            "exchanges": {}, "files": {}, "identities": {}
+        }
+        path = self.base_data_path / ".state" / "symbol_registry.json"
+        if not path.is_file():
+            self._registry_cache = empty
+            return empty
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("the registry must be an object")
+        except (OSError, ValueError) as error:
+            self._add(
+                ERROR,
+                "unreadable-registry",
+                f"the symbol registry could not be read: {error}",
+                path=path,
+            )
+            self._registry_cache = empty
+            return empty
+        for section in ("exchanges", "files", "identities"):
+            if not isinstance(data.get(section), dict):
+                data[section] = {}
+        self._registry_cache = data
+        return data
+
+    def _snapshot_paths(self, exchange: str) -> list[Path]:
+        """Every checksummed raw snapshot for one exchange, oldest first."""
+
+        root = self.base_data_path / ".state" / "raw" / exchange
+        if not root.is_dir():
+            return []
+        paths = [
+            path
+            for segment in sorted(root.iterdir()) if segment.is_dir()
+            for path in sorted(segment.glob("*.csv"))
+        ]
+        return sorted(paths, key=lambda path: path.stem)
+
+    def _snapshot_filename(
+        self,
+        exchange: str,
+        registry: dict[str, Any],
+        row: Sequence[str],
+        columns: dict[str, int],
+    ) -> Optional[str]:
+        """The symbol file one raw row belongs in, resolved as the store does.
+
+        Identity first, then the ticker.  A renamed security keeps its file,
+        so an old row's own symbol would point at a filename that was merged
+        away; asking the registry which ticker owns that ISIN or security code
+        follows the rename instead of reporting it as a missing file.
+        """
+
+        def value(name: str) -> str:
+            position = columns.get(name)
+            if position is None or position >= len(row):
+                return ""
+            return str(row[position]).strip().upper()
+
+        symbol = value("SYMBOL")
+        isin = value("ISIN")
+        security_id = value("SECURITY_ID")
+        owners = registry["exchanges"].get(exchange, {})
+        for key in (
+            f"ISIN:{isin}" if valid_isin(isin) else None,
+            f"ID:{security_id}" if valid_security_id(security_id) else None,
+        ):
+            if key is not None and key in owners:
+                symbol = owners[key]
+                break
+        if not symbol:
+            return None
+        return registry["files"].get(exchange, {}).get(
+            symbol, f"{SymbolHistoryStore.safe_filename(symbol)}.txt"
+        )
+
+    def _verify_snapshot(self, path: Path) -> Optional[bytes]:
+        """Check one raw snapshot against its own metadata and return it.
+
+        Nothing reads these digests back until a `--rebuild-*` needs the
+        snapshot, which is the worst moment to discover it is damaged: the
+        rebuild is the repair.
+        """
+
+        try:
+            payload = path.read_bytes()
+        except OSError as error:
+            self._add(
+                ERROR,
+                "unreadable-file",
+                f"the raw snapshot could not be read: {error}",
+                path=path,
+            )
+            return None
+        metadata_path = path.with_suffix(".csv.meta.json")
+        if not metadata_path.is_file():
+            self._add(
+                ERROR,
+                "raw-metadata-missing",
+                "this raw snapshot has no metadata, so no digest vouches for "
+                "it and a rebuild will refuse to read it",
+                path=path,
+            )
+            return payload
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                raise ValueError("the metadata must be an object")
+        except (OSError, ValueError) as error:
+            self._add(
+                ERROR,
+                "raw-metadata-unreadable",
+                f"the raw snapshot metadata could not be read: {error}",
+                path=metadata_path,
+            )
+            return payload
+        digest = hashlib.sha256(payload).hexdigest()
+        if metadata.get("sha256") != digest:
+            self._add(
+                ERROR,
+                "raw-digest-mismatch",
+                "the raw snapshot does not match the sha256 its metadata "
+                "records, so a rebuild would refuse it",
+                path=path,
+            )
+            return payload
+        rows = payload.count(b"\n")
+        if payload and not payload.endswith(b"\n"):
+            rows += 1
+        rows = max(rows - 1, 0)  # the header is not a row
+        if metadata.get("row_count") != rows:
+            self._add(
+                ERROR,
+                "raw-row-count-mismatch",
+                f"the raw snapshot holds {rows} rows but its metadata records "
+                f"{metadata.get('row_count')}",
+                path=path,
+            )
+        return payload
+
+    def _expected_symbol_coverage(
+        self, exchange: str, snapshots: list[Path]
+    ) -> tuple[dict[str, int], list[date]]:
+        """Which dates each symbol file owes, as one bit per snapshot date.
+
+        A bitmask rather than a set of dates: a finished multi-year backfill
+        holds tens of millions of (symbol, date) pairs, which no audit should
+        need gigabytes to check.  One bit each keeps the whole expectation for
+        a 4,000-symbol, 7,500-session database inside a few megabytes.
+        """
+
+        index: dict[date, int] = {}
+        ordered: list[date] = []
+        for path in snapshots:
+            try:
+                snapshot_date = date.fromisoformat(path.stem)
+            except ValueError:
+                self._add(
+                    WARNING,
+                    "unrecognised-file",
+                    "this raw snapshot is not named for a date, so nothing "
+                    "can rebuild from it",
+                    path=path,
+                )
+                continue
+            if snapshot_date not in index:
+                index[snapshot_date] = len(ordered)
+                ordered.append(snapshot_date)
+
+        expected: dict[str, int] = {}
+        registry = self._registry()
+        for path in snapshots:
+            try:
+                snapshot_date = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            payload = self._verify_snapshot(path)
+            if payload is None:
+                continue
+            bit = 1 << index[snapshot_date]
+            reader = csv.reader(payload.decode("utf-8").splitlines())
+            header = next(reader, None)
+            if header is None:
+                continue
+            # Resolved from the header rather than by position: a snapshot
+            # written by a different column order must be refused, not
+            # silently read as if SYMBOL were somewhere else.
+            columns = {name: position for position, name in enumerate(header)}
+            if "SYMBOL" not in columns:
+                self._add(
+                    ERROR,
+                    "raw-schema-unknown",
+                    "this raw snapshot has no SYMBOL column, so nothing can "
+                    "rebuild a symbol history from it",
+                    path=path,
+                )
+                continue
+            for row in reader:
+                if not row:
+                    continue
+                filename = self._snapshot_filename(
+                    exchange, registry, row, columns
+                )
+                if filename is None:
+                    continue
+                expected[filename] = expected.get(filename, 0) | bit
+        return expected, ordered
+
+    def _symbol_file_dates(
+        self, path: Path, index: dict[date, int]
+    ) -> Optional[tuple[int, list[date], bool]]:
+        """One symbol file's dates as a bitmask, its duplicates, its schema."""
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as error:
+            self._add(
+                ERROR,
+                "unreadable-file",
+                f"the symbol history could not be read: {error}",
+                path=path,
+            )
+            return None
+        if not lines:
+            self._add(
+                WARNING,
+                "empty-symbol-file",
+                "this symbol history is empty, so it carries no history at all",
+                path=path,
+            )
+            return None
+        header = lines[0].split(",")
+        current_schema = header == SYMBOL_HISTORY_COLUMNS
+        if not current_schema and header != LEGACY_SYMBOL_HISTORY_COLUMNS:
+            self._add(
+                ERROR,
+                "symbol-schema-unknown",
+                "this symbol history's header matches neither the current nor "
+                "the previous column set, so a consumer cannot read it",
+                path=path,
+            )
+            return None
+
+        mask = 0
+        seen: set[date] = set()
+        duplicates: list[date] = []
+        malformed = 0
+        for line in lines[1:]:
+            if not line:
+                continue
+            raw = line.split(",", 1)[0].strip()
+            try:
+                row_date = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+            except ValueError:
+                malformed += 1
+                continue
+            if row_date in seen:
+                duplicates.append(row_date)
+            seen.add(row_date)
+            position = index.get(row_date)
+            if position is not None:
+                mask |= 1 << position
+        if malformed:
+            self._add(
+                ERROR,
+                "symbol-date-unreadable",
+                f"{malformed} row(s) carry a date this file's own format "
+                "cannot parse",
+                path=path,
+            )
+        return mask, duplicates, current_schema
+
+    def _check_symbol_histories(self, exchange: str) -> Optional[SymbolSummary]:
+        """Cross-check every ``SYMBOLS/*.txt`` against the raw snapshots.
+
+        Nothing enumerated ``<EX>/SYMBOLS/`` at all before this: a symbol file
+        could lose a year of history and only a rebuild would notice, which is
+        no use to someone asking whether a rebuild is needed.
+        """
+
+        snapshots = self._snapshot_paths(exchange)
+        folder = self.base_data_path / exchange / "SYMBOLS"
+        if not snapshots and not folder.is_dir():
+            return None
+
+        expected, ordered = self._expected_symbol_coverage(exchange, snapshots)
+        index = {value: position for position, value in enumerate(ordered)}
+        summary = SymbolSummary(
+            exchange,
+            snapshots=len(snapshots),
+            pairs=sum(mask.bit_count() for mask in expected.values()),
+        )
+
+        on_disk = {
+            path.name: path
+            for path in (sorted(folder.iterdir()) if folder.is_dir() else [])
+            if path.is_file() and path.suffix == ".txt"
+        }
+        summary.histories = len(on_disk)
+        if folder.is_dir():
+            for path in sorted(folder.iterdir()):
+                if path.is_file() and path.name.endswith(".tmp"):
+                    self._add(
+                        WARNING,
+                        "interrupted-write",
+                        "a temporary symbol file was left behind, so a write "
+                        "did not finish",
+                        exchange_segment=exchange,
+                        path=path,
+                    )
+
+        missing_files: list[str] = []
+        legacy_schema = 0
+        for filename in sorted(expected):
+            history = on_disk.get(filename)
+            if history is None:
+                missing_files.append(filename)
+                continue
+            result = self._symbol_file_dates(history, index)
+            if result is None:
+                continue
+            mask, duplicates, current_schema = result
+            if not current_schema:
+                legacy_schema += 1
+            if duplicates:
+                self._add(
+                    ERROR,
+                    "duplicate-symbol-dates",
+                    f"{len(duplicates)} date(s) appear more than once: "
+                    f"{_describe(sorted(set(duplicates)))}",
+                    exchange_segment=exchange,
+                    path=history,
+                )
+            absent = expected[filename] & ~mask
+            if absent:
+                gaps = [
+                    ordered[position]
+                    for position in range(len(ordered))
+                    if absent >> position & 1
+                ]
+                self._add(
+                    ERROR,
+                    "symbol-coverage-gap",
+                    f"{len(gaps)} date(s) present in the raw snapshots are "
+                    f"missing from this history: {_describe(gaps)}",
+                    exchange_segment=exchange,
+                    path=history,
+                )
+
+        if missing_files:
+            self._add(
+                ERROR,
+                "missing-symbol-file",
+                f"{len(missing_files)} symbol file(s) the raw snapshots "
+                f"require do not exist: {_describe(missing_files)}",
+                exchange_segment=exchange,
+            )
+
+        unaccounted = sorted(set(on_disk).difference(expected))
+        if unaccounted:
+            self._add(
+                NOTICE,
+                "unaccounted-symbol-file",
+                f"{len(unaccounted)} symbol file(s) appear in no raw snapshot, "
+                "so their history cannot be verified or rebuilt: "
+                f"{_describe(unaccounted)}",
+                exchange_segment=exchange,
+            )
+        if legacy_schema:
+            self._add(
+                NOTICE,
+                "legacy-symbol-schema",
+                f"{legacy_schema} symbol file(s) still carry the pre-ISIN "
+                "column set, so two schema generations coexist here",
+                exchange_segment=exchange,
+            )
+
+        registered = self._registry()["files"].get(exchange, {})
+        absent_registered = sorted(
+            filename for filename in set(registered.values())
+            if filename not in on_disk
+        )
+        if absent_registered:
+            self._add(
+                ERROR,
+                "missing-registered-file",
+                f"{len(absent_registered)} file(s) the registry claims to own "
+                f"do not exist: {_describe(absent_registered)}",
+                exchange_segment=exchange,
+            )
+        return summary
+
+    # ------------------------------------------------------------- state trees
+
+    def _check_state_orphans(
+        self,
+        grouped: dict[str, list[tuple[date, dict[str, Any]]]],
+        published: dict[str, dict[date, Path]],
+    ) -> None:
+        """Find working files no published date accounts for.
+
+        Both trees are written per date and read only by a repair.  One left
+        behind for a date that was never published means a run stopped in the
+        middle, and nothing else would ever say so.
+        """
+
+        state = self.base_data_path / ".state"
+        for category, kind in (
+            ("components", "reconciliation component"),
+            ("raw", "raw snapshot"),
+        ):
+            root = state / category
+            if not root.is_dir():
+                continue
+            for exchange_dir in sorted(root.iterdir()):
+                if not exchange_dir.is_dir():
+                    continue
+                for segment_dir in sorted(exchange_dir.iterdir()):
+                    if not segment_dir.is_dir():
+                        continue
+                    exchange_segment = (
+                        f"{exchange_dir.name}_{segment_dir.name}"
+                    )
+                    if exchange_segment not in self.segments:
+                        continue
+                    known = {
+                        target_date for target_date, _ in
+                        grouped.get(exchange_segment, [])
+                    }
+                    known.update(published.get(exchange_segment, {}))
+                    orphans = []
+                    for path in sorted(segment_dir.glob("*.csv")):
+                        try:
+                            snapshot_date = date.fromisoformat(path.stem)
+                        except ValueError:
+                            continue
+                        if snapshot_date not in known:
+                            orphans.append(snapshot_date)
+                    if orphans:
+                        self._add(
+                            WARNING,
+                            "orphan-working-file",
+                            f"{len(orphans)} {kind}(s) exist for dates with "
+                            "no published file and no pipeline record: "
+                            f"{_describe(orphans)}",
+                            exchange_segment=exchange_segment,
+                        )
+                    for path in sorted(segment_dir.glob("*.tmp")):
+                        self._add(
+                            WARNING,
+                            "interrupted-write",
+                            f"a temporary {kind} was left behind, so a write "
+                            "did not finish",
+                            exchange_segment=exchange_segment,
+                            path=path,
+                        )
+
+        raw_root = state / "raw"
+        if raw_root.is_dir():
+            # ``with_suffix`` cannot undo a two-part suffix: it would turn
+            # ``2026-07-01.csv.meta.json`` into ``2026-07-01.csv.csv`` and
+            # report every healthy snapshot as widowed.
+            widowed = [
+                path for path in sorted(raw_root.rglob("*.csv.meta.json"))
+                if not path.with_name(
+                    path.name[: -len(".meta.json")]
+                ).is_file()
+            ]
+            if widowed:
+                self._add(
+                    WARNING,
+                    "orphan-working-file",
+                    f"{len(widowed)} raw-snapshot metadata file(s) have no "
+                    "snapshot beside them: "
+                    f"{_describe([path.name for path in widowed])}",
+                )
+
     # ------------------------------------------------------------------- entry
 
     def run(self) -> AuditReport:
@@ -962,6 +1491,7 @@ class DatabaseAudit:
         self._relocated_reported = False
         self._unknown_calendar_years = set()
         self._measurements = {}
+        self._registry_cache = None
 
         self._note_running_instance()
         grouped = self._load_records()
@@ -980,11 +1510,13 @@ class DatabaseAudit:
             )
 
         summaries = []
+        published_by_segment: dict[str, dict[date, Path]] = {}
         for exchange_segment in self.segments:
             exchange, segment = exchange_segment.split("_", 1)
             entries = grouped.get(exchange_segment, [])
             summary = SegmentSummary(exchange_segment, records=len(entries))
             published = self._published_files(exchange, segment)
+            published_by_segment[exchange_segment] = published
             summary.files = len(published)
 
             for target_date, record in entries:
@@ -1000,6 +1532,17 @@ class DatabaseAudit:
             self._check_row_counts(exchange_segment, published, entries)
             summaries.append(summary)
 
+        symbol_summaries = [
+            summary for summary in (
+                self._check_symbol_histories(exchange)
+                for exchange in sorted(
+                    {segment.split("_", 1)[0] for segment in self.segments}
+                )
+            )
+            if summary is not None
+        ]
+        self._check_state_orphans(grouped, published_by_segment)
+
         if self._unknown_calendar_years:
             years = ", ".join(
                 str(year) for year in sorted(self._unknown_calendar_years)
@@ -1013,6 +1556,7 @@ class DatabaseAudit:
         return AuditReport(
             base_data_path=self.base_data_path,
             summaries=tuple(summaries),
+            symbols=tuple(symbol_summaries),
             findings=tuple(self._findings),
             notes=tuple(self._notes),
         )

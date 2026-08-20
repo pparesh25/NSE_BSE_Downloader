@@ -30,6 +30,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Split, consolidation and equity-bonus adjustments on pre-ex-date symbol
   prices and share counts, so price and turnover stay continuous.
 - Pending delivery retry, atomic file replacement and corporate-action audit state.
+- A read-only `--audit` command that verifies digests, coverage, row counts and
+  symbol histories without changing a single byte of the data folder.
 - Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
@@ -209,6 +211,39 @@ uses the current append preferences and persisted EQ/SME/Index components.
 Existing files remain in place when validation or transaction recovery cannot
 be completed safely.
 
+## Checking the database without changing it
+
+The rebuild commands above repair; `--audit` only looks. It answers "is this
+database complete and self-consistent?" and writes nothing at all, so it is
+safe to run at any time, including while a download is in progress.
+
+```bash
+python main.py --audit                # the whole data folder
+python main.py --audit NSE_EQ BSE_EQ  # only these segments
+```
+
+It reports:
+
+- every sha256 the pipeline recorded, checked against the file on disk —
+  published files, reconciliation components, combined outputs and the
+  `.state/raw` snapshots;
+- coverage from `base_start_date` to the most recent session the exchanges
+  have published, so a truncated head and a stale tail are both visible, with
+  trading holidays taken from the offline calendar rather than guessed;
+- row counts against what was recorded and against neighbouring sessions, which
+  is the only plausibility check available for files written before the
+  pipeline database existed;
+- every `SYMBOLS/*.txt` history cross-checked against the raw snapshots, in
+  both directions;
+- orphans: components and snapshots for dates that were never published,
+  metadata without its snapshot, temporary files from writes that did not
+  finish, and registry entries naming files that do not exist.
+
+Exit codes are `0` for a clean database, `1` when there are findings, and `2`
+when the audit itself could not run. Notices — data older than the pipeline
+database, a tail you have not downloaded yet, the older symbol-file column set
+— are shown but do not fail the command.
+
 ## Date-aware report support
 
 The application automatically selects the proper official source:
@@ -280,6 +315,11 @@ revisions and rebuilds from checksummed raw snapshots. Lifecycle coverage also
 checks cooperative cancellation/window close, settings precedence, skipped
 updates, IST boundaries, official-calendar parsing, TTL refresh and stale fallback.
 
+The `--audit` tests cover every finding it can report and, separately, the
+promise that it reports them without writing: one test fingerprints every path,
+mtime, size and content digest under a data root around a full run and requires
+them to be identical afterwards.
+
 GitHub Actions runs the suite on Python 3.10 and 3.13 and fails below 70%
 coverage. Ruff, mypy and a no-build Nuitka command validation are separate
 release gates. The equivalent local commands are:
@@ -292,7 +332,7 @@ python build_nuitka_cross_platform.py --target linux
 ```
 They also verify bundle-root config/QR lookup, compiled-module version detection,
 platform-specific Nuitka command generation and the default no-build guard. The
-strict project mypy configuration currently passes all 45 source files.
+strict project mypy configuration currently passes all 56 source files.
 
 ## Version history
 

@@ -1364,24 +1364,106 @@ break a setup that works today; only a genuine `EACCES`/`EAGAIN` means "held".
 
 ## Phase 4 — Make the database verifiable
 
-### 4.1 A read-only `--audit` command — effort M
+### 4.1 A read-only `--audit` command — effort M — **done 2026-08-20**
 
-sha256 digests are written into the manifest and **never read back**. The only checksum
-verification in the codebase is for raw snapshots and the update downloader.
+sha256 digests were written into the manifest and **never read back**. The only checksum
+verification in the codebase was for raw snapshots and the update downloader.
 `get_missing_file_dates` computes expected dates only *between* the first and last
-existing filename, so a truncated head or stale tail is invisible. Nothing enumerates
-`<EX>/SYMBOLS/` at all. The only repair tooling is the destructive `--rebuild-*`.
+existing filename, so a truncated head or stale tail was invisible. Nothing enumerated
+`<EX>/SYMBOLS/` at all. The only repair tooling was the destructive `--rebuild-*`.
 
 For a database intended to accumulate over years and be traded off, "is it complete and
-self-consistent?" is currently unanswerable without mutating it.
+self-consistent?" was unanswerable without mutating it.
 
-- [ ] Verify every manifest digest against disk
-- [ ] Per-segment expected-row-count bands
-- [ ] Head/tail gap detection against `base_start_date`, not the first filename
-- [ ] `SYMBOLS/*.txt` date coverage cross-checked against the checksummed `.state/raw`
+- [x] Verify every manifest digest against disk
+- [x] Per-segment expected-row-count bands
+- [x] Head/tail gap detection against `base_start_date`, not the first filename
+- [x] `SYMBOLS/*.txt` date coverage cross-checked against the checksummed `.state/raw`
       snapshots
-- [ ] Orphan detection
-- [ ] Read-only: the command must never write
+- [x] Orphan detection
+- [x] Read-only: the command must never write
+
+Implemented in `src/services/audit_service.py`, driven by `python main.py --audit
+[EXCHANGE_SEGMENT ...]`. Exit codes are three-valued — `0` clean, `1` findings, `2` the
+audit could not look — because a script that treated the last two alike would report a
+broken audit as clean data.
+
+#### Read-only had to be built, not merely intended
+
+Four ordinary routes into a data root write before they read, so none of them could be
+used: `Config.get_data_path` creates the folder it is asked about (`resolve_data_path`
+was split out of it), `DataManager.__init__` creates the whole folder structure (the
+filename contract moved to `DAILY_FILE_PATTERNS` at module scope), `PipelineManifest`
+initialises its SQLite schema and imports the legacy JSON in its constructor, and
+`VersionedJSONStore.read` copies anything it cannot parse into `.state/quarantine`. A
+record this command cannot parse is reported, not moved.
+
+SQLite's own `mode=ro` is not read-only either, which measuring found and reading would
+not have: opening the real data root that way left `pipeline_state.sqlite3-shm`
+rewritten, because a WAL database needs its shared-memory index and a read-only
+*connection* still creates and stamps it. On a genuinely read-only medium it would fail
+outright. `ReadOnlyPipelineStore` copies the database to a temporary directory outside
+the data root and opens the copy.
+
+`tests/test_audit_command.py` fingerprints every path, mtime, size and content digest
+under a data root around a full run. Reverting the SQLite copy to `mode=ro` fails it.
+
+#### The false positive that would have made it useless
+
+For NSE EQ the daily stage records the *component's* digest under `sha256`, and the
+combined stage appends SME and Index rows to the published file afterwards, recording
+its own digest. Comparing the daily digest against that file would have reported every
+combined date as corrupt. The component and the combined output are each checked against
+their own digest instead; both halves are pinned by tests.
+
+The same distinction governs row counts: `_recorded_rows` prefers the combined stage's
+count exactly as `published_row_counts` does, or a deferred EQ file would look 600 rows
+short of its record every day.
+
+#### Coverage is judged offline, and declines what it cannot know
+
+The calendar comes from the saved holiday cache first and the bundled 2013–2026 calendar
+second. `HolidayManager.is_holiday` fetches a year it does not have, and an audit that
+hangs trying to reach NSE cannot help diagnose the TLS failure that withdrew v1.1.0.
+`HolidayManager.cached_calendar` was added for this. A year neither source covers is
+declined rather than guessed — assuming it had no holidays would report every Diwali in
+it as a missing session — and the report names those years.
+
+A stale tail is a notice rather than a warning. Freshness is the owner's decision, and a
+command that failed because he had not downloaded today is one he would stop running.
+
+#### Symbol coverage without loading the whole database
+
+Coverage is held as one bit per snapshot date. A finished multi-year backfill holds tens
+of millions of (symbol, date) pairs; a bitmask keeps a 4,000-symbol, 7,500-session
+expectation inside a few megabytes. A raw row is resolved to its file by identity first
+and ticker second, the way the store itself does it — resolving by ticker alone would
+look for the file a rename had already merged away, and report a healthy database as
+missing thousands of histories.
+
+#### Measured on the owner's real data root, 2026-08-20
+
+`~/NSE_BSE_Data`, 8,615 entries:
+
+- 308 recorded digests verified against disk across six segments, all matching;
+- 84 raw snapshots verified against their own metadata, all matching;
+- 8,096 symbol histories reconciled against those snapshots — 208,555 (symbol, date)
+  pairs — with no gap in either direction;
+- 12 findings, all true: six head gaps of 234 trading days each (the database starts
+  2026-07-01, `base_start_date` is 2025-07-15) and six stale tails of 8 sessions;
+- 2.8 seconds for the whole run;
+- the tree byte-for-byte and stat-for-stat unchanged afterwards.
+
+Two defects were found by running it rather than by reading it: the SQLite `-shm` write
+above, and `with_suffix` being unable to undo a two-part suffix, which turned
+`2026-07-01.csv.meta.json` into `2026-07-01.csv.csv` and reported all 84 healthy
+snapshots as widowed.
+
+#### What it does not do
+
+The per-segment earliest-available floor belongs to 4.2, so the head-gap check measures
+against `base_start_date` for every segment. Until 4.2 lands, a segment the exchange
+simply did not publish that far back will report a head gap that no download can close.
 
 ### 4.2 Missing fields and metadata — effort M
 
@@ -1465,7 +1547,9 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
 Phase 3  stop writing wrong data ← done.  3.1 parser, 3.2 volume, 3.3 identity,
                                    3.4 size/value gates, 3.5 one writer per root
    ↓
-Phase 4  verifiability           ← --audit answers "can I trust this?"
+Phase 4  verifiability           ← 4.1 done: --audit answers "can I trust
+                                   this?" without changing the answer.  4.2
+                                   missing fields still open; 4.3 done
    ↓
 Phase 5  storage model           ← the durable fix, built on a correct base
 ```

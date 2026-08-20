@@ -120,8 +120,14 @@ class SingleInstanceLock:
         self.path = self.base_path / ".state" / "app.lock"
         self._state: Optional[_LockState] = None
 
-    def _holder(self) -> Optional[dict[str, Any]]:
-        """Read whatever the holding process wrote about itself."""
+    def holder(self) -> Optional[dict[str, Any]]:
+        """Read whatever the holding process wrote about itself.
+
+        Public because ``--audit`` needs to say "a download may be running"
+        without acquiring the lock: taking it would stop the GUI, and a
+        read-only command has no business holding a writer's lock.  ``release``
+        truncates the file, so an empty file means nobody is holding it.
+        """
 
         try:
             content = self.path.read_text(encoding="utf-8").strip()
@@ -141,7 +147,7 @@ class SingleInstanceLock:
             locked = _lock_handle(handle)
         except OSError:
             handle.close()
-            raise InstanceLockError(self.path, self._holder()) from None
+            raise InstanceLockError(self.path, self.holder()) from None
         except Exception:
             handle.close()
             raise

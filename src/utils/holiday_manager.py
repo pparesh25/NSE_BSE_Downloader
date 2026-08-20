@@ -212,6 +212,24 @@ class HolidayManager:
             )
         return holidays, updated_at, years
 
+    def cached_calendar(self) -> Tuple[Set[date], Set[int]]:
+        """Holidays already on disk, and the years they actually cover.
+
+        ``get_holidays`` reaches the network when a year is missing or stale,
+        which a read-only diagnostic such as ``--audit`` must not do: an audit
+        that hangs on a broken TLS stack is no use for diagnosing one.  This
+        reports only what is already known, and says which years that is, so a
+        caller can decline to judge a year whose calendar it does not have
+        rather than mistake every holiday in it for a missing trading day.
+        """
+
+        try:
+            holidays, _updated_at, years = self._load_cache_record()
+        except Exception as error:
+            self.logger.error("Failed to load holiday cache: %s", error)
+            return set(), set()
+        return holidays, years
+
     def load_holidays_from_cache(self) -> Set[date]:
         try:
             holidays, _, _ = self._load_cache_record()

@@ -87,6 +87,8 @@ Examples:
     python main.py --rebuild-symbol NSE RELIANCE
     python main.py --rebuild-exchange BSE
     python main.py --rebuild-combined NSE 2026-07-31
+    python main.py --audit                # verify the database, change nothing
+    python main.py --audit NSE_EQ BSE_EQ  # verify only these segments
         """
     )
 
@@ -135,8 +137,43 @@ Examples:
         metavar=("EXCHANGE", "YYYY-MM-DD"),
         help="Rebuild one deterministic EQ+SME/Index output from components",
     )
+    # In the same mutually exclusive group as the repairs even though it
+    # repairs nothing: asking a question about the database while rewriting it
+    # would not answer the question.  ``default=None`` distinguishes "not
+    # asked" from ``--audit`` with no segments, which is an empty list.
+    repair.add_argument(
+        "--audit",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE_SEGMENT",
+        help=(
+            "Verify the data root against its own records without writing "
+            "anything; optionally limit it to named segments, e.g. NSE_EQ"
+        ),
+    )
 
     return parser
+
+
+def run_audit_mode(config_path: str, segments) -> int:
+    """Report on the data root without changing it.
+
+    Exit codes are three-valued on purpose, because "the database has a
+    problem" and "the audit could not look" are different answers and a
+    script that treats them alike would report a broken audit as clean data.
+    """
+
+    from src.services.audit_service import DatabaseAudit
+
+    try:
+        config = Config(config_path)
+        report = DatabaseAudit(config, segments).run()
+    except Exception as error:
+        print(f"Audit could not run: {error}")
+        return 2
+
+    print(report.render())
+    return 1 if report.failed else 0
 
 
 def run_rebuild_mode(config_path: str, args) -> int:
@@ -382,6 +419,9 @@ def main():
         return 1
 
     try:
+        if args.audit is not None:
+            return run_audit_mode(str(config_path), args.audit)
+
         if (
             args.rebuild_symbol
             or args.rebuild_exchange

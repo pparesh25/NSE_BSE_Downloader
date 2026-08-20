@@ -40,13 +40,25 @@ NSE_SME_FOUR_DIGIT_YEAR_START = date(2025, 10, 13)
 #: * NSE INDEX 2012-02-21;
 #: * NSE SME 2012-09-18, shortly after the Emerge platform opened.
 #:
-#: BSE EQ is deliberately absent. Two probes disagreed about it, and the
-#: second found that the date before its answer downloaded as well, so no
-#: floor was established. BSE answers 200 with an HTML page for a file it
-#: does not have and does so intermittently for files it *does*, which makes
-#: one failed request indistinguishable from a missing decade. An unbounded
-#: segment costs some doomed requests at the very start of a long backfill; a
-#: wrong floor would refuse data that exists.
+#: BSE EQ is deliberately absent, and not for want of measuring. Its archive
+#: is not contiguous, so no single date describes it. Five attempts per date
+#: on 2026-08-20:
+#:
+#: * 2016-12-08, 12-09 and 12-12 each served a complete bhavcopy of roughly
+#:   2,900 rows, five times out of five;
+#: * 2016-12-13 served nothing, five times out of five -- and it is a trading
+#:   day, not a holiday in the bundled 2016 calendar, whose only December
+#:   entry is the 25th;
+#: * 2017-03-15, 2019-07-10 and 2021-04-08 served complete bhavcopies again;
+#: * 2006-01-02, 2010-06-15, 2013-02-11, 2015-06-10, 2016-06-10 and every
+#:   sampled day of November and early December 2016 served nothing.
+#:
+#: So the boundary a binary search converges on is the edge of a hole rather
+#: than the start of the archive. A floor stops the application from even
+#: trying earlier dates, which puts real data permanently out of reach if it
+#: is wrong; leaving the segment unbounded only costs some doomed requests at
+#: the start of a backfill, and the absent-report ledger settles each of them
+#: once. Worth revisiting only with evidence of a contiguous start.
 SEGMENT_FIRST_AVAILABLE = {
     ("NSE", "EQ"): date(1994, 11, 3),
     ("NSE", "FO"): date(2000, 6, 12),

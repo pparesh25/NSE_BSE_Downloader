@@ -1477,11 +1477,17 @@ simply did not publish that far back will report a head gap that no download can
       was **not** added; see below. Files are headerless and `validate_daily_output`
       accepts 7, 9 or 11 columns, so three schema generations coexist as "valid" and
       the marker is what tells them apart.
-- [ ] A per-segment earliest-available floor, so "how far back can I go?" is answerable
-      from the UI. Today the picker offers 1990 and
-      `price_source('NSE','SME',date(1995,1,1))` returns a URL.
-- [ ] Delivery match-rate telemetry — the stage is marked complete on HTTP success,
-      before the join.
+- [x] A per-segment earliest-available floor — **done 2026-08-20**, for NSE. The
+      picker offered 1990 and `price_source('NSE','SME',date(1995,1,1))` returned a
+      URL. Four floors are pinned: NSE EQ 1994-11-03 (the exchange's own first
+      trading day), NSE FO 2000-06-12 (the day index futures launched), NSE INDEX
+      2012-02-21 and NSE SME 2012-09-18. **BSE EQ is left unbounded on purpose** —
+      see below.
+- [x] Delivery match-rate telemetry — **done 2026-08-20**. The stage was marked
+      complete on HTTP success, before the join, so a report that downloaded and
+      matched nothing published a date with every delivery field empty and no
+      complaint anywhere. The rate is now recorded against the stage and `--audit`
+      judges it against the neighbouring sessions rather than a fixed threshold.
 - [ ] Add `'TS'` to `BSE_EQUITY_SERIES`. BSE Startup scrips are silently absent from
       every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
       changing it later forces a migration of published files.
@@ -1566,6 +1572,25 @@ because a folder legitimately holds more than one at a time: a backfill writes o
 dates in the current format while yesterday's file is still in the previous one. It is
 rewritten only when its content changes, so a launch does not restamp a file in the
 user's data folder for nothing.
+
+#### What the BSE equity archive actually serves
+
+Worth knowing before any backfill is planned, because it bounds what a BSE history
+can contain. Measured on 2026-08-20, five attempts per date:
+
+| Date | Trading day | Served |
+| --- | --- | --- |
+| 2006-01-02, 2010-06-15, 2013-02-11, 2015-06-10, 2016-06-10 | yes | 0/5 |
+| 2016-11-30, 12-01, 12-02, 12-05, 12-06, 12-07 | yes | 0/5 |
+| 2016-12-08, 12-09, 12-12 | yes | **5/5**, ~2,900-row bhavcopies |
+| 2016-12-13 | **yes**, and not a holiday | **0/5** |
+| 2017-03-15, 2019-07-10, 2021-04-08 | yes | 5/5 |
+
+The hole at 2016-12-13, with complete files on either side of it, is what settles
+this: the archive is not contiguous, so a binary search converges on the edge of a
+hole and calls it a floor. No BSE floor is recorded, and none should be without
+evidence of a contiguous start. It also means a BSE equity backfill cannot reach much
+before December 2016 through this URL, whatever date the picker allows.
 
 #### Decided output contract
 

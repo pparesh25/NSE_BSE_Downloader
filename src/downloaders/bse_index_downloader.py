@@ -19,23 +19,13 @@ class BSEIndexDownloader(BaseDownloader):
     #: Declared once in source_resolver so the combined-file builder can apply
     #: the same floor.  Clamping only this downloader's dates, as before, left
     #: every earlier BSE EQ date waiting for an index component that never
-    #: existed.
+    #: existed.  The clamp itself now lives in ``BaseDownloader``, which
+    #: applies it to every segment with a known floor rather than to this one.
     FIRST_AVAILABLE_DATE = first_available("BSE", "INDEX")
 
     def __init__(self, config: Config):
         super().__init__("BSE", "INDEX", config)
         self.memory_optimizer = MemoryOptimizer()
-
-    def get_date_range(
-        self,
-        custom_start: Optional[date] = None,
-        custom_end: Optional[date] = None,
-    ) -> tuple[date, date]:
-        start_date, end_date = super().get_date_range(custom_start, custom_end)
-        floor = self.FIRST_AVAILABLE_DATE
-        if floor is not None:
-            start_date = max(start_date, floor)
-        return start_date, end_date
 
     def build_url(self, target_date: date) -> str:
         return price_source("BSE", "INDEX", target_date).url

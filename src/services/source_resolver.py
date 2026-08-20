@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Iterable, Optional
 
 
 NSE_UDIFF_START = date(2024, 7, 8)
@@ -27,8 +27,31 @@ NSE_SME_FOUR_DIGIT_YEAR_START = date(2025, 10, 13)
 #: Earliest date each segment has an official report for.  A segment is not a
 #: missing dependency before this date -- it never existed -- so a combined file
 #: must still publish rather than waiting forever for a component the exchange
-#: never produced.  Segments absent from this mapping have no known floor.
+#: never produced.  It is also the floor every download clamps to, and the
+#: earliest date the date picker offers.  Segments absent from this mapping
+#: have no known floor, which is not the same as an early one: a caller must
+#: keep its own default rather than assume.
+#:
+#: Pinned against the archives on 2026-08-20 the same way the delivery floors
+#: were -- the date itself downloads and the previous weekday does not:
+#:
+#: * NSE EQ 1994-11-03, which is the exchange's own first trading day;
+#: * NSE FO 2000-06-12, the day index futures launched;
+#: * NSE INDEX 2012-02-21;
+#: * NSE SME 2012-09-18, shortly after the Emerge platform opened.
+#:
+#: BSE EQ is deliberately absent. Two probes disagreed about it, and the
+#: second found that the date before its answer downloaded as well, so no
+#: floor was established. BSE answers 200 with an HTML page for a file it
+#: does not have and does so intermittently for files it *does*, which makes
+#: one failed request indistinguishable from a missing decade. An unbounded
+#: segment costs some doomed requests at the very start of a long backfill; a
+#: wrong floor would refuse data that exists.
 SEGMENT_FIRST_AVAILABLE = {
+    ("NSE", "EQ"): date(1994, 11, 3),
+    ("NSE", "FO"): date(2000, 6, 12),
+    ("NSE", "INDEX"): date(2012, 2, 21),
+    ("NSE", "SME"): date(2012, 9, 18),
     ("BSE", "INDEX"): date(2025, 4, 17),
 }
 
@@ -37,6 +60,25 @@ def first_available(exchange: str, segment: str) -> Optional[date]:
     """Return the first date this segment can be downloaded, if bounded."""
 
     return SEGMENT_FIRST_AVAILABLE.get((exchange.upper(), segment.upper()))
+
+
+def earliest_available(
+    segments: Iterable[tuple[str, str]]
+) -> Optional[date]:
+    """The earliest date any of these segments can be downloaded at all.
+
+    ``None`` when even one of them has no established floor.  An unknown
+    floor is not the same as an early one, so a caller bounding a date picker
+    keeps its own default rather than guessing a security's history away.
+    """
+
+    floors = []
+    for exchange, segment in segments:
+        floor = first_available(exchange, segment)
+        if floor is None:
+            return None
+        floors.append(floor)
+    return min(floors) if floors else None
 
 
 def is_available(exchange: str, segment: str, target_date: date) -> bool:

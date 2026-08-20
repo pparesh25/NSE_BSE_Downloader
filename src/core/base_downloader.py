@@ -283,12 +283,26 @@ class BaseDownloader(ABC):
         Returns:
             Tuple of (start_date, end_date)
         """
-        return self.data_manager.calculate_date_range(
+        start_date, end_date = self.data_manager.calculate_date_range(
             self.exchange,
             self.segment,
             custom_start,
-            custom_end
+            custom_end,
         )
+        # Never ask a source for a date it predates.  A multi-year backfill
+        # would otherwise spend thousands of requests on reports that were
+        # never published, and settle each one through the absent-report
+        # ledger as though the exchange had merely lost them.
+        from ..services.source_resolver import first_available
+
+        floor = first_available(self.exchange, self.segment)
+        if floor is not None and start_date < floor:
+            self.logger.info(
+                "%s_%s starts at %s; %s is before that source existed",
+                self.exchange, self.segment, floor, start_date,
+            )
+            start_date = floor
+        return start_date, end_date
 
     def get_working_days(self, start_date: date, end_date: date, include_weekends: bool = False) -> List[date]:
         """Get list of working days in date range"""

@@ -60,3 +60,36 @@ def test_bse_equity_zip_eras_share_one_filename():
     assert before.url.endswith("BSE_EQ_BHAVCOPY_30122022.ZIP")
     assert after.url.endswith("BSE_EQ_BHAVCOPY_02012023.ZIP")
     assert before.era != after.era
+
+
+def test_every_recorded_floor_is_a_date_the_exchange_could_have_traded():
+    """Floors are evidence, not guesses, so they must at least be plausible."""
+
+    from src.services.source_resolver import SEGMENT_FIRST_AVAILABLE
+
+    for (exchange, segment), floor in SEGMENT_FIRST_AVAILABLE.items():
+        assert floor.weekday() < 5, f"{exchange}_{segment} floor is a weekend"
+        assert date(1994, 1, 1) <= floor <= date(2026, 1, 1), (
+            f"{exchange}_{segment} floor {floor} is outside the plausible range"
+        )
+
+
+def test_an_unknown_floor_keeps_a_caller_from_guessing():
+    from src.services.source_resolver import earliest_available, is_available
+
+    # BSE EQ has no established floor, so nothing may bound a range with it.
+    assert earliest_available([("NSE", "EQ"), ("BSE", "EQ")]) is None
+    assert is_available("BSE", "EQ", date(1995, 1, 2))
+
+    assert earliest_available([("NSE", "EQ"), ("NSE", "SME")]) == date(
+        1994, 11, 3
+    )
+
+
+def test_a_segment_refuses_dates_before_its_source_existed():
+    from src.services.source_resolver import is_available
+
+    assert not is_available("NSE", "SME", date(2012, 9, 17))
+    assert is_available("NSE", "SME", date(2012, 9, 18))
+    assert not is_available("NSE", "FO", date(2000, 6, 9))
+    assert is_available("NSE", "FO", date(2000, 6, 12))

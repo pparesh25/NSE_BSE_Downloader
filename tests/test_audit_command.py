@@ -1190,3 +1190,47 @@ def test_dates_recorded_before_the_match_rate_existed_are_skipped(tmp_path):
 
     assert _categories(report, "delivery-match-drop") == []
     assert not report.failed
+
+
+def test_a_segment_is_not_measured_against_a_date_its_source_predates(
+    monkeypatch, tmp_path
+):
+    """One `base_start_date` covers every segment; the exchanges do not.
+
+    BSE published its index report from 2025-04-17.  Measuring that segment
+    against a 2026 configured start is right; measuring it against 2024 would
+    report a head gap no download could ever close.
+    """
+
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE, ("NSE", "FO"), DAY
+    )
+    config = _config(date(2026, 7, 20))
+    published = _publish(config, "FO", DAY, ROW)
+    _record_simple(config.base_data_path, "FO", DAY, published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert _categories(report, "head-gap") == []
+    assert report.findings == ()
+
+
+def test_a_gap_above_the_floor_is_still_reported(monkeypatch, tmp_path):
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE,
+        ("NSE", "FO"),
+        date(2026, 7, 28),
+    )
+    config = _config(date(2026, 7, 20))
+    published = _publish(config, "FO", DAY, ROW)
+    _record_simple(config.base_data_path, "FO", DAY, published)
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    head = _categories(report, "head-gap")
+    assert len(head) == 1
+    assert "2026-07-28 to 2026-07-29" in head[0].message

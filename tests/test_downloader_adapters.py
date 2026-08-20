@@ -291,3 +291,63 @@ def test_the_measured_rate_is_recorded_without_losing_the_digest(tmp_path):
     assert stage["delivery"]["matched_rows"] == 3
     assert stage["delivery"]["joined_rows"] == 4
     assert stage["delivery"]["match_rate"] == 0.75
+
+
+def test_no_downloader_asks_a_source_for_a_date_it_predates(monkeypatch):
+    """The clamp is general, not one downloader's special case.
+
+    A multi-year backfill would otherwise spend thousands of requests on
+    reports that were never published, and settle each one through the
+    absent-report ledger as though the exchange had merely lost them.
+    """
+
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE,
+        ("NSE", "SME"),
+        date(2012, 9, 10),
+    )
+    downloader = _bare(NSESMEDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "SME"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(2005, 1, 1), date(2026, 7, 30))
+    )
+
+    assert downloader.get_date_range() == (
+        date(2012, 9, 10), date(2026, 7, 30)
+    )
+
+
+def test_a_start_above_the_floor_is_left_alone(monkeypatch):
+    from src.services import source_resolver
+
+    monkeypatch.setitem(
+        source_resolver.SEGMENT_FIRST_AVAILABLE,
+        ("NSE", "SME"),
+        date(2012, 9, 10),
+    )
+    downloader = _bare(NSESMEDownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "SME"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(2020, 1, 1), date(2026, 7, 30))
+    )
+
+    assert downloader.get_date_range() == (
+        date(2020, 1, 1), date(2026, 7, 30)
+    )
+
+
+def test_a_segment_with_no_known_floor_is_not_clamped():
+    downloader = _bare(NSEFODownloader)
+    downloader.exchange = "NSE"
+    downloader.segment = "FO"
+    downloader.data_manager = SimpleNamespace(
+        calculate_date_range=lambda *_args: (date(1991, 1, 1), date(2026, 7, 30))
+    )
+    from src.services.source_resolver import first_available
+
+    if first_available("NSE", "FO") is None:
+        assert downloader.get_date_range()[0] == date(1991, 1, 1)

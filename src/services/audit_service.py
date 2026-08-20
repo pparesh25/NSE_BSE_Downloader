@@ -59,6 +59,7 @@ from .schema_manifest import (
     generations_for,
     read_manifest,
 )
+from .source_resolver import first_available
 from .symbol_history import SymbolHistoryStore
 
 ERROR = "error"
@@ -936,6 +937,15 @@ class DatabaseAudit:
         configured = self._configured_start()
         if configured is None:
             return
+
+        # `base_start_date` is one setting for every segment, but the
+        # exchanges did not all begin publishing on the same day.  Measuring a
+        # segment against a date its source never covered would report a gap
+        # no download could ever close.
+        exchange, segment = exchange_segment.split("_", 1)
+        published_from = first_available(exchange, segment)
+        if published_from is not None and configured < published_from:
+            configured = published_from
 
         floor = min([configured, *published]) if published else configured
         ceiling = self.calendar.expected_last_trading_date()

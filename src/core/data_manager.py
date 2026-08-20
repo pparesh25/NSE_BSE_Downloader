@@ -103,6 +103,7 @@ class DataManager:
                 exchange, segment = exchange_segment.split('_', 1)
                 data_path = self.config.get_data_path(exchange, segment)
                 data_path.mkdir(parents=True, exist_ok=True)
+                self._refresh_schema_manifest(data_path, exchange, segment)
 
             self.logger.info("Folder structure created successfully")
 
@@ -111,6 +112,29 @@ class DataManager:
                 f"Failed to create folder structure: {e}",
                 operation="create_folders"
             )
+
+    def _refresh_schema_manifest(
+        self, data_path: Path, exchange: str, segment: str
+    ) -> None:
+        """Keep the marker beside the data current, and never fail over it.
+
+        The manifest is documentation, not state: a folder that cannot take
+        one is still a folder the application can publish into, so a failure
+        here is logged rather than allowed to stop a download.
+        """
+
+        from ..services.schema_manifest import write_manifest
+
+        try:
+            written = write_manifest(data_path, exchange, segment)
+        except OSError as error:
+            self.logger.warning(
+                "Could not write the schema marker for %s_%s: %s",
+                exchange, segment, error,
+            )
+            return
+        if written is not None:
+            self.logger.info("Wrote schema marker %s", written)
 
     def get_last_file_date(self, exchange: str, segment: str) -> Optional[date]:
         """

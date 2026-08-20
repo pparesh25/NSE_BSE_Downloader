@@ -26,6 +26,7 @@ from src.services.canonical_data import (
     SYMBOL_HISTORY_COLUMNS,
 )
 from src.services.pipeline_state import PipelineManifest
+from src.services.schema_manifest import SCHEMA_FILENAME, write_manifest
 
 DAY = date(2026, 7, 30)
 EARLIER = date(2026, 7, 29)
@@ -74,6 +75,13 @@ def _config_file(tmp_path: Path, start: date = DAY) -> str:
     return str(target)
 
 
+#: One published row at the current eleven-column width.  The audit checks a
+#: file's column count against the folder's schema marker, so a fixture row
+#: has to be as wide as a real one.
+ROW = "SYMBOL,20260730,1,2,1,11,10,5,50,20,1\n"
+TAMPERED_ROW = "SYMBOL,20260730,1,2,1,99,10,5,50,20,1\n"
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -90,9 +98,14 @@ def _fingerprint(root: Path) -> tuple[tuple[str, int, int, str], ...]:
 
 
 def _publish(config: Config, segment: str, target_date: date, body: str) -> Path:
-    """Write one published file the way a completed download leaves it."""
+    """Write one published file the way a completed download leaves it.
+
+    Including the schema marker, which the application refreshes whenever it
+    prepares the folder structure.
+    """
 
     folder = config.get_data_path("NSE", segment)
+    write_manifest(folder, "NSE", segment)
     path = folder / f"{target_date.isoformat()}-NSE-{segment}.txt"
     path.write_text(body, encoding="utf-8")
     return path
@@ -129,7 +142,7 @@ def healthy(tmp_path):
     """A data root holding one recorded, verifiable NSE_FO date."""
 
     config = _config()
-    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", DAY, ROW)
     _record_simple(config.base_data_path, "FO", DAY, published)
     return config, published
 
@@ -150,7 +163,7 @@ def test_a_healthy_segment_verifies_and_reports_nothing(healthy):
 def test_a_rewritten_file_is_caught_by_its_recorded_digest(healthy):
     config, published = healthy
 
-    published.write_text("SYMBOL,9,9,9\n", encoding="utf-8")
+    published.write_text(TAMPERED_ROW, encoding="utf-8")
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -177,7 +190,7 @@ def test_a_deleted_file_is_caught_even_though_the_record_survives(healthy):
 def test_a_file_no_record_vouches_for_is_reported(healthy):
     config, _ = healthy
 
-    _publish(config, "FO", date(2026, 7, 31), "SYMBOL,1,2,3\n")
+    _publish(config, "FO", date(2026, 7, 31), ROW)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -195,7 +208,7 @@ def test_data_older_than_the_manifest_is_a_notice_rather_than_a_failure(
     # Nothing can vouch for them, but they are not evidence of damage.
     config, _ = healthy
 
-    _publish(config, "FO", EARLIER, "SYMBOL,1,2,3\n")
+    _publish(config, "FO", EARLIER, ROW)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -275,7 +288,7 @@ def deferred(tmp_path):
     component = component_dir / f"{DAY.isoformat()}.csv"
     component.write_text("EQ\n", encoding="utf-8")
 
-    published = _publish(config, "EQ", DAY, "EQ\nSME\nINDEX\n")
+    published = _publish(config, "EQ", DAY, ROW * 3)
     _record_deferred(config, component, published)
     return config, component, published
 
@@ -293,7 +306,7 @@ def test_an_appended_combined_file_is_verified_not_rejected(deferred):
 def test_corrupting_the_combined_file_is_still_caught(deferred):
     config, _, published = deferred
 
-    published.write_text("EQ\nSME\nTAMPERED\n", encoding="utf-8")
+    published.write_text(ROW * 2 + TAMPERED_ROW, encoding="utf-8")
 
     report = DatabaseAudit(config, ["NSE_EQ"]).run()
 
@@ -356,7 +369,7 @@ def test_the_command_separates_a_broken_database_from_broken_data(
     config_file = _config_file(tmp_path)
     assert main.run_audit_mode(config_file, ["NSE_FO"]) == 0
 
-    published.write_text("SYMBOL,9,9,9\n", encoding="utf-8")
+    published.write_text(TAMPERED_ROW, encoding="utf-8")
     assert main.run_audit_mode(config_file, ["NSE_FO"]) == 1
 
     database = config.base_data_path / ".state" / "pipeline_state.sqlite3"
@@ -411,7 +424,7 @@ def test_a_record_that_cannot_be_parsed_is_reported_not_quarantined(healthy):
 
 def test_a_complete_stage_with_no_digest_is_a_finding_in_itself(tmp_path):
     config = _config()
-    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", DAY, ROW)
 
     manifest = PipelineManifest(config.base_data_path)
     manifest.begin(
@@ -439,7 +452,7 @@ def test_a_data_root_that_moved_is_matched_by_layout_not_by_path(tmp_path):
     # Recorded paths are absolute and were written wherever the data root was
     # at the time.  A restored backup must not report every file as missing.
     config = _config()
-    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", DAY, ROW)
     elsewhere = Path("/somewhere/else/NSE_BSE_Data/NSE/FO") / published.name
 
     manifest = PipelineManifest(config.base_data_path)
@@ -600,7 +613,7 @@ def test_a_truncated_head_is_reported_against_the_configured_start(tmp_path):
     # the first and last filename, so a database that never went back far
     # enough looks complete to it.
     config = _config(date(2026, 7, 27))
-    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", DAY, ROW)
     _record_simple(config.base_data_path, "FO", DAY, published)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
@@ -615,7 +628,7 @@ def test_a_stale_tail_is_visible_without_failing_the_audit(
     monkeypatch, tmp_path
 ):
     config = _config()
-    published = _publish(config, "FO", DAY, "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", DAY, ROW)
     _record_simple(config.base_data_path, "FO", DAY, published)
     _pin_clock(monkeypatch, date(2026, 8, 7))
 
@@ -632,7 +645,7 @@ def test_a_stale_tail_is_visible_without_failing_the_audit(
 def test_a_missing_day_inside_the_published_range_is_reported(tmp_path):
     config = _config(date(2026, 7, 28))
     for day in (date(2026, 7, 28), DAY):
-        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        published = _publish(config, "FO", day, ROW)
         _record_simple(config.base_data_path, "FO", day, published)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
@@ -650,7 +663,7 @@ def test_a_holiday_is_not_mistaken_for_a_missing_day(monkeypatch, tmp_path):
     _pin_clock(monkeypatch, date(2026, 6, 29))
     config = _config(date(2026, 6, 25))
     for day in (date(2026, 6, 25), date(2026, 6, 29)):
-        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        published = _publish(config, "FO", day, ROW)
         _record_simple(config.base_data_path, "FO", day, published)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
@@ -661,7 +674,7 @@ def test_a_holiday_is_not_mistaken_for_a_missing_day(monkeypatch, tmp_path):
 def test_a_date_the_exchange_never_published_is_not_a_gap(tmp_path):
     config = _config(date(2026, 7, 28))
     for day in (date(2026, 7, 28), DAY):
-        published = _publish(config, "FO", day, "SYMBOL,1,2,3\n")
+        published = _publish(config, "FO", day, ROW)
         _record_simple(config.base_data_path, "FO", day, published)
     PipelineManifest(config.base_data_path).skip_date(
         "NSE", "FO", date(2026, 7, 29), "The exchange published no report"
@@ -680,7 +693,7 @@ def test_a_year_with_no_trading_calendar_is_declined_not_guessed(
     # holiday-free would report every Diwali in it as a missing session.
     _pin_clock(monkeypatch, date(2005, 6, 30))
     config = _config(date(2005, 6, 1))
-    published = _publish(config, "FO", date(2005, 6, 30), "SYMBOL,1,2,3\n")
+    published = _publish(config, "FO", date(2005, 6, 30), ROW)
     _record_simple(config.base_data_path, "FO", date(2005, 6, 30), published)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
@@ -702,7 +715,7 @@ def test_a_truncated_day_is_caught_by_neighbours_when_no_digest_can_be(
     ]
     for day in days:
         rows = 5 if day == date(2026, 7, 28) else 100
-        _publish(config, "FO", day, "SYMBOL,1,2,3\n" * rows)
+        _publish(config, "FO", day, ROW * rows)
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -715,9 +728,7 @@ def test_a_truncated_day_is_caught_by_neighbours_when_no_digest_can_be(
 def test_a_file_that_gained_rows_since_publication_says_how(healthy):
     config, published = healthy
 
-    published.write_text(
-        "SYMBOL,1,2,3\nSYMBOL,4,5,6\n", encoding="utf-8"
-    )
+    published.write_text(ROW * 2, encoding="utf-8")
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -792,7 +803,7 @@ def symbols_root(tmp_path):
 
     config = _config(EARLIER)
     for day in (EARLIER, DAY):
-        published = _publish(config, "EQ", day, "ACME,1\nBOLT,1\n")
+        published = _publish(config, "EQ", day, ROW * 2)
         _record_simple(config.base_data_path, "EQ", day, published)
         _write_snapshot(config, "NSE", "EQ", day, [ACME, BOLT])
     _write_history(config, "NSE", "acme.txt", [EARLIER, DAY])
@@ -998,7 +1009,7 @@ def test_a_registry_naming_a_file_that_does_not_exist_is_reported(
 
 def test_two_files_claiming_one_date_are_reported(healthy):
     config, published = healthy
-    published.with_suffix(".csv").write_text("SYMBOL,1,2,3\n", encoding="utf-8")
+    published.with_suffix(".csv").write_text(ROW, encoding="utf-8")
 
     report = DatabaseAudit(config, ["NSE_FO"]).run()
 
@@ -1035,3 +1046,63 @@ def test_the_symbol_check_uses_every_snapshot_the_exchange_has(symbols_root):
 
     assert _categories(report, "unaccounted-symbol-file") == []
     assert report.symbols[0].snapshots == 3
+
+
+def test_a_folder_with_no_schema_marker_is_noted(healthy):
+    config, published = healthy
+    (published.parent / SCHEMA_FILENAME).unlink()
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    missing = _categories(report, "schema-marker-missing")
+    assert len(missing) == 1
+    assert missing[0].severity == "notice"
+    assert not report.failed
+
+
+def test_an_unreadable_schema_marker_is_an_error(healthy):
+    config, published = healthy
+    (published.parent / SCHEMA_FILENAME).write_text("{ no", encoding="utf-8")
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert len(_categories(report, "schema-marker-unreadable")) == 1
+    assert report.failed
+
+
+def test_a_file_whose_width_the_marker_cannot_explain_is_caught(healthy):
+    """The ambiguity the marker exists to remove, measured from both ends."""
+
+    config, published = healthy
+    published.write_text("ONE,TWO,THREE\n", encoding="utf-8")
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    unexplained = _categories(report, "unexplained-generation")
+    assert len(unexplained) == 1
+    assert DAY.isoformat() in unexplained[0].message
+
+
+def test_a_marker_from_another_build_is_noted_not_failed(healthy):
+    config, published = healthy
+    marker = published.parent / SCHEMA_FILENAME
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["columns"] = payload["columns"][:9]
+    payload["written_by"] = "9.9.9"
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    stale = _categories(report, "schema-marker-stale")
+    assert len(stale) == 1
+    assert "9.9.9" in stale[0].message
+    assert not report.failed
+
+
+def test_the_marker_itself_is_not_reported_as_a_stray_file(healthy):
+    config, _ = healthy
+
+    report = DatabaseAudit(config, ["NSE_FO"]).run()
+
+    assert _categories(report, "unrecognised-file") == []
+    assert report.findings == ()

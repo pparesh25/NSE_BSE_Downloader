@@ -51,6 +51,12 @@ from .canonical_data import (
 )
 from .instance_lock import SingleInstanceLock
 from .pipeline_sqlite import ReadOnlyPipelineStore
+from .schema_manifest import (
+    SCHEMA_FILENAME,
+    daily_columns_for,
+    generations_for,
+    read_manifest,
+)
 from .symbol_history import SymbolHistoryStore
 
 ERROR = "error"
@@ -714,6 +720,8 @@ class DatabaseAudit:
                 continue
             match = pattern.fullmatch(path.name)
             if match is None:
+                if path.name == SCHEMA_FILENAME:
+                    continue  # Checked by _check_schema_marker, not stray.
                 if path.name.endswith(".tmp"):
                     self._add(
                         WARNING,
@@ -788,6 +796,85 @@ class DatabaseAudit:
                     target_date=file_date,
                     path=path,
                 )
+
+    # ----------------------------------------------------------- schema marker
+
+    def _check_schema_marker(
+        self, exchange: str, segment: str, published: dict[date, Path]
+    ) -> None:
+        """Confirm the folder says what its headerless files mean.
+
+        Every width the application has ever published is still accepted as
+        valid, so without this marker "valid" tells a reader nothing about
+        which generation a file is -- whether column nine is a delivery
+        quantity or a turnover.
+        """
+
+        exchange_segment = f"{exchange}_{segment}"
+        folder = self.config.resolve_data_path(exchange, segment)
+        if not folder.is_dir() or not published:
+            return
+        path = folder / SCHEMA_FILENAME
+        manifest = read_manifest(folder)
+        if manifest is None:
+            self._add(
+                NOTICE if not path.exists() else ERROR,
+                "schema-marker-missing" if not path.exists()
+                else "schema-marker-unreadable",
+                "this folder has no readable marker saying what its "
+                "headerless columns mean; the next run of the application "
+                "writes one",
+                exchange_segment=exchange_segment,
+                path=folder,
+            )
+            return
+
+        expected = daily_columns_for(segment)
+        recorded = manifest.get("columns")
+        if recorded != expected:
+            self._add(
+                NOTICE,
+                "schema-marker-stale",
+                "the marker describes a different column set from the one "
+                "this version publishes, so the folder was last written by "
+                f"another build ({manifest.get('written_by', 'unknown')})",
+                exchange_segment=exchange_segment,
+                path=path,
+            )
+            return
+
+        known = {
+            len(names)
+            for names in manifest.get("generations", {}).values()
+            if isinstance(names, list)
+        } or {len(names) for names in generations_for(segment).values()}
+        unexplained: list[date] = []
+        for target_date, published_path in sorted(published.items()):
+            width = self._published_width(published_path)
+            if width is not None and width not in known:
+                unexplained.append(target_date)
+        if unexplained:
+            self._add(
+                ERROR,
+                "unexplained-generation",
+                f"{len(unexplained)} file(s) have a column count the marker "
+                f"does not describe: {_describe(unexplained)}",
+                exchange_segment=exchange_segment,
+                path=path,
+            )
+
+    @staticmethod
+    def _published_width(path: Path) -> Optional[int]:
+        """Column count of a published file, from its first row alone."""
+
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                first = handle.readline()
+        except OSError:
+            return None
+        if not first.strip():
+            return None
+        return len(next(csv.reader([first.rstrip("\r\n")]), []))
 
     # --------------------------------------------------------------- coverage
 
@@ -1566,6 +1653,7 @@ class DatabaseAudit:
                 published,
                 {target_date for target_date, _ in entries},
             )
+            self._check_schema_marker(exchange, segment, published)
             self._check_coverage(exchange_segment, published, entries)
             self._check_row_counts(exchange_segment, published, entries)
             summaries.append(summary)

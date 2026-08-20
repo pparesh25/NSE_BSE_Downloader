@@ -19,14 +19,20 @@ from ..core.exceptions import DataProcessingError
 logger = logging.getLogger(__name__)
 
 
+#: Turnover and previous close close out the published contract.  They are
+#: appended rather than inserted so a consumer reading the first nine columns
+#: positionally is unaffected, and they are the only two fields the exchanges
+#: publish that cannot be recovered from `.state/raw` later -- everything else
+#: is already stored at full fidelity and can be re-published offline.
+EXTENDED_MARKET_COLUMNS = ["TURNOVER", "PREV_CLOSE"]
 EQUITY_DAILY_COLUMNS = [
     "SYMBOL", "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME",
-    "DELIVERY_QTY", "DELIVERY_PERCENT",
+    "DELIVERY_QTY", "DELIVERY_PERCENT", *EXTENDED_MARKET_COLUMNS,
 ]
-INDEX_DAILY_COLUMNS = EQUITY_DAILY_COLUMNS[:7]
+INDEX_DAILY_COLUMNS = EQUITY_DAILY_COLUMNS[:7] + EXTENDED_MARKET_COLUMNS
 FO_DAILY_COLUMNS = [
     "SYMBOL", "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME",
-    "OPEN_INTEREST", "CHANGE_IN_OI",
+    "OPEN_INTEREST", "CHANGE_IN_OI", *EXTENDED_MARKET_COLUMNS,
 ]
 # The trailing ISIN column makes each symbol file self-identifying: a merge
 # that folded two securities together is detectable and reversible from the
@@ -37,9 +43,24 @@ LEGACY_SYMBOL_HISTORY_COLUMNS = [
     "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "SERIES",
     "TOTAL_TRADES", "QTY_PER_TRADE", "DELIVERY_QTY", "DELIVERY_PERCENT",
 ]
-SYMBOL_HISTORY_COLUMNS = LEGACY_SYMBOL_HISTORY_COLUMNS + ["ISIN"]
+#: ``ISIN`` keeps its position: turnover and previous close go after it so
+#: that no column already written to a history file moves.
+SYMBOL_HISTORY_COLUMNS = (
+    LEGACY_SYMBOL_HISTORY_COLUMNS + ["ISIN"] + EXTENDED_MARKET_COLUMNS
+)
+#: What a history file looked like before this generation, kept so an existing
+#: one can still be read and upgraded rather than refused.
+PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS = LEGACY_SYMBOL_HISTORY_COLUMNS + ["ISIN"]
 INTERNAL_EQUITY_COLUMNS = EQUITY_DAILY_COLUMNS + [
     "SERIES", "TOTAL_TRADES", "QTY_PER_TRADE", "ISIN", "SECURITY_ID",
+]
+#: The snapshot column list before turnover and previous close existed.
+#: ``read_internal_snapshot`` matches the list exactly and quarantines what it
+#: cannot match, so without this every snapshot already on disk would be
+#: quarantined by the first rebuild after the upgrade.
+PRE_EXTENDED_INTERNAL_EQUITY_COLUMNS = [
+    column for column in INTERNAL_EQUITY_COLUMNS
+    if column not in set(EXTENDED_MARKET_COLUMNS)
 ]
 
 # Identity values act as merge keys: two symbols that share one stable key are
@@ -81,11 +102,15 @@ class SourceSchema:
     date_column: Optional[str] = None
 
 
+# Turnover and previous close are listed as *required* wherever the era
+# publishes them.  A missing column then stops that date with a message naming
+# it, instead of publishing a decade of silently empty turnover that no
+# `.state/raw` snapshot could ever fill in afterwards.
 SOURCE_SCHEMAS = {
     "nse-equity-legacy": SourceSchema(
         frozenset({
             "SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE",
-            "TOTTRDQTY", "TIMESTAMP",
+            "TOTTRDQTY", "TIMESTAMP", "TOTTRDVAL", "PREVCLOSE",
         }),
         ("SYMBOL", "SERIES"),
         "TIMESTAMP",
@@ -93,7 +118,7 @@ SOURCE_SCHEMAS = {
     "nse-equity-udiff": SourceSchema(
         frozenset({
             "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
-            "LwPric", "ClsPric", "TtlTradgVol",
+            "LwPric", "ClsPric", "TtlTradgVol", "TtlTrfVal", "PrvsClsgPric",
         }),
         ("TckrSymb", "SctySrs"),
         "TradDt",
@@ -102,6 +127,7 @@ SOURCE_SCHEMAS = {
         frozenset({
             "INSTRUMENT", "SYMBOL", "EXPIRY_DT", "OPEN", "HIGH", "LOW",
             "CLOSE", "CONTRACTS", "OPEN_INT", "CHG_IN_OI", "TIMESTAMP",
+            "VAL_INLAKH",
         }),
         ("INSTRUMENT", "SYMBOL", "EXPIRY_DT"),
         "TIMESTAMP",
@@ -110,7 +136,7 @@ SOURCE_SCHEMAS = {
         frozenset({
             "FinInstrmTp", "TckrSymb", "XpryDt", "TradDt", "OpnPric",
             "HghPric", "LwPric", "ClsPric", "TtlTradgVol", "OpnIntrst",
-            "ChngInOpnIntrst",
+            "ChngInOpnIntrst", "TtlTrfVal", "PrvsClsgPric",
         }),
         ("FinInstrmTp", "TckrSymb", "XpryDt"),
         "TradDt",
@@ -118,21 +144,21 @@ SOURCE_SCHEMAS = {
     "nse-sme-two-digit-year": SourceSchema(
         frozenset({
             "SERIES", "SYMBOL", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE",
-            "CLOSE_PRICE", "NET_TRDQTY",
+            "CLOSE_PRICE", "NET_TRDQTY", "NET_TRDVAL", "PREV_CL_PR",
         }),
         ("SERIES", "SYMBOL"),
     ),
     "nse-sme-four-digit-year": SourceSchema(
         frozenset({
             "SERIES", "SYMBOL", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE",
-            "CLOSE_PRICE", "NET_TRDQTY",
+            "CLOSE_PRICE", "NET_TRDQTY", "NET_TRDVAL", "PREV_CL_PR",
         }),
         ("SERIES", "SYMBOL"),
     ),
     "bse-equity-isin-legacy": SourceSchema(
         frozenset({
             "SC_CODE", "SC_NAME", "SC_GROUP", "OPEN", "HIGH", "LOW",
-            "CLOSE", "NO_OF_SHRS", "TRADING_DATE",
+            "CLOSE", "NO_OF_SHRS", "TRADING_DATE", "NET_TURNOV", "PREVCLOSE",
         }),
         ("SC_CODE",),
         "TRADING_DATE",
@@ -141,7 +167,7 @@ SOURCE_SCHEMAS = {
         frozenset({
             "SCRIP ID", "SCRIP_CODE", "SC_GROUP", "OPEN PRICE",
             "HIGH PRICE", "LOW PRICE", "CLOSING PRICE", "NO_OF_SHRS",
-            "TRADING_DATE",
+            "TRADING_DATE", "NET_TURNOV", "PREVIOUS CLOSE PRICE",
         }),
         ("SCRIP_CODE",),
         "TRADING_DATE",
@@ -149,7 +175,8 @@ SOURCE_SCHEMAS = {
     "bse-equity-udiff": SourceSchema(
         frozenset({
             "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
-            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId",
+            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId", "TtlTrfVal",
+            "PrvsClsgPric",
         }),
         ("FinInstrmId",),
         "TradDt",
@@ -161,7 +188,8 @@ SOURCE_SCHEMAS = {
     "bse-equity-udiff-zip": SourceSchema(
         frozenset({
             "TradDt", "TckrSymb", "SctySrs", "OpnPric", "HghPric",
-            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId",
+            "LwPric", "ClsPric", "TtlTradgVol", "FinInstrmId", "TtlTrfVal",
+            "PrvsClsgPric",
         }),
         ("FinInstrmId",),
         "TradDt",
@@ -170,6 +198,7 @@ SOURCE_SCHEMAS = {
         frozenset({
             "Index Name", "Index Date", "Open Index Value",
             "High Index Value", "Low Index Value", "Closing Index Value",
+            "Turnover (Rs. Cr.)",
         }),
         ("Index Name",),
         "Index Date",
@@ -177,6 +206,7 @@ SOURCE_SCHEMAS = {
     "bse-index": SourceSchema(
         frozenset({
             "IndexName", "OpenPrice", "HighPrice", "LowPrice", "ClosePrice",
+            "PreviousClose",
         }),
         ("IndexName",),
     ),
@@ -191,6 +221,68 @@ SOURCE_SCHEMAS = {
         ("SCRIP CODE",),
     ),
 }
+
+
+#: Where each era publishes turnover, and the factor that turns its value into
+#: rupees.  Measured against one real report from every era on 2026-08-20
+#: rather than inferred from the column's name: `turnover / (volume * close)`
+#: has a median of 1.000 in every equity era, `VAL_INLAKH` read as lakhs puts
+#: 2024-07-05 within an order of magnitude of the next schema's `TtlTrfVal`
+#: (and read as rupees, five orders away), and "Nifty Total Market" read as
+#: crores is 83.8% of that day's whole NSE cash turnover.  See the sampled
+#: evidence under section 4.2 of the remediation plan.
+TURNOVER_SOURCES: dict[str, tuple[str, int]] = {
+    "nse-equity-legacy": ("TOTTRDVAL", 1),
+    "nse-equity-udiff": ("TtlTrfVal", 1),
+    "nse-fo-legacy": ("VAL_INLAKH", 100_000),
+    "nse-fo-udiff": ("TtlTrfVal", 1),
+    "nse-sme-two-digit-year": ("NET_TRDVAL", 1),
+    "nse-sme-four-digit-year": ("NET_TRDVAL", 1),
+    "nse-index": ("Turnover (Rs. Cr.)", 10_000_000),
+    "bse-equity-isin-legacy": ("NET_TURNOV", 1),
+    "bse-equity-bhavcopy-legacy": ("NET_TURNOV", 1),
+    "bse-equity-udiff-zip": ("TtlTrfVal", 1),
+    "bse-equity-udiff": ("TtlTrfVal", 1),
+}
+
+#: Where each era publishes the previous session's close.  Three eras publish
+#: none: NSE F&O before the UDiFF schema, and both index reports on the NSE
+#: side.  NSE's index report offers `Points Change` instead, which reproduces
+#: the previous close to the paisa for 162 of 163 indices and is wrong by 4.82
+#: for *Nifty50 Dividend Points*, where NSE publishes a change of zero -- so it
+#: is not used, and the field stays empty rather than quietly wrong.
+PREV_CLOSE_SOURCES: dict[str, str] = {
+    "nse-equity-legacy": "PREVCLOSE",
+    "nse-equity-udiff": "PrvsClsgPric",
+    "nse-fo-udiff": "PrvsClsgPric",
+    "nse-sme-two-digit-year": "PREV_CL_PR",
+    "nse-sme-four-digit-year": "PREV_CL_PR",
+    "bse-equity-isin-legacy": "PREVCLOSE",
+    "bse-equity-bhavcopy-legacy": "PREVIOUS CLOSE PRICE",
+    "bse-equity-udiff-zip": "PrvsClsgPric",
+    "bse-equity-udiff": "PrvsClsgPric",
+    "bse-index": "PreviousClose",
+}
+
+
+def turnover_in_rupees(frame: pd.DataFrame, era: str) -> pd.Series:
+    """Turnover as rupees, or missing where the era publishes none."""
+
+    entry = TURNOVER_SOURCES.get(era)
+    if entry is None:
+        return pd.Series(pd.NA, index=frame.index, dtype="object")
+    column, scale = entry
+    values = _number(_column(frame, column))
+    return values if scale == 1 else values * scale
+
+
+def previous_close(frame: pd.DataFrame, era: str) -> pd.Series:
+    """The previous session's close as the exchange published it, or missing."""
+
+    column = PREV_CLOSE_SOURCES.get(era)
+    if column is None:
+        return pd.Series(pd.NA, index=frame.index, dtype="object")
+    return _number(_column(frame, column))
 
 
 def read_report(payload: bytes, separator: str = ",") -> pd.DataFrame:
@@ -453,6 +545,17 @@ def validate_canonical_data(
                 f"Normalized report contains negative {column}"
             )
 
+    # Optional by design -- three eras publish neither -- but a value that is
+    # there has to be a real one.  A negative turnover is not "missing".
+    for column in ("TURNOVER", "PREV_CLOSE"):
+        if column not in columns:
+            continue
+        present = _number(frame[column])
+        if present.lt(0).any():
+            raise DataProcessingError(
+                f"Normalized report contains negative {column}"
+            )
+
     incoherent = incoherent_ohlc(frame)
     offenders = int(incoherent.sum())
     if offenders > max(
@@ -478,6 +581,7 @@ def _finalize_equity(frame: pd.DataFrame, era: str = "equity") -> pd.DataFrame:
     for column in (
         "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "DELIVERY_QTY",
         "DELIVERY_PERCENT", "TOTAL_TRADES", "QTY_PER_TRADE",
+        *EXTENDED_MARKET_COLUMNS,
     ):
         frame[column] = _number(frame[column])
     frame = frame[frame["SYMBOL"].ne("")].copy()
@@ -512,6 +616,8 @@ def normalize_nse_equity(
             "TOTAL_TRADES": _column(frame, "TtlNbOfTxsExctd"),
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": _column(frame, "FinInstrmId"),
+            "TURNOVER": turnover_in_rupees(frame, era),
+            "PREV_CLOSE": previous_close(frame, era),
         })
     elif era == "nse-equity-legacy":
         normalized = pd.DataFrame({
@@ -526,6 +632,8 @@ def normalize_nse_equity(
             "TOTAL_TRADES": _column(frame, "TOTALTRADES"),
             "ISIN": _column(frame, "ISIN"),
             "SECURITY_ID": pd.NA,
+            "TURNOVER": turnover_in_rupees(frame, era),
+            "PREV_CLOSE": previous_close(frame, era),
         })
 
     wanted = {value.upper() for value in series}
@@ -562,6 +670,8 @@ def normalize_nse_sme(
         "SERIES": _column(frame, "SERIES"),
         "ISIN": pd.NA,
         "SECURITY_ID": pd.NA,
+        "TURNOVER": turnover_in_rupees(frame, era),
+        "PREV_CLOSE": previous_close(frame, era),
     })
     normalized["SERIES"] = _clean_text(normalized["SERIES"]).str.upper()
     normalized = normalized[normalized["SERIES"].isin(NSE_SME_SERIES)].copy()
@@ -668,6 +778,10 @@ def normalize_bse_equity(
         full_names = None
     else:
         raise DataProcessingError(f"Unsupported BSE equity era: {era}")
+    # One place for all three BSE eras: the column names differ but the table
+    # above already knows which belongs to which.
+    mapping["TURNOVER"] = turnover_in_rupees(frame, era)
+    mapping["PREV_CLOSE"] = previous_close(frame, era)
     normalized = pd.DataFrame(mapping)
     normalized["SERIES"] = _clean_text(normalized["SERIES"]).str.upper()
     normalized = normalized[normalized["SERIES"].isin(BSE_EQUITY_SERIES)].copy()
@@ -787,6 +901,8 @@ def normalize_nse_fo(
             "VOLUME": _column(source, "TtlTradgVol"),
             "OPEN_INTEREST": _column(source, "OpnIntrst"),
             "CHANGE_IN_OI": _column(source, "ChngInOpnIntrst"),
+            "TURNOVER": turnover_in_rupees(source, era),
+            "PREV_CLOSE": previous_close(source, era),
         })
     elif era == "nse-fo-legacy":
         instrument = _clean_text(_column(frame, "INSTRUMENT")).str.upper()
@@ -809,6 +925,10 @@ def normalize_nse_fo(
             "VOLUME": _column(source, "CONTRACTS"),
             "OPEN_INTEREST": _column(source, "OPEN_INT"),
             "CHANGE_IN_OI": _column(source, "CHG_IN_OI"),
+            # Lakhs in this era, rupees in the next: the boundary at
+            # 2024-07-08 is a five-order-of-magnitude step if it is missed.
+            "TURNOVER": turnover_in_rupees(source, era),
+            "PREV_CLOSE": previous_close(source, era),
         })
 
     else:
@@ -859,6 +979,8 @@ def normalize_nse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
         "LOW": _number(_column(frame, "Low Index Value")),
         "CLOSE": _number(_column(frame, "Closing Index Value")),
         "VOLUME": _number(_column(frame, "Volume", default=0)).fillna(0),
+        "TURNOVER": turnover_in_rupees(frame, "nse-index"),
+        "PREV_CLOSE": previous_close(frame, "nse-index"),
     })
     result = result.loc[:, INDEX_DAILY_COLUMNS]
     validate_canonical_data(
@@ -884,6 +1006,8 @@ def normalize_bse_index(frame: pd.DataFrame, target_date: date) -> pd.DataFrame:
         "LOW": _number(_column(frame, "LowPrice")),
         "CLOSE": _number(_column(frame, "ClosePrice")),
         "VOLUME": 0,
+        "TURNOVER": turnover_in_rupees(frame, "bse-index"),
+        "PREV_CLOSE": previous_close(frame, "bse-index"),
     })
     result = result.loc[:, INDEX_DAILY_COLUMNS]
     validate_canonical_data(

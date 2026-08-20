@@ -25,12 +25,13 @@ DAY = date(2026, 8, 4)
 def _equity(day, symbol):
     return pd.DataFrame([[
         symbol, day.strftime("%Y%m%d"), 10, 12, 9, 11, 100, 50, 50,
+        1100, 10,
     ]], columns=EQUITY_DAILY_COLUMNS)
 
 
 def _index(day, symbol="NIFTY"):
     return pd.DataFrame([[
-        symbol, day.strftime("%Y%m%d"), 100, 120, 90, 110, 0,
+        symbol, day.strftime("%Y%m%d"), 100, 120, 90, 110, 0, 5000, 99,
     ]], columns=INDEX_DAILY_COLUMNS)
 
 
@@ -134,7 +135,7 @@ def test_bse_eq_publishes_before_index_exists(tmp_path):
     config = _Config(tmp_path)
     coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
     equity = pd.DataFrame(
-        [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50]],
+        [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50, 200, 1]],
         columns=EQUITY_DAILY_COLUMNS,
     )
 
@@ -154,11 +155,11 @@ def test_bse_eq_still_waits_for_index_once_it_exists(tmp_path):
     config = _Config(tmp_path)
     coordinator = DateJoinCoordinator(config, {"BSE": ("INDEX",)})
     equity = pd.DataFrame(
-        [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50]],
+        [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50, 200, 1]],
         columns=EQUITY_DAILY_COLUMNS,
     )
     index = pd.DataFrame(
-        [["SENSEX", "20250616", 1, 2, 1, 2, 0]], columns=INDEX_DAILY_COLUMNS
+        [["SENSEX", "20250616", 1, 2, 1, 2, 0, 300, 1]], columns=INDEX_DAILY_COLUMNS
     )
 
     assert coordinator.dependencies_for("BSE", day) == ("INDEX",)
@@ -177,7 +178,7 @@ def test_finalize_publishes_when_nothing_is_genuinely_outstanding(tmp_path):
     coordinator.offer(
         "BSE", "EQ", day,
         pd.DataFrame(
-            [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50]],
+            [["ABB", "20150615", 1, 2, 1, 2, 100, 50, 50, 200, 1]],
             columns=EQUITY_DAILY_COLUMNS,
         ),
     )
@@ -197,7 +198,7 @@ def test_finalize_still_fails_a_transiently_missing_component(tmp_path):
     coordinator.offer(
         "BSE", "EQ", day,
         pd.DataFrame(
-            [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50]],
+            [["ABB", "20250616", 1, 2, 1, 2, 100, 50, 50, 200, 1]],
             columns=EQUITY_DAILY_COLUMNS,
         ),
     )

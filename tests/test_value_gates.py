@@ -49,6 +49,8 @@ def _equity_source(rows):
             "TOTALTRADES": 10,
             "ISIN": "INE000000000",
             "TIMESTAMP": "31-JUL-2026",
+            "TOTTRDVAL": close * 100,
+            "PREVCLOSE": close,
         }
         for symbol, open_, high, low, close in rows
     ])
@@ -59,7 +61,7 @@ def _canonical(rows, columns=EQUITY_DAILY_COLUMNS):
         [
             [symbol, "20260731", open_, high, low, close, 100, *(
                 [50, 50] if columns is EQUITY_DAILY_COLUMNS else [0, 0]
-            )]
+            ), close * 100, close]
             for symbol, open_, high, low, close in rows
         ],
         columns=columns,

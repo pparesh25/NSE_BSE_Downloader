@@ -184,13 +184,13 @@ def test_worker_finalizes_staged_components_after_tasks_settle(tmp_path):
         config, {"NSE": ("SME", "INDEX")}
     )
     equity = pd.DataFrame([[
-        "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50,
+        "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50, 200, 1,
     ]], columns=EQUITY_DAILY_COLUMNS)
     sme = pd.DataFrame([[
-        "SMALL_SME", "20260731", 1, 2, 1, 2, 10, 5, 50,
+        "SMALL_SME", "20260731", 1, 2, 1, 2, 10, 5, 50, 20, 1,
     ]], columns=EQUITY_DAILY_COLUMNS)
     index = pd.DataFrame([[
-        "NIFTY 50", "20260731", 1, 2, 1, 2, 0,
+        "NIFTY 50", "20260731", 1, 2, 1, 2, 0, 300, 1,
     ]], columns=INDEX_DAILY_COLUMNS)
     coordinator.offer("NSE", "INDEX", day, index)
     coordinator.offer("NSE", "EQ", day, equity)
@@ -240,7 +240,7 @@ def test_worker_staged_failure_preserves_previous_combined_file(tmp_path):
     config = _CombinedConfig(tmp_path)
     coordinator = DateJoinCoordinator(config, {"NSE": ("INDEX",)})
     equity = pd.DataFrame([[
-        "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50,
+        "ABC", "20260731", 1, 2, 1, 2, 100, 50, 50, 200, 1,
     ]], columns=EQUITY_DAILY_COLUMNS)
     coordinator.offer("NSE", "EQ", day, equity)
     output = config.get_data_path("NSE", "EQ") / f"{day}-NSE-EQ.txt"

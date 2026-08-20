@@ -26,13 +26,13 @@ DAY = date(2026, 7, 31)
 
 def _equity(symbol, volume=100):
     return pd.DataFrame([[
-        symbol, "20260731", 10, 12, 9, 11, volume, 50, 50,
+        symbol, "20260731", 10, 12, 9, 11, volume, 50, 50, 1100, 10,
     ]], columns=EQUITY_DAILY_COLUMNS)
 
 
 def _index(symbol):
     return pd.DataFrame([[
-        symbol, "20260731", 100, 120, 90, 110, 0,
+        symbol, "20260731", 100, 120, 90, 110, 0, 5000, 99,
     ]], columns=INDEX_DAILY_COLUMNS)
 
 
@@ -154,5 +154,9 @@ def test_old_seven_column_component_is_upgraded_read_only(tmp_path):
     output = pd.read_csv(result.output_path, header=None, keep_default_na=False)
     assert len(output.columns) == len(EQUITY_DAILY_COLUMNS)
     assert output.iloc[:, 0].tolist() == ["ABC", "NIFTY 50"]
-    assert output.iloc[:, 7:].eq("").all().all()
+    # Delivery stays blank for both rows, and the upgraded seven-column
+    # component invents no turnover -- while the index row keeps its own.
+    assert output.iloc[:, 7:9].eq("").all().all()
+    assert output.iloc[0, 9:].eq("").all()
+    assert output.iloc[1, 9:].tolist() == ["5000", "99"]
     assert old_component.read_bytes() == old_bytes

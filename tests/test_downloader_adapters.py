@@ -38,14 +38,15 @@ def _bare(downloader_class, **options):
     return downloader
 
 
-def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
+def test_cash_downloaders_keep_one_output_contract_across_eras(
     tmp_path, monkeypatch
 ):
     nse_day = date(2024, 7, 8)
     nse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123\n"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABC,EQ,10,12,9,11,1000,20,INEABC000009,123,11000,10\n"
     ).encode()
     nse_delivery = (
         "SYMBOL,SERIES,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
@@ -66,8 +67,9 @@ def test_cash_downloaders_keep_one_nine_column_contract_across_eras(
     bse_day = date(2024, 7, 8)
     bse_price = (
         "TradDt,TckrSymb,SctySrs,OpnPric,HghPric,LwPric,ClsPric,"
-        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId\n"
-        "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002\n"
+        "TtlTradgVol,TtlNbOfTxsExctd,ISIN,FinInstrmId,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "2024-07-08,ABB,A,10,12,9,11,100,5,INE111111111,500002,1100,10\n"
     ).encode()
     bse_delivery = (
         "SCRIP CODE|DELIVERY QTY|DELV. PER.\n500002|80|80\n"
@@ -90,8 +92,9 @@ def test_fo_adapter_retains_stable_columns_when_open_interest_is_disabled():
     day = date(2024, 7, 8)
     raw = (
         "FinInstrmTp,TckrSymb,XpryDt,TradDt,OpnPric,HghPric,LwPric,"
-        "ClsPric,TtlTradgVol,OpnIntrst,ChngInOpnIntrst\n"
-        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25\n"
+        "ClsPric,TtlTradgVol,OpnIntrst,ChngInOpnIntrst,TtlTrfVal,"
+        "PrvsClsgPric\n"
+        "STF,ABC,2024-07-25,2024-07-08,10,12,9,11,100,500,25,1100000,10\n"
     ).encode()
     downloader = _bare(
         NSEFODownloader,
@@ -121,7 +124,8 @@ def test_sme_adapter_switches_filename_era_and_applies_suffix(
     day = date(2025, 10, 13)
     raw = (
         "MARKET,SERIES,SYMBOL,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,"
-        "CLOSE_PRICE,NET_TRDQTY\nN,SM,SMALL,10,12,9,11,1000\n"
+        "CLOSE_PRICE,NET_TRDQTY,NET_TRDVAL,PREV_CL_PR\n"
+        "N,SM,SMALL,10,12,9,11,1000,11000,10\n"
     ).encode()
     downloader = _bare(NSESMEDownloader)
     result = downloader.process_downloaded_data(raw, day)
@@ -145,14 +149,14 @@ def test_sme_adapter_switches_filename_era_and_applies_suffix(
         (
             NSEIndexDownloader,
             "Index Name,Index Date,Open Index Value,High Index Value,"
-            "Low Index Value,Closing Index Value,Volume\n"
-            "NIFTY 50,30-07-2026,25000,25100,24900,25050,123\n",
+            "Low Index Value,Closing Index Value,Volume,Turnover (Rs. Cr.)\n"
+            "NIFTY 50,30-07-2026,25000,25100,24900,25050,123,987.6\n",
             "NIFTY 50",
         ),
         (
             BSEIndexDownloader,
-            "IndexName,OpenPrice,HighPrice,LowPrice,ClosePrice\n"
-            "SENSEX,80000,80100,79900,80050\n",
+            "IndexName,OpenPrice,HighPrice,LowPrice,ClosePrice,PreviousClose\n"
+            "SENSEX,80000,80100,79900,80050,79800\n",
             "SENSEX",
         ),
     ],

@@ -261,8 +261,15 @@ class DataManager:
                 parsed = next(csv.reader([decoded]))
                 rows.append(parsed)
 
+            # Three generations of this contract are on disk at once: the
+            # original, the one that added delivery or open interest, and the
+            # one that added turnover and previous close.  The per-segment
+            # schema manifest says which a folder is being written in; this
+            # check only has to accept each of them as structurally valid.
             allowed_counts = {7}
             if segment.upper() in {"EQ", "SME", "FO"}:
+                allowed_counts.update({9, 11})
+            else:
                 allowed_counts.add(9)
             valid = True
             for row in rows:
@@ -285,7 +292,7 @@ class DataManager:
                         numeric_columns = [5]
                         if row[6].strip():
                             numeric_columns.append(6)
-                        if len(row) == 9 and (
+                        if len(row) >= 9 and (
                             row[7].strip() or row[8].strip()
                         ):
                             valid = False
@@ -302,7 +309,7 @@ class DataManager:
                     ):
                         valid = False
                         break
-                    if segment.upper() == "FO" and len(row) == 9:
+                    if segment.upper() == "FO" and len(row) >= 9:
                         open_interest = float(row[7].replace(",", ""))
                         change_in_oi = float(row[8].replace(",", ""))
                         if (
@@ -311,6 +318,21 @@ class DataManager:
                             or not math.isfinite(change_in_oi)
                         ):
                             valid = False
+                            break
+                    # Turnover and previous close are blank wherever the
+                    # exchange published none, so only a value that is there
+                    # is checked -- and a negative one is not "missing".
+                    if len(row) == 11 or (
+                        segment.upper() == "INDEX" and len(row) == 9
+                    ):
+                        for column in (len(row) - 2, len(row) - 1):
+                            if not row[column].strip():
+                                continue
+                            extra = float(row[column].replace(",", ""))
+                            if not math.isfinite(extra) or extra < 0:
+                                valid = False
+                                break
+                        if not valid:
                             break
                 except (IndexError, TypeError, ValueError):
                     valid = False

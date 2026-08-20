@@ -4,6 +4,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from src.services.canonical_data import SYMBOL_HISTORY_COLUMNS
 from src.services.corporate_actions import (
     CorporateAction,
     CorporateActionEngine,
@@ -581,7 +582,9 @@ def test_a_blank_delivery_field_stays_blank_through_an_adjustment(tmp_path):
     ).read_text().splitlines()[1]
     # Delivery is legitimately absent for many dates; scaling must not turn a
     # blank into a number, and a share count must not acquire a decimal point.
-    assert adjusted.endswith(",,INE111111111")
+    # Delivery stays blank through the adjustment, and so do the two
+    # fields this history was written before the exchange values for.
+    assert adjusted.endswith(",,INE111111111,,")
     assert adjusted.split(",")[5] == "20"
 
 
@@ -723,7 +726,7 @@ def test_recovery_replays_a_stage_prepared_by_a_pre_isin_build(tmp_path):
 
     assert recovered == 1
     published = pd.read_csv(target, dtype=str)
-    assert list(published.columns)[-1] == "ISIN"
+    assert list(published.columns) == SYMBOL_HISTORY_COLUMNS
     assert published["CLOSE"].tolist() == ["50.0", "50.0"]
     document = json.loads(
         (tmp_path / ".state" / "corporate_actions.json").read_text()

@@ -30,7 +30,7 @@ from .canonical_data import (
     FO_DAILY_COLUMNS,
     INDEX_DAILY_COLUMNS,
 )
-from .eod_store import EodStore
+from .eod_store import EodReader, ReadOnlyEodStore
 
 #: What each segment publishes.
 PUBLIC_COLUMNS: Mapping[str, Sequence[str]] = {
@@ -109,7 +109,7 @@ def _column(
 
 
 def segment_frame(
-    store: EodStore, exchange: str, segment: str, target_date: date
+    store: EodReader, exchange: str, segment: str, target_date: date
 ) -> pd.DataFrame:
     """Rebuild one segment's published component frame from the database."""
 
@@ -133,7 +133,7 @@ def segment_frame(
 
 
 def daily_text(
-    store: EodStore,
+    store: EodReader,
     exchange: str,
     target_date: date,
     segment: str = "EQ",
@@ -165,7 +165,7 @@ def daily_text(
 
 
 def compare_daily(
-    store: EodStore,
+    store: EodReader,
     published: Any,
     exchange: str,
     target_date: date,
@@ -236,7 +236,7 @@ class ParityReport:
 
 
 def _appended_for(
-    store: EodStore, exchange: str, target_date: date, published_lines: int
+    store: EodReader, exchange: str, target_date: date, published_lines: int
 ) -> Optional[Sequence[str]]:
     """Which components an EQ file carries, decided by row counts.
 
@@ -281,9 +281,11 @@ def verify_parity(config: Any, segments: Sequence[str] = ()) -> ParityReport:
     """
 
     base = Path(config.base_data_path)
-    store = EodStore(
-        base / ".state" / "eod.sqlite3", base / ".state" / "quarantine"
-    )
+    # Never ``EodStore`` here.  Constructing one creates the database, so a
+    # command that only reports would bring into existence the very thing it
+    # was asked to report on -- and on an empty data root that is the whole
+    # answer, silently replaced with an empty success.
+    store = ReadOnlyEodStore(base / ".state" / "eod.sqlite3")
     wanted = {value.upper() for value in segments}
     checked = 0
     mismatches: list[str] = []

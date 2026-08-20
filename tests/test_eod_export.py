@@ -408,3 +408,53 @@ def test_the_cli_flag_is_read_only_and_excludes_the_repairs():
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--verify-eod-parity", "--rebuild-all"])
+
+
+def test_the_parity_pass_does_not_create_the_database_it_reports_on(tmp_path):
+    """The defect this pins shipped once already, in a different command.
+
+    Constructing an ``EodStore`` creates the file.  A pass that only reports
+    would therefore bring into existence the very thing it was asked to report
+    on, and on an empty data root that is the entire answer -- silently
+    replaced by an empty success.  The earlier fingerprint test could not catch
+    it, because in that test the database already existed.
+    """
+
+    from src.services.eod_export import verify_parity
+
+    root = tmp_path / "root"
+    (root / "NSE" / "EQ").mkdir(parents=True)
+    (root / ".state").mkdir()
+    config = _Config(root)
+    before = sorted(path.relative_to(root) for path in root.rglob("*"))
+
+    report = verify_parity(config)
+
+    assert report.checked == 0 and report.mismatches == ()
+    assert not (root / ".state" / "eod.sqlite3").exists()
+    assert sorted(path.relative_to(root) for path in root.rglob("*")) == before
+
+
+def test_reading_the_database_leaves_no_shm_or_wal_behind(tmp_path):
+    """``mode=ro`` is not read-only; a read-only connection still stamps -shm."""
+
+    from src.services.eod_export import verify_parity
+
+    publisher = _Publisher(tmp_path)
+    _publish(publisher, public_equity(normalize_nse_equity(_source(_ROWS), DAY)))
+    state = tmp_path / ".state"
+    for stale in state.glob("eod.sqlite3-*"):
+        stale.unlink()
+    before = {
+        path: (path.stat().st_mtime_ns, path.read_bytes())
+        for path in sorted(state.rglob("*")) if path.is_file()
+    }
+
+    assert verify_parity(publisher.config).mismatches == ()
+
+    assert not (state / "eod.sqlite3-shm").exists()
+    after = {
+        path: (path.stat().st_mtime_ns, path.read_bytes())
+        for path in sorted(state.rglob("*")) if path.is_file()
+    }
+    assert after == before

@@ -23,10 +23,14 @@ Why a separate database file from ``pipeline_state.sqlite3``:
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, NoReturn, Optional, Sequence
+from typing import (
+    Any, Iterable, Iterator, NoReturn, Optional, Protocol, Sequence,
+)
 
 from .canonical_data import valid_isin, valid_security_id
 from .state_store import StateCorruptionError, quarantine_copy
@@ -35,6 +39,25 @@ from .state_store import StateCorruptionError, quarantine_copy
 #: open interest instead of delivery, and ``INDEX`` carries neither; both are
 #: accommodated by leaving the columns they do not publish NULL.
 SUPPORTED_SEGMENTS = frozenset({"EQ", "SME", "INDEX", "FO"})
+
+
+class EodReader(Protocol):
+    """What the exporter needs, which is strictly less than a writable store.
+
+    Both the read-write store and the copy-and-open read-only one satisfy it,
+    so a caller that only reports cannot accidentally be handed one that
+    creates the database as a side effect of being asked about it.
+    """
+
+    def published_frame(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> Optional[dict[str, Any]]:
+        ...
+
+    def daily_rows(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> list[dict[str, Any]]:
+        ...
 
 
 def security_key(symbol: Any, isin: Any, security_id: Any) -> str:
@@ -596,3 +619,77 @@ class EodStore:
             return [dict(row) for row in rows]
         except sqlite3.DatabaseError as error:
             self._raise_corruption(error)
+
+
+class ReadOnlyEodStore:
+    """Read the EOD database without touching it or its directory.
+
+    ``EodStore.__init__`` sets the journal mode, creates the tables and stamps
+    the schema version, and creates the file if it is absent.  A verification
+    pass must do none of that: a report is only evidence about a database if
+    producing it did not change that database -- and on an empty data root the
+    ordinary store would *create* the database it was asked to report on.
+
+    The copy-and-open approach is the one `ReadOnlyPipelineStore` already
+    proved necessary here, for a reason found by measuring rather than by
+    reading the documentation: SQLite's ``mode=ro`` still creates and stamps
+    the ``-shm`` file, because a WAL database needs its shared-memory index.
+    The ``-wal`` file is copied after the main file, in that order, because in
+    WAL mode the main file only changes during a checkpoint; ``-shm`` is
+    deliberately not copied, since SQLite rebuilds it and a stale one is worse
+    than none.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def exists(self) -> bool:
+        return self.path.is_file()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with tempfile.TemporaryDirectory(prefix="nse-bse-eod-") as scratch:
+            copy = Path(scratch) / self.path.name
+            shutil.copy2(self.path, copy)
+            write_ahead_log = Path(f"{self.path}-wal")
+            if write_ahead_log.is_file():
+                shutil.copy2(write_ahead_log, Path(f"{copy}-wal"))
+            connection = sqlite3.connect(copy, timeout=30)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                yield connection
+            finally:
+                connection.close()
+
+    def published_frame(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> Optional[dict[str, Any]]:
+        if not self.exists():
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT columns, dtypes, rows FROM published_frames "
+                "WHERE exchange = ? AND segment = ? AND trade_date = ?",
+                (exchange, segment, int(trade_date)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "columns": row["columns"].split(","),
+            "dtypes": row["dtypes"].split(","),
+            "rows": int(row["rows"]),
+        }
+
+    def daily_rows(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> list[dict[str, Any]]:
+        if not self.exists():
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM eod WHERE exchange = ? AND segment = ? "
+                "AND trade_date = ? ORDER BY source_order",
+                (exchange, segment, int(trade_date)),
+            ).fetchall()
+        return [dict(row) for row in rows]

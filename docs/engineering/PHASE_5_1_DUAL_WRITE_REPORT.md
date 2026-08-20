@@ -219,6 +219,15 @@ python main.py --verify-eod-parity NSE_EQ     # one
 Read-only, in the same mutually exclusive group as `--audit` and the repairs, with the
 same three-valued exit: 0 clean, 1 a mismatch, 2 could not run.
 
+The first version of this command was not actually read-only, which running it found
+and reading it would not have: constructing an `EodStore` **creates** the database, so
+a pass that only reports brought into existence the very thing it was asked to report
+on — and on an empty data root that was the entire answer, silently replaced by an
+empty success. This is the same defect `--audit` hit, so it takes the same proven
+remedy: `ReadOnlyEodStore` copies the database outside the data root and opens the
+copy, because SQLite's own `mode=ro` still creates and stamps the `-shm` file. The
+regression test was checked by reverting the fix and confirming it fails.
+
 Two judgements are worth naming. A file the database has no record of is reported as
 **unmirrored**, not as a failure — dual-write fills forward, so files published before
 it was switched on have nothing to compare with, and calling that a failure would bury
@@ -232,7 +241,7 @@ changed since it was published.
 
 ## Gates
 
-- `pytest` both interpreters — **546 passed**, coverage 78.90% (floor 70%).
+- `pytest` both interpreters — **548 passed**, coverage 78.94% (floor 70%).
 - `ruff check .` — passed. `mypy` over 60 source files — no issues.
 - `main.py --smoke-gui` — exit 0. `main.py --verify-eod-parity` on an empty root —
   exit 0, and it says nothing was compared.

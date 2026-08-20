@@ -22,6 +22,7 @@ from src.services.audit_service import AuditError, DatabaseAudit
 from src.services.canonical_data import (
     INTERNAL_EQUITY_COLUMNS,
     LEGACY_SYMBOL_HISTORY_COLUMNS,
+    PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
 )
 from src.services.pipeline_state import PipelineManifest
@@ -771,10 +772,8 @@ def _write_snapshot(config, exchange, segment, day, securities) -> Path:
     return path
 
 
-def _write_history(config, exchange, filename, days, *, legacy=False) -> Path:
-    columns = (
-        LEGACY_SYMBOL_HISTORY_COLUMNS if legacy else SYMBOL_HISTORY_COLUMNS
-    )
+def _write_history(config, exchange, filename, days, *, columns=None) -> Path:
+    columns = columns or SYMBOL_HISTORY_COLUMNS
     folder = config.base_data_path / exchange / "SYMBOLS"
     folder.mkdir(parents=True, exist_ok=True)
     lines = [",".join(columns)]
@@ -924,9 +923,22 @@ def test_a_symbol_history_with_an_unknown_header_is_refused(symbols_root):
     assert len(_categories(report, "symbol-schema-unknown")) == 1
 
 
-def test_the_older_symbol_schema_is_noted_rather_than_failed(symbols_root):
+@pytest.mark.parametrize("columns", [
+    LEGACY_SYMBOL_HISTORY_COLUMNS,
+    PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
+])
+def test_every_earlier_symbol_schema_is_noted_rather_than_failed(
+    symbols_root, columns
+):
+    """Three generations exist, and only the unrecognised one is an error.
+
+    Every history in the owner's data root was the middle generation on the
+    day turnover was added; treating that as unreadable would have turned one
+    upgrade into 8,096 errors.
+    """
+
     _write_history(
-        symbols_root, "NSE", "acme.txt", [EARLIER, DAY], legacy=True
+        symbols_root, "NSE", "acme.txt", [EARLIER, DAY], columns=columns
     )
 
     report = DatabaseAudit(symbols_root, ["NSE_EQ"]).run()
@@ -934,6 +946,7 @@ def test_the_older_symbol_schema_is_noted_rather_than_failed(symbols_root):
     legacy = _categories(report, "legacy-symbol-schema")
     assert len(legacy) == 1
     assert legacy[0].severity == "notice"
+    assert _categories(report, "symbol-schema-unknown") == []
     assert not report.failed
 
 

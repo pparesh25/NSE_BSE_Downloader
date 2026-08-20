@@ -43,6 +43,7 @@ from ..utils.date_utils import DateUtils
 from .canonical_data import (
     BAND_SESSIONS,
     LEGACY_SYMBOL_HISTORY_COLUMNS,
+    PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
     row_count_band_error,
     valid_isin,
@@ -1270,12 +1271,15 @@ class DatabaseAudit:
             return None
         header = lines[0].split(",")
         current_schema = header == SYMBOL_HISTORY_COLUMNS
-        if not current_schema and header != LEGACY_SYMBOL_HISTORY_COLUMNS:
+        if not current_schema and header not in (
+            PRE_EXTENDED_SYMBOL_HISTORY_COLUMNS,
+            LEGACY_SYMBOL_HISTORY_COLUMNS,
+        ):
             self._add(
                 ERROR,
                 "symbol-schema-unknown",
-                "this symbol history's header matches neither the current nor "
-                "the previous column set, so a consumer cannot read it",
+                "this symbol history's header matches none of the column sets "
+                "this application has written, so a consumer cannot read it",
                 path=path,
             )
             return None
@@ -1409,8 +1413,9 @@ class DatabaseAudit:
             self._add(
                 NOTICE,
                 "legacy-symbol-schema",
-                f"{legacy_schema} symbol file(s) still carry the pre-ISIN "
-                "column set, so two schema generations coexist here",
+                f"{legacy_schema} symbol file(s) carry an earlier column "
+                "set, so more than one schema generation coexists here; the "
+                "next write upgrades each file it touches",
                 exchange_segment=exchange,
             )
 

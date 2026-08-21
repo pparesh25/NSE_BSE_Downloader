@@ -59,6 +59,11 @@ class EodReader(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
+    def security_rows(
+        self, exchange: str, keys: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        ...
+
 
 def security_key(symbol: Any, isin: Any, security_id: Any) -> str:
     """Return the row identity used as part of the primary key.
@@ -642,22 +647,55 @@ class ReadOnlyEodStore:
 
     def __init__(self, path: Path):
         self.path = Path(path)
+        self._session: Optional[sqlite3.Connection] = None
 
     def exists(self) -> bool:
         return self.path.is_file()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def session(self) -> Iterator["ReadOnlyEodStore"]:
+        """Copy the database once and keep it open for many queries.
+
+        Without this every call copies the whole file, which is fine for a
+        handful of lookups and quadratic for a pass over thousands of symbol
+        histories: 400 files took 13.5 seconds that way, almost all of it
+        spent copying 5.5 MB over and over.
+
+        Nesting is a no-op so callers can open a session without knowing
+        whether one is already open.
+        """
+
+        if self._session is not None or not self.exists():
+            yield self
+            return
         with tempfile.TemporaryDirectory(prefix="nse-bse-eod-") as scratch:
-            copy = Path(scratch) / self.path.name
-            shutil.copy2(self.path, copy)
-            write_ahead_log = Path(f"{self.path}-wal")
-            if write_ahead_log.is_file():
-                shutil.copy2(write_ahead_log, Path(f"{copy}-wal"))
-            connection = sqlite3.connect(copy, timeout=30)
-            connection.row_factory = sqlite3.Row
+            connection = self._open(Path(scratch))
+            self._session = connection
             try:
-                connection.execute("PRAGMA query_only=ON")
+                yield self
+            finally:
+                self._session = None
+                connection.close()
+
+    def _open(self, scratch: Path) -> sqlite3.Connection:
+        copy = scratch / self.path.name
+        shutil.copy2(self.path, copy)
+        write_ahead_log = Path(f"{self.path}-wal")
+        if write_ahead_log.is_file():
+            shutil.copy2(write_ahead_log, Path(f"{copy}-wal"))
+        connection = sqlite3.connect(copy, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        return connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        if self._session is not None:
+            yield self._session
+            return
+        with tempfile.TemporaryDirectory(prefix="nse-bse-eod-") as scratch:
+            connection = self._open(Path(scratch))
+            try:
                 yield connection
             finally:
                 connection.close()
@@ -691,5 +729,21 @@ class ReadOnlyEodStore:
                 "SELECT * FROM eod WHERE exchange = ? AND segment = ? "
                 "AND trade_date = ? ORDER BY source_order",
                 (exchange, segment, int(trade_date)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def security_rows(
+        self, exchange: str, keys: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        keys = list(keys)
+        if not keys or not self.exists():
+            return []
+        placeholders = ", ".join("?" * len(keys))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM eod WHERE exchange = ? "
+                f"AND security_key IN ({placeholders}) "
+                "ORDER BY trade_date, source_order",
+                [exchange, *keys],
             ).fetchall()
         return [dict(row) for row in rows]

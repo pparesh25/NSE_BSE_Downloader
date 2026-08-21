@@ -1673,7 +1673,7 @@ The migration is four independently shippable steps, from §7 of the review:
       `ISIN` alone identifies a security — and found that a clustered table without
       statistics silently scans every date an exchange ever published. Evidence:
       [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md).
-- [~] **2. Prove parity — daily files done 2026-08-21, symbol histories open.**
+- [x] **2. Prove parity — done 2026-08-21.**
       `src/services/eod_export.py` regenerates a published daily file from the
       database, and `--verify-eod-parity` diffs a whole data root read-only. Proven
       for equity, index, futures and a three-component combined file. Measuring again
@@ -1683,7 +1683,15 @@ The migration is four independently shippable steps, from §7 of the review:
       **Proven on a real three-day download of all six segments: 18 of 18 published
       files regenerate byte for byte**, including both combined shapes. That run also
       corrected the exporter a third time — a combined file concatenates the
-      components' *text*, not their values. Still owed: `export_symbol`.
+      components' *text*, not their values.
+      **`export_symbol` done 2026-08-21.** A second download appended a fourth date to
+      exercise the re-read-and-merge path, and the whole tree regenerates: **24 daily
+      files and 8,124 symbol histories, byte for byte.** Two more findings came out of
+      it — a history carries corporate-action-adjusted rows the database does not, so
+      the recorded actions are replayed through the engine's own `adjust_rows`; and a
+      column's spelling is a property of the *row*, taken from the frame its own date
+      published, because a row appended later is merged against a stored file read
+      back as text.
 - [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
       7,426-files-per-run cost dies and appending one day stops rewriting the store.
       Consumers still see identical `.txt` files at identical paths.

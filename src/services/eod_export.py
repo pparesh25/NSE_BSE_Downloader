@@ -150,15 +150,36 @@ def daily_text(
     rows.
     """
 
-    frames = [segment_frame(store, exchange, segment, target_date)]
+    base = segment_frame(store, exchange, segment, target_date)
+    if not appended:
+        buffer = StringIO()
+        base.to_csv(buffer, index=False, header=False, lineterminator="\n")
+        return buffer.getvalue()
+
+    # A combined file is a concatenation of the components' *text*, not of
+    # their values.  Every frame reaches the builder through
+    # ``DateJoinCoordinator``, which puts it through ``lexical_frame`` first,
+    # and a component reloaded from disk is read back with ``dtype=str``
+    # besides -- so by the time ``to_csv`` runs, every column is a string and
+    # prints exactly as its component file printed it.
+    #
+    # This is why a real download was needed.  Handing numeric frames straight
+    # to ``reconcile_frames`` in a test reproduces a path the application never
+    # takes, and it silently agreed with a numeric export: the first real
+    # combined file showed ``244646.0`` where the exchange published
+    # ``244646``.
+    from .combined_file_builder import CombinedFileBuilder
+
+    frames = [CombinedFileBuilder.lexical_frame(base)]
     base_columns = list(frames[0].columns)
     for extra in appended:
         frame = segment_frame(store, exchange, extra, target_date)
-        frames.append(frame.reindex(columns=base_columns))
-    combined = (
-        frames[0] if len(frames) == 1
-        else pd.concat(frames, ignore_index=True, sort=False)
-    )
+        frames.append(
+            CombinedFileBuilder.lexical_frame(frame).reindex(
+                columns=base_columns
+            )
+        )
+    combined = pd.concat(frames, ignore_index=True, sort=False)
     buffer = StringIO()
     combined.to_csv(buffer, index=False, header=False, lineterminator="\n")
     return buffer.getvalue()

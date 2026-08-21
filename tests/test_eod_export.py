@@ -304,9 +304,19 @@ def test_a_combined_file_regenerates_from_its_components(tmp_path):
         component.save_processed_data(frame, DAY)
 
     builder = CombinedFileBuilder(publisher.config)
+    # Through ``lexical_frame``, because that is what ``DateJoinCoordinator``
+    # does to every frame before the builder sees it.  Handing numeric frames
+    # straight to ``reconcile_frames`` exercises a path the application never
+    # takes, and it agreed with a numeric export while the first real combined
+    # file did not.
     result = builder.reconcile_frames(
         "NSE", DAY, ("SME", "INDEX"),
-        {"EQ": equity, "SME": sme, "INDEX": index},
+        {
+            segment: builder.lexical_frame(frame)
+            for segment, frame in (
+                ("EQ", equity), ("SME", sme), ("INDEX", index)
+            )
+        },
     )
     assert result.ok, result.error
 
@@ -316,6 +326,11 @@ def test_a_combined_file_regenerates_from_its_components(tmp_path):
         appended=("SME", "INDEX"),
     ) is None
     assert len(published.read_text().splitlines()) == 5
+    # The property the real download exposed: a whole-number column keeps its
+    # integer spelling through the concatenation, because the components are
+    # concatenated as text.
+    assert ",100," in published.read_text()
+    assert ",100.0," not in published.read_text()
 
 
 # ---- the verification pass ---------------------------------------------

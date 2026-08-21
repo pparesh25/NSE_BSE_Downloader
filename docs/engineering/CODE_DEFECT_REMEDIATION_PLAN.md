@@ -1679,8 +1679,11 @@ The migration is four independently shippable steps, from §7 of the review:
       for equity, index, futures and a three-component combined file. Measuring again
       corrected the schema twice: row order is not recoverable from the values (index
       reports are published in source order), and neither is a column's dtype (a
-      gapless whole-number column is `int64` in equity and `float64` in index). Still
-      owed: `export_symbol`, and a run against genuinely downloaded dates.
+      gapless whole-number column is `int64` in equity and `float64` in index).
+      **Proven on a real three-day download of all six segments: 18 of 18 published
+      files regenerate byte for byte**, including both combined shapes. That run also
+      corrected the exporter a third time — a combined file concatenates the
+      components' *text*, not their values. Still owed: `export_symbol`.
 - [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
       7,426-files-per-run cost dies and appending one day stops rewriting the store.
       Consumers still see identical `.txt` files at identical paths.

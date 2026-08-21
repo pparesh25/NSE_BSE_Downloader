@@ -358,3 +358,92 @@ corpus, and step 3 removes the question entirely by making the exporter the writ
 Daily files and symbol histories are both closed: proven on real downloaded data
 across two runs, all six segments, both combined shapes, and an applied corporate
 action.
+
+
+---
+
+# Step 3 — publishing out of the database
+
+Date: 2026-08-21 (Asia/Kolkata)
+
+## What the measurement said, and what it changed
+
+The plan describes step 3 as where "the 7,426-files-per-run cost dies". The first thing
+measured was whether generating a file from the database is cheaper than the legacy
+read-and-merge. **It is not.** Rebuilding all 8,124 histories takes 10.27 s against
+5.48 s to read and parse the existing ones.
+
+The saving is not in generating. It is in **not writing**:
+
+| | legacy `upsert_batch` | database publish |
+| --- | --- | --- |
+| time for the same one-day change | 27.72 s | **10.66 s** |
+| history files read | 7,694 | 0 |
+| bytes written | 3,625 KB (every touched file, in full) | **700 KB** |
+| result | — | byte-identical, 8,124 of 8,124 |
+
+5.2× less written on a four-date tree, and the ratio is the number of dates: a
+multi-year archive rewrites gigabytes to add a megabyte. `src/services/eod_publish.py`
+appends the new rows instead.
+
+**That is only possible because of what step 2 measured.** A row's spelling comes from
+the frame its own date published, not from the column it sits in — so a row rendered on
+its own is byte-identical to its line in the file. Checked against all 8,124 real
+histories: every one. Had spelling been a column property, appending could not have
+produced the same bytes and this step would have had no cheap path at all.
+
+## When it refuses to append
+
+An append only ever adds to the end, so anything that changes a row the file already
+holds takes a full rewrite: a corporate action recorded against the security, an
+earlier date re-downloaded by this run, a file that does not exist, or a tail that
+cannot be read. That last one is the self-healing path — an append is deliberately not
+atomic, because copying the file to make it atomic is the cost being avoided, so a
+torn tail is detected on the next run and repaired from the database.
+
+## A rename nearly resurrected a deleted file
+
+The first run against the real tree published **one file too many**: it recreated
+`BSE/manbro.txt`, which does not exist, holding a second copy of a security that
+already has one. `MANBRO` was renamed to `KDGREEN`; the registry's `identities` is a
+reverse index that keeps historical names so an old ticker still resolves, and reading
+it forwards republishes them. Resolution now goes the other way — key to current symbol
+to current filename — and a test pins it.
+
+## Running it
+
+```
+python main.py --republish-histories          # every exchange
+python main.py --republish-histories NSE      # one
+```
+
+It takes the same lock a download does, because it rewrites the same files. On an
+already-current tree it reports `0 appended, 0 rewritten, 8124 already current` and
+leaves every byte alone.
+
+## A query that got 130× slower by being made narrower
+
+Bounding the append's read with `AND trade_date > ?` made the planner abandon the
+primary-key seek for a range scan of `idx_eod_date` across every security: 6.5 ms per
+query against 0.049 ms. Writing it as `AND +trade_date > ?` — the unary plus makes the
+term unusable as an index key — keeps the seek and still filters. Whole-pass time went
+from 70 s to 10.66 s.
+
+## What step 3 still owes
+
+**The run does not use this yet, and the reason is structural rather than a matter of
+wiring it up.** `SymbolHistoryStore.upsert_batch` does more than write files: it
+maintains the registry, resolves rename merges, and registers the corporate-action
+windows. The publisher *depends* on that registry being current. Until `securities` and
+`corporate_actions` move into the database — which §7 of the review proposes and this
+phase has not done — publication cannot come from the database alone.
+
+So this step delivers the engine, proven byte-identical against the real tree, and a
+command that uses it. Flipping the download run over to it is the next piece, and it
+starts with moving the registry.
+
+## Gates
+
+- `pytest` both interpreters — **562 passed**, coverage 78.87% (floor 70%).
+- `ruff check .` passed. `mypy` over 61 source files — no issues.
+- `--smoke-gui` exit 0; `--verify-eod-parity` still clean on the real tree.

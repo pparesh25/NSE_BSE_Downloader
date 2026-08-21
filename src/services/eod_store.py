@@ -60,7 +60,7 @@ class EodReader(Protocol):
         ...
 
     def security_rows(
-        self, exchange: str, keys: Iterable[str]
+        self, exchange: str, keys: Iterable[str], since: Optional[int] = None
     ) -> list[dict[str, Any]]:
         ...
 
@@ -174,6 +174,11 @@ class EodStore:
     def __init__(self, path: Path, quarantine_root: Path):
         self.path = Path(path)
         self.quarantine_root = Path(quarantine_root)
+        #: What this run wrote, so publication can be limited to it rather
+        #: than rebuilding a tree that did not change.  Held in memory: it
+        #: describes one run, and a run that died has nothing to publish.
+        self.touched_keys: dict[str, set[str]] = {}
+        self.touched_dates: set[tuple[str, str, int]] = set()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._initialize()
@@ -437,6 +442,9 @@ class EodStore:
                 analyzed = self._counter(connection, "rows_at_analyze")
         except sqlite3.DatabaseError as error:
             self._raise_corruption(error)
+        for row in values:
+            self.touched_keys.setdefault(exchange, set()).add(row[2])
+            self.touched_dates.add((exchange, segment, row[3]))
         if written >= max(self.ANALYZE_FLOOR, analyzed * self.ANALYZE_GROWTH):
             self._refresh_statistics(written)
         return len(values)
@@ -600,9 +608,13 @@ class EodStore:
             self._raise_corruption(error)
 
     def security_rows(
-        self, exchange: str, keys: Iterable[str]
+        self, exchange: str, keys: Iterable[str], since: Optional[int] = None
     ) -> list[dict[str, Any]]:
-        """One security's whole time series, ordered by date.
+        """One security's time series, ordered by date.
+
+        ``since`` bounds it to dates after a stamp, which is what makes
+        extending a published history cost the new rows rather than the whole
+        history it is being added to.
 
         Takes several keys because a security that changed ISIN or moved series
         has more than one, and the caller -- not this store -- is what knows
@@ -613,13 +625,20 @@ class EodStore:
         if not keys:
             return []
         placeholders = ", ".join("?" * len(keys))
+        # ``+trade_date`` on purpose.  The unary plus makes the term
+        # unusable as an index key, which is what stops the planner from
+        # abandoning the primary-key seek for a range scan of
+        # ``idx_eod_date`` across every security -- measured at 6.5 ms per
+        # query against 0.049 ms, a 130-fold pessimisation from adding a
+        # filter meant to make the query cheaper.
+        bound = "" if since is None else "AND +trade_date > ? "
         try:
             with self._connect() as connection:
                 rows = connection.execute(
                     f"SELECT * FROM eod WHERE exchange = ? "
-                    f"AND security_key IN ({placeholders}) "
+                    f"AND security_key IN ({placeholders}) {bound}"
                     "ORDER BY trade_date, source_order",
-                    [exchange, *keys],
+                    [exchange, *keys, *([] if since is None else [int(since)])],
                 ).fetchall()
             return [dict(row) for row in rows]
         except sqlite3.DatabaseError as error:
@@ -733,17 +752,24 @@ class ReadOnlyEodStore:
         return [dict(row) for row in rows]
 
     def security_rows(
-        self, exchange: str, keys: Iterable[str]
+        self, exchange: str, keys: Iterable[str], since: Optional[int] = None
     ) -> list[dict[str, Any]]:
         keys = list(keys)
         if not keys or not self.exists():
             return []
         placeholders = ", ".join("?" * len(keys))
+        # ``+trade_date`` on purpose.  The unary plus makes the term
+        # unusable as an index key, which is what stops the planner from
+        # abandoning the primary-key seek for a range scan of
+        # ``idx_eod_date`` across every security -- measured at 6.5 ms per
+        # query against 0.049 ms, a 130-fold pessimisation from adding a
+        # filter meant to make the query cheaper.
+        bound = "" if since is None else "AND +trade_date > ? "
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM eod WHERE exchange = ? "
-                f"AND security_key IN ({placeholders}) "
+                f"AND security_key IN ({placeholders}) {bound}"
                 "ORDER BY trade_date, source_order",
-                [exchange, *keys],
+                [exchange, *keys, *([] if since is None else [int(since)])],
             ).fetchall()
         return [dict(row) for row in rows]

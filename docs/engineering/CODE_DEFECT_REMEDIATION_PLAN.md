@@ -1692,9 +1692,17 @@ The migration is four independently shippable steps, from §7 of the review:
       column's spelling is a property of the *row*, taken from the frame its own date
       published, because a row appended later is merged against a stored file read
       back as text.
-- [ ] **3. Flip publication to export-from-DB, dirty-set only.** Where the
-      7,426-files-per-run cost dies and appending one day stops rewriting the store.
-      Consumers still see identical `.txt` files at identical paths.
+- [~] **3. Flip publication to export-from-DB, dirty-set only — engine done
+      2026-08-21, the run does not use it yet.** `src/services/eod_publish.py` extends
+      a history in place when its only missing rows come after its last stored date,
+      and `--republish-histories` runs it. Measured against the legacy path on the same
+      one-day change: 27.72 s and 3,625 KB written become 10.66 s and 700 KB, with all
+      8,124 files byte-identical. Generating from the database is *slower* than reading
+      the files (10.27 s against 5.48 s) — the saving is entirely in not rewriting.
+      **Blocked from being wired in by the registry:** `upsert_batch` also maintains
+      the symbol registry, rename merges and corporate-action windows, and the
+      publisher depends on that registry being current. Moving `securities` and
+      `corporate_actions` into the database is the next piece.
 - [ ] **4. Retire the redundant copies.** Once parity holds for one release, make
       `.state/raw` snapshots optional and drop `.state/backups/history`.
 

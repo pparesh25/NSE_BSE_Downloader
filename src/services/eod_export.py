@@ -601,12 +601,20 @@ def symbol_frame(
     exchange: str,
     filename: str,
     actions: Sequence[dict] = (),
+    since: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Rebuild one published symbol history from the database."""
+    """Rebuild one published symbol history from the database.
+
+    ``since`` returns only the rows after a date, which is what an append
+    needs: reading the whole history to write one line back onto the end of it
+    is the cost this exists to avoid.  It is never combined with a corporate
+    action, because an action rescales rows the bound would have excluded --
+    the publisher rewrites in full in that case.
+    """
 
     exchange = exchange.upper()
     keys = symbol_keys(registry, exchange, filename)
-    rows = store.security_rows(exchange, keys) if keys else []
+    rows = store.security_rows(exchange, keys, since) if keys else []
 
     # One row per date, the last offered winning, matching
     # ``SymbolHistoryStore._deduplicate``.  ``security_rows`` already orders by

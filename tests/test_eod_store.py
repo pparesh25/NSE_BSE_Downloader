@@ -8,7 +8,7 @@ one is a case that a naive ``(security_id, date)`` primary key gets wrong.
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import date
+from datetime import date, timedelta
 import logging
 from pathlib import Path
 import sqlite3
@@ -113,13 +113,23 @@ def test_statistics_arrive_so_a_by_date_query_stops_scanning(tmp_path):
     proportion to the archive.
     """
 
+    # Shaped like an archive, not like one enormous day: an index on
+    # ``trade_date`` earns nothing when every row shares a date, and the first
+    # version of this test wrote 20,001 rows on 2026-07-31 and then asserted
+    # the planner would use it anyway.  It did locally and did not on CI,
+    # which is the planner being right both times about different statistics.
     store = _store(tmp_path)
-    rows = [
-        {**_equity_frame().iloc[0].to_dict(),
-         "SYMBOL": f"SYM{index:05d}", "SECURITY_ID": str(100000 + index)}
-        for index in range(EodStore.ANALYZE_FLOOR + 1)
-    ]
-    store.upsert_frame("NSE", "EQ", rows)
+    symbols = 550
+    for offset in range(40):
+        day = date(2026, 1, 1) + timedelta(days=offset)
+        store.upsert_frame("NSE", "EQ", [
+            {**_equity_frame().iloc[0].to_dict(),
+             "DATE": day.strftime("%Y%m%d"),
+             "SYMBOL": f"SYM{index:05d}",
+             "SECURITY_ID": str(100000 + index)}
+            for index in range(symbols)
+        ])
+    assert store.row_count() > EodStore.ANALYZE_FLOOR
 
     with closing(sqlite3.connect(store.path)) as connection:
         assert connection.execute(
@@ -128,7 +138,7 @@ def test_statistics_arrive_so_a_by_date_query_stops_scanning(tmp_path):
         plan = connection.execute(
             "EXPLAIN QUERY PLAN SELECT * FROM eod "
             "WHERE exchange=? AND segment=? AND trade_date=? ORDER BY symbol",
-            ("NSE", "EQ", 20260731),
+            ("NSE", "EQ", 20260115),
         ).fetchall()
 
     assert any("idx_eod_date" in row[-1] for row in plan), plan

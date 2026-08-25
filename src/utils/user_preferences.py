@@ -63,6 +63,10 @@ class UserPreferences:
                 # ``.state/eod.sqlite3``.  Nothing reads that database yet, so
                 # turning this off costs nothing but the mirror.
                 "dual_write_eod_database": True,
+                # Phase 5 step 3.  Off by default: it changes which code
+                # writes the published files, and that earns a release of
+                # parity evidence before it becomes the default.
+                "publish_histories_from_database": False,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,

@@ -544,6 +544,63 @@ class DownloadWorker(QThread):
                 candidates[name] = sorted(set(dates))
         return candidates
 
+    def _publish_histories_from_database(self) -> None:
+        """Write the run's symbol histories out of the EOD database.
+
+        Phase 5 step 3, and only when the preference asks for it.  The batch
+        above has already re-pointed the registry and resolved renames; what
+        it did not do is read and rewrite every touched file, because this
+        extends them instead.  A failure here is reported and leaves the
+        published tree as the batch left it -- which, with the batch not
+        writing, means the affected histories are simply not yet extended and
+        the next run settles them.
+        """
+
+        store = getattr(self.config, "eod_store", None)
+        if store is None or not store.touched_keys:
+            return
+        from ..services.settings import SettingsService
+
+        if not SettingsService(self.config).get_download_option(
+            "publish_histories_from_database", False
+        ):
+            return
+        import json
+
+        from ..services.eod_export import applied_actions
+        from ..services.eod_publish import publish_histories
+
+        base = Path(self.config.base_data_path)
+        state = base / ".state"
+        registry_path = state / "symbol_registry.json"
+        try:
+            registry = (
+                json.loads(registry_path.read_text(encoding="utf-8"))
+                if registry_path.is_file() else {}
+            )
+            result = publish_histories(
+                store, base, registry, applied_actions(state),
+                store.touched_keys, store.touched_dates,
+            )
+        except Exception as error:
+            self.logger.exception("Database history publication failed")
+            self.error_occurred.emit(
+                "Symbol histories",
+                f"Publishing histories from the database failed; daily files "
+                f"remain available: {error}",
+            )
+            return
+        self.status_updated.emit("Symbol histories", result.render())
+        if result.failures:
+            named = "; ".join(result.failures[:3])
+            if len(result.failures) > 3:
+                named += f"; and {len(result.failures) - 3} more"
+            self.error_occurred.emit(
+                "Symbol histories",
+                f"{len(result.failures)} histories were not published "
+                f"({named})",
+            )
+
     async def _finalize_staged_histories(self) -> None:
         """Publish queued histories, then apply actions once per exchange."""
 
@@ -597,6 +654,8 @@ class DownloadWorker(QThread):
                     f"two securities, not one renamed security. Both files "
                     f"were kept unchanged ({named})",
                 )
+
+        self._publish_histories_from_database()
 
         windows = coordinator.action_windows()
         if not windows:

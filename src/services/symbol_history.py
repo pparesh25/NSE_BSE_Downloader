@@ -1248,8 +1248,19 @@ class SymbolHistoryStore:
         snapshots_saved: bool = False,
         completed_paths: Iterable[str] = (),
         on_symbol_written: Optional[Callable[[str], None]] = None,
+        publish_files: bool = True,
     ) -> HistoryBatchResult:
         """Merge many dates with at most one read/write per final symbol.
+
+        ``publish_files=False`` does everything except read and rewrite the
+        symbol files: the registry is still re-pointed, renames still resolve
+        their merge sources, retired files are still removed, and the result
+        still names every symbol the batch settled.  It is for the Phase 5
+        publication path, where the files are written afterwards out of the
+        database instead -- extending each history rather than rewriting it,
+        which on the owner's tree is 700 KB against 3,625 KB for the same
+        change.  The rows are the same rows either way; step 2 proved the
+        database reproduces this writer's output byte for byte.
 
         Destinations are planned first, then symbols are published one at a
         time, so peak memory follows the batch's own row count instead of the
@@ -1332,6 +1343,13 @@ class SymbolHistoryStore:
                     continue
                 sources = plan.merge_sources.get(path, ())
                 pairs = plan.contributions.get(path, ())
+                if not publish_files:
+                    # Neither the read nor the write happens; both exist only
+                    # to produce the file, and something else is producing it.
+                    history_writes += 1
+                    if on_symbol_written is not None:
+                        on_symbol_written(relative)
+                    continue
                 try:
                     frames = [read_history(source) for source in sources]
                     frames.append(read_history(path))

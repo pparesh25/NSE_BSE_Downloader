@@ -72,6 +72,12 @@ download_options:
   # time and the only loss is the mirror.
   dual_write_eod_database: true
 
+  # Phase 5 step 3: write symbol histories out of .state/eod.sqlite3, extending
+  # each one in place instead of rewriting it.  Measured on a one-day change:
+  # 27.72s and 3,625 KB become 10.66s and 700 KB, byte-identical output.  Off
+  # by default -- it changes which code writes the published files.
+  publish_histories_from_database: false
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 

@@ -1699,10 +1699,12 @@ The migration is four independently shippable steps, from §7 of the review:
       one-day change: 27.72 s and 3,625 KB written become 10.66 s and 700 KB, with all
       8,124 files byte-identical. Generating from the database is *slower* than reading
       the files (10.27 s against 5.48 s) — the saving is entirely in not rewriting.
-      **Blocked from being wired in by the registry:** `upsert_batch` also maintains
-      the symbol registry, rename merges and corporate-action windows, and the
-      publisher depends on that registry being current. Moving `securities` and
-      `corporate_actions` into the database is the next piece.
+      **Wired into the run the same day**, behind `publish_histories_from_database`
+      (off by default). `upsert_batch(publish_files=False)` keeps the registry, rename
+      merges and retirement and simply stops writing the files. An A/B of two real
+      downloads into isolated roots — a first run and then an appending one — produced
+      **byte-identical trees**, with 7,479 files read and ~3,008 KB written by the
+      legacy path against 0 read and 742 KB by the database path.
 - [ ] **4. Retire the redundant copies.** Once parity holds for one release, make
       `.state/raw` snapshots optional and drop `.state/backups/history`.
 

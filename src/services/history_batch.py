@@ -270,6 +270,23 @@ class HistoryBatchJournal:
             )
 
 
+def _publish_from_database(config: Any) -> bool:
+    """Whether symbol files come out of the EOD database this run."""
+
+    try:
+        from .settings import SettingsService
+
+        return bool(
+            SettingsService(config).get_download_option(
+                "publish_histories_from_database", False
+            )
+        )
+    except Exception:
+        # A preference that cannot be read is not a reason to change how
+        # publication works.
+        return False
+
+
 class HistoryBatchCoordinator:
     """Collect raw dates and publish derived symbol files after core outputs."""
 
@@ -295,6 +312,10 @@ class HistoryBatchCoordinator:
         self.telemetry = telemetry or PipelineTelemetry()
         self.batch_dates = self._resolve_batch_dates(config)
         self._action_windows: dict[tuple[str, str], HistoryActionWindow] = {}
+        # Phase 5 step 3.  When the EOD database publishes the histories, this
+        # batch still does everything else it does -- registry, renames,
+        # retirement, action windows -- and simply does not write the files.
+        self.publish_files = not _publish_from_database(config)
 
     @classmethod
     def _resolve_batch_dates(cls, config: Any) -> int:
@@ -434,6 +455,7 @@ class HistoryBatchCoordinator:
                     on_symbol_written=lambda path: self.journal.complete_symbol(
                         batch_id, path
                     ),
+                    publish_files=self.publish_files,
                 )
                 held_back = self._held_back_dates(result)
                 updates: list[StageUpdate] = []

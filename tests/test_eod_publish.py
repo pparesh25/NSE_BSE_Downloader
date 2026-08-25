@@ -190,3 +190,83 @@ def test_one_failing_symbol_does_not_stop_the_others(tmp_path):
         path.chmod(0o644)
 
     assert result.failures and "oldname.txt" in result.failures[0]
+
+
+# ---- the switch that lets the database do the writing -------------------
+
+
+def test_the_batch_can_do_everything_except_write_the_files(tmp_path):
+    """What ``publish_files=False`` must and must not still do.
+
+    The registry, renames and retirement are the batch's work and stay its
+    work; only the read-and-rewrite of each file goes, because something else
+    is producing it.
+    """
+
+    store = SymbolHistoryStore(tmp_path)
+    store.upsert("NSE", "EQ", date(2025, 1, 1), _row("20250101"))
+    eod = _store(tmp_path)
+    eod.upsert_frame("NSE", "EQ", _row("20250101"))
+    eod.upsert_frame("NSE", "EQ", _row("20250102", symbol="NEWNAME"))
+
+    from src.services.symbol_history import HistoryBatchItem
+
+    result = store.upsert_batch(
+        [HistoryBatchItem("NSE", "EQ", date(2025, 1, 2),
+                          _row("20250102", symbol="NEWNAME"))],
+        publish_files=False,
+    )
+
+    assert result.symbols == 1
+    assert result.history_reads == 0
+    registry = _registry(tmp_path)
+    # The rename landed in the registry, and retiring the old file is the
+    # batch's job either way -- so between here and the publish below the
+    # security has no file at all.  Both happen in one run, and the database
+    # is what makes the gap recoverable rather than a loss.
+    assert registry["exchanges"]["NSE"]["ID:123"] == "NEWNAME"
+    assert registry["files"]["NSE"]["NEWNAME"] == "newname.txt"
+    assert not _history(tmp_path, "oldname.txt").exists()
+    assert not _history(tmp_path, "newname.txt").exists()
+
+    publish_histories(
+        eod, tmp_path, registry, (), eod.touched_keys, eod.touched_dates
+    )
+
+    published = _history(tmp_path, "newname.txt")
+    assert published.is_file()
+    assert len(published.read_text().splitlines()) == 3
+
+
+def test_the_two_publication_paths_agree_on_the_same_batch(tmp_path):
+    """The property the real A/B download proved, in miniature.
+
+    Two roots, the same rows, one published by the legacy batch and one by the
+    database: the bytes must not differ.
+    """
+
+    from src.services.symbol_history import HistoryBatchItem
+
+    rows = [_row("20250101"), _row("20250102", close=110.0)]
+    legacy, database = tmp_path / "legacy", tmp_path / "database"
+    for root in (legacy, database):
+        history = SymbolHistoryStore(root)
+        eod = EodStore(
+            root / ".state" / "eod.sqlite3", root / ".state" / "quarantine"
+        )
+        for frame in rows:
+            eod.upsert_frame("NSE", "EQ", frame)
+        items = [
+            HistoryBatchItem("NSE", "EQ", date(2025, 1, index + 1), frame)
+            for index, frame in enumerate(rows)
+        ]
+        history.upsert_batch(items, publish_files=root is legacy)
+        if root is database:
+            publish_histories(
+                eod, root, _registry(root), (), eod.touched_keys,
+                eod.touched_dates,
+            )
+
+    assert (
+        _history(database).read_bytes() == _history(legacy).read_bytes()
+    )

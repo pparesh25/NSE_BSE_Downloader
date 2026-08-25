@@ -444,6 +444,6 @@ starts with moving the registry.
 
 ## Gates
 
-- `pytest` both interpreters — **562 passed**, coverage 78.87% (floor 70%).
+- `pytest` both interpreters — **564 passed**, coverage 78.72% (floor 70%).
 - `ruff check .` passed. `mypy` over 61 source files — no issues.
 - `--smoke-gui` exit 0; `--verify-eod-parity` still clean on the real tree.

@@ -1249,6 +1249,7 @@ class SymbolHistoryStore:
         completed_paths: Iterable[str] = (),
         on_symbol_written: Optional[Callable[[str], None]] = None,
         publish_files: bool = True,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> HistoryBatchResult:
         """Merge many dates with at most one read/write per final symbol.
 
@@ -1269,6 +1270,12 @@ class SymbolHistoryStore:
         ``completed_paths`` and ``on_symbol_written`` form the recovery hook
         used by the run journal. Replaying an uncheckpointed write is safe
         because date deduplication is deterministic.
+
+        ``on_progress(done, total)`` is called as symbols are settled.  This
+        stage runs after every download has finished and can take tens of
+        seconds on a small tree and far longer on a deep one, and without it
+        the interface has nothing to say for that whole time -- which reads as
+        a hung application rather than as work in progress.
 
         A symbol that cannot be published is reported in
         ``HistoryBatchResult.failures`` rather than aborting the batch, so one
@@ -1337,8 +1344,13 @@ class SymbolHistoryStore:
             final_paths = (
                 set(plan.contributions) | set(plan.merge_sources)
             ).difference(plan.retired)
-            for path in sorted(final_paths, key=str):
+            total = len(final_paths)
+            if on_progress is not None:
+                on_progress(0, total)
+            for done, path in enumerate(sorted(final_paths, key=str), 1):
                 relative = str(path.relative_to(self.base_path))
+                if on_progress is not None:
+                    on_progress(done, total)
                 if relative in completed:
                     continue
                 sources = plan.merge_sources.get(path, ())

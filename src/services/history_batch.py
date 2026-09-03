@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from .pipeline_state import PipelineManifest, StageUpdate
 from .pipeline_telemetry import PipelineTelemetry
@@ -417,11 +417,15 @@ class HistoryBatchCoordinator:
             summaries[identity] = f"Symbol history not published -- {summary}"
         return summaries
 
-    def finalize(self) -> tuple[HistoryBatchOutcome, ...]:
+    def finalize(
+        self, on_progress: Optional[Callable[[int, int], None]] = None
+    ) -> tuple[HistoryBatchOutcome, ...]:
         with self._lock:
-            return self._finalize_locked()
+            return self._finalize_locked(on_progress)
 
-    def _finalize_locked(self) -> tuple[HistoryBatchOutcome, ...]:
+    def _finalize_locked(
+        self, on_progress: Optional[Callable[[int, int], None]] = None
+    ) -> tuple[HistoryBatchOutcome, ...]:
         outcomes: list[HistoryBatchOutcome] = []
         while True:
             prepared = self.journal.prepare(self.batch_dates)
@@ -456,6 +460,7 @@ class HistoryBatchCoordinator:
                         batch_id, path
                     ),
                     publish_files=self.publish_files,
+                    on_progress=on_progress,
                 )
                 held_back = self._held_back_dates(result)
                 updates: list[StageUpdate] = []

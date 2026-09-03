@@ -738,9 +738,13 @@ def test_worker_reports_held_back_symbols_without_failing_the_run(tmp_path):
     assert [name for name, _message in errors] == ["Symbol histories"]
     assert "1 symbol histories were not published" in errors[0][1]
     assert "bbb.txt" in errors[0][1]
+    # The stage says it has started before it says what it did.  Without the
+    # first message the interface has nothing to show between the last
+    # download and this result, which reads as a hung application.
+    assert statuses[0] == ("Symbol histories", "Preparing symbol-wise data")
     # The published half is still reported, so the run reads as partial rather
     # than as a failure that lost everything.
-    assert statuses and "published 2 symbols" in statuses[0][1]
+    assert any("published 2 symbols" in message for _name, message in statuses)
 
 
 def test_staged_action_windows_fetch_concurrently_with_timing_telemetry(
@@ -859,3 +863,45 @@ def test_staged_action_timeout_retries_once_and_reports_success(
     assert finished[0].fields["outcome"] == "success"
     assert finished[0].fields["attempts"] == 2
     assert coordinator.pipeline.date_result("BSE", "EQ", day).status == "success"
+
+
+def test_the_symbol_stage_reports_progress_while_it_runs(tmp_path):
+    """The gap this closes is the one a user reads as a hung application.
+
+    Symbol histories are settled after every download has finished.  On the
+    owner's tree that is 8,000 files and tens of seconds, and far longer on a
+    deep archive.  Until this existed the interface said nothing at all for
+    that whole time: no message, no bar, no movement.
+    """
+
+    day = date(2025, 1, 2)
+    manifest = PipelineManifest(tmp_path)
+    manifest.begin("NSE", "EQ", day, ("daily", "symbols"))
+    manifest.mark("NSE", "EQ", day, "daily", "complete")
+    config = SimpleNamespace(
+        base_data_path=tmp_path,
+        download_settings=SimpleNamespace(timeout_seconds=5),
+        stage_executors={},
+    )
+    coordinator = HistoryBatchCoordinator(config)
+    coordinator.offer("NSE", "EQ", day, _rows(day))
+    config.history_batch_coordinator = coordinator
+
+    worker = DownloadWorker(config, [])
+    progress: list[tuple[str, int, str]] = []
+    statuses: list[tuple[str, str]] = []
+    worker.progress_updated.connect(lambda *args: progress.append(args))
+    worker.status_updated.connect(lambda *args: statuses.append(args))
+
+    asyncio.run(worker._finalize_staged_histories())
+
+    assert statuses[0] == ("Symbol histories", "Preparing symbol-wise data")
+    assert progress, "the stage must report movement, not only its result"
+    assert {name for name, _percent, _message in progress} == {
+        "Symbol histories"
+    }
+    percents = [percent for _name, percent, _message in progress]
+    assert percents[0] == 0 and percents[-1] == 100
+    assert percents == sorted(percents), "progress must not go backwards"
+    assert len(set(percents)) == len(percents), "one emission per percent"
+    assert "1/1" in progress[-1][2] or "/" in progress[-1][2]

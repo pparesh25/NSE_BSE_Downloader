@@ -29,7 +29,7 @@ import os
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from .canonical_data import SYMBOL_HISTORY_COLUMNS
 from .eod_export import symbol_frame
@@ -173,6 +173,7 @@ def publish_histories(
     actions: Sequence[dict],
     touched: Mapping[str, Iterable[str]],
     revised_dates: Iterable[tuple[str, str, int]] = (),
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> PublishResult:
     """Write the symbol histories one run changed, and nothing else.
 
@@ -201,11 +202,22 @@ def publish_histories(
         key = revised_exchange.upper()
         oldest_revised[key] = min(oldest_revised.get(key, stamp), stamp)
 
-    for exchange, keys in touched.items():
-        exchange = exchange.upper()
+    plan = {
+        exchange.upper(): _targets(registry, exchange.upper(), keys)
+        for exchange, keys in touched.items()
+    }
+    total = sum(len(names) for names in plan.values())
+    done = 0
+    if on_progress is not None:
+        on_progress(0, total)
+
+    for exchange, filenames in plan.items():
         folder = base_path / exchange / "SYMBOLS"
         symbols = registry.get("files", {}).get(exchange, {})
-        for filename in _targets(registry, exchange, keys):
+        for filename in filenames:
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
             path = folder / filename
             try:
                 names = {

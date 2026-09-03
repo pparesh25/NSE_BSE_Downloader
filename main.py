@@ -89,6 +89,8 @@ Examples:
     python main.py --rebuild-combined NSE 2026-07-31
     python main.py --audit                # verify the database, change nothing
     python main.py --audit NSE_EQ BSE_EQ  # verify only these segments
+    python main.py --verify-eod-parity    # regenerate every daily file from
+                                          # the database and diff it
         """
     )
 
@@ -137,6 +139,27 @@ Examples:
         metavar=("EXCHANGE", "YYYY-MM-DD"),
         help="Rebuild one deterministic EQ+SME/Index output from components",
     )
+    repair.add_argument(
+        "--republish-histories",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE",
+        help=(
+            "Rewrite symbol histories from the EOD database, extending them "
+            "in place where only newer rows are missing"
+        ),
+    )
+    # Read-only like ``--audit``, and in the same group for the same reason.
+    repair.add_argument(
+        "--verify-eod-parity",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE_SEGMENT",
+        help=(
+            "Regenerate published daily files from the EOD database and "
+            "report any that do not match byte for byte"
+        ),
+    )
     # In the same mutually exclusive group as the repairs even though it
     # repairs nothing: asking a question about the database while rewriting it
     # would not answer the question.  ``default=None`` distinguishes "not
@@ -174,6 +197,114 @@ def run_audit_mode(config_path: str, segments) -> int:
 
     print(report.render())
     return 1 if report.failed else 0
+
+
+def run_republish_mode(config_path: str, exchanges) -> int:
+    """Publish symbol histories out of the EOD database.
+
+    Phase 5 step 3.  A history whose only missing rows come after its last
+    stored date is extended rather than rewritten, which is the difference
+    between writing the new rows and writing the whole archive: on the owner's
+    four-date tree, 700 KB against 3,625 KB for the same change, and the ratio
+    is the number of dates.
+
+    It takes the same lock a download does, because it rewrites the same files.
+    """
+
+    import json
+
+    from src.services.eod_export import applied_actions
+    from src.services.eod_publish import publish_histories
+    from src.services.eod_store import ReadOnlyEodStore
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
+    try:
+        config = Config(config_path)
+        base = config.base_data_path
+    except Exception as error:
+        print(f"Republish could not run: {error}")
+        return 2
+
+    try:
+        lock = SingleInstanceLock(base).acquire()
+    except InstanceLockError as error:
+        print(f"Republish not started: {error}")
+        return 1
+
+    try:
+        state = base / ".state"
+        database = state / "eod.sqlite3"
+        if not database.is_file():
+            print(
+                "No EOD database yet, so there is nothing to publish from. "
+                "It fills as dates are downloaded."
+            )
+            return 2
+        registry_path = state / "symbol_registry.json"
+        registry = (
+            json.loads(registry_path.read_text(encoding="utf-8"))
+            if registry_path.is_file() else {}
+        )
+        store = ReadOnlyEodStore(database)
+        wanted = (
+            [value.upper() for value in exchanges] if exchanges
+            else sorted({
+                name.partition("_")[0]
+                for name in config.get_available_exchanges()
+            })
+        )
+        with store.session():
+            touched = {
+                exchange: {
+                    key for key in registry.get("exchanges", {})
+                    .get(exchange, {})
+                }
+                for exchange in wanted
+            }
+            for exchange in wanted:
+                touched[exchange].update(
+                    f"SYM:{symbol.upper()}"
+                    for symbol in registry.get("files", {})
+                    .get(exchange, {})
+                )
+            result = publish_histories(
+                store, base, registry, applied_actions(state), touched
+            )
+    except Exception as error:
+        print(f"Republish failed; existing histories were left in place: {error}")
+        return 2
+    finally:
+        lock.release()
+
+    print(result.render())
+    if result.failures:
+        print(f"\n{len(result.failures)} history/histories were not published:")
+        for failure in result.failures[:20]:
+            print(f"  {failure}")
+        return 1
+    return 0
+
+
+def run_eod_parity_mode(config_path: str, segments) -> int:
+    """Diff every published daily file against the database it was mirrored to.
+
+    Phase 5 step 2.  This changes nothing and is the evidence that has to hold
+    before step 3 lets the database publish.  Exit codes match ``--audit``:
+    0 clean, 1 a mismatch was found, 2 the check could not run -- because "no
+    differences" and "could not look" must not be the same answer.
+    """
+
+    from src.services.eod_export import verify_parity
+
+    try:
+        config = Config(config_path)
+        report = verify_parity(config, segments)
+    except Exception as error:
+        print(f"Parity check could not run: {error}")
+        return 2
+
+    print(report.render())
+    return 1 if report.mismatches else 0
 
 
 def run_rebuild_mode(config_path: str, args) -> int:
@@ -421,6 +552,16 @@ def main():
     try:
         if args.audit is not None:
             return run_audit_mode(str(config_path), args.audit)
+
+        if args.verify_eod_parity is not None:
+            return run_eod_parity_mode(
+                str(config_path), args.verify_eod_parity
+            )
+
+        if args.republish_histories is not None:
+            return run_republish_mode(
+                str(config_path), args.republish_histories
+            )
 
         if (
             args.rebuild_symbol

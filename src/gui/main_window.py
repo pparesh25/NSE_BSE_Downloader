@@ -102,6 +102,14 @@ class UpdateCheckWorker(QThread):
                 })
 
 
+#: The symbol-history stage is not a segment, but it needs a row of its own.
+#: It runs after every download has finished and can take tens of seconds on a
+#: small tree and far longer on a deep one; until this existed the interface
+#: said nothing at all for that whole time, which reads as a hung application
+#: rather than as work in progress.
+HISTORY_PROGRESS_KEY = "Symbol histories"
+
+
 class DownloadWorker(QThread):
     """Background worker thread for downloads"""
 
@@ -544,6 +552,92 @@ class DownloadWorker(QThread):
                 candidates[name] = sorted(set(dates))
         return candidates
 
+    def _history_progress_reporter(self, label: str):
+        """A progress callback for the symbol-history stage.
+
+        Emits only when the whole percent changes.  The stage settles one
+        symbol at a time -- eight thousand of them on the owner's tree -- and
+        a cross-thread signal per symbol would cost more than the work it is
+        reporting on.
+        """
+
+        last = {"percent": -1}
+
+        def report(done: int, total: int) -> None:
+            percent = int(done * 100 / total) if total else 100
+            if percent == last["percent"]:
+                return
+            last["percent"] = percent
+            self.progress_updated.emit(
+                HISTORY_PROGRESS_KEY, percent, f"{label} {done}/{total}"
+            )
+
+        return report
+
+    def _publish_histories_from_database(self) -> None:
+        """Write the run's symbol histories out of the EOD database.
+
+        Phase 5 step 3, and only when the preference asks for it.  The batch
+        above has already re-pointed the registry and resolved renames; what
+        it did not do is read and rewrite every touched file, because this
+        extends them instead.  A failure here is reported and leaves the
+        published tree as the batch left it -- which, with the batch not
+        writing, means the affected histories are simply not yet extended and
+        the next run settles them.
+        """
+
+        store = getattr(self.config, "eod_store", None)
+        if store is None or not store.touched_keys:
+            return
+        from ..services.settings import SettingsService
+
+        if not SettingsService(self.config).get_download_option(
+            "publish_histories_from_database", False
+        ):
+            return
+        # Announced only once it is actually going to happen.  Saying it
+        # before the preference is read tells the user the database wrote
+        # their files on every run that left the legacy path in charge.
+        self.status_updated.emit(
+            HISTORY_PROGRESS_KEY, "Writing symbol files from the database"
+        )
+        import json
+
+        from ..services.eod_export import applied_actions
+        from ..services.eod_publish import publish_histories
+
+        base = Path(self.config.base_data_path)
+        state = base / ".state"
+        registry_path = state / "symbol_registry.json"
+        try:
+            registry = (
+                json.loads(registry_path.read_text(encoding="utf-8"))
+                if registry_path.is_file() else {}
+            )
+            result = publish_histories(
+                store, base, registry, applied_actions(state),
+                store.touched_keys, store.touched_dates,
+                self._history_progress_reporter("Writing symbol files"),
+            )
+        except Exception as error:
+            self.logger.exception("Database history publication failed")
+            self.error_occurred.emit(
+                "Symbol histories",
+                f"Publishing histories from the database failed; daily files "
+                f"remain available: {error}",
+            )
+            return
+        self.status_updated.emit("Symbol histories", result.render())
+        if result.failures:
+            named = "; ".join(result.failures[:3])
+            if len(result.failures) > 3:
+                named += f"; and {len(result.failures) - 3} more"
+            self.error_occurred.emit(
+                "Symbol histories",
+                f"{len(result.failures)} histories were not published "
+                f"({named})",
+            )
+
     async def _finalize_staged_histories(self) -> None:
         """Publish queued histories, then apply actions once per exchange."""
 
@@ -552,12 +646,16 @@ class DownloadWorker(QThread):
         )
         if coordinator is None:
             return
+        self.status_updated.emit(
+            HISTORY_PROGRESS_KEY, "Preparing symbol-wise data"
+        )
+        report = self._history_progress_reporter("Preparing symbol files")
         executor = getattr(self.config, "stage_executors", {}).get("persist")
         if executor is None:
-            outcomes = coordinator.finalize()
+            outcomes = coordinator.finalize(report)
         else:
             outcomes = await executor.run(
-                coordinator.finalize, stage="history_batch"
+                coordinator.finalize, report, stage="history_batch"
             )
         for outcome in outcomes:
             result = outcome.result
@@ -597,6 +695,8 @@ class DownloadWorker(QThread):
                     f"two securities, not one renamed security. Both files "
                     f"were kept unchanged ({named})",
                 )
+
+        self._publish_histories_from_database()
 
         windows = coordinator.action_windows()
         if not windows:
@@ -1704,6 +1804,28 @@ class MainWindow(QMainWindow):
             self.status_labels[exchange] = status_label
             layout.addWidget(status_label, i, 2)
 
+        # The stage that runs after all of them, in the same shape so it reads
+        # as part of the same list rather than as a different kind of thing.
+        row = len(available_exchanges)
+        history_label = QLabel(HISTORY_PROGRESS_KEY)
+        history_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        history_label.setMinimumWidth(100)
+        layout.addWidget(history_label, row, 0)
+
+        history_bar = QProgressBar()
+        history_bar.setVisible(False)
+        history_bar.setMinimumWidth(200)
+        history_bar.setMaximumHeight(20)
+        self.progress_bars[HISTORY_PROGRESS_KEY] = history_bar
+        layout.addWidget(history_bar, row, 1)
+
+        history_status = QLabel("Ready")
+        history_status.setStyleSheet("color: gray;")
+        history_status.setMinimumWidth(300)
+        history_status.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.status_labels[HISTORY_PROGRESS_KEY] = history_status
+        layout.addWidget(history_status, row, 2)
+
         return group
 
     def create_control_buttons(self) -> QHBoxLayout:
@@ -1954,6 +2076,19 @@ class MainWindow(QMainWindow):
                     # Use fixed-width text to prevent jumping
                     self.status_labels[exchange].setText("  0% - Preparing...          ")
                     self.status_labels[exchange].setStyleSheet("color: blue;")
+
+            # Shown from the start and marked as waiting, so the row the user
+            # will be watching later is already on screen rather than
+            # appearing out of nowhere when the downloads end.
+            history_bar = self.progress_bars.get(HISTORY_PROGRESS_KEY)
+            if history_bar is not None:
+                history_bar.setValue(0)
+                history_bar.setVisible(True)
+                history_bar.setFormat("%p% - Waiting for downloads")
+            history_status = self.status_labels.get(HISTORY_PROGRESS_KEY)
+            if history_status is not None:
+                history_status.setText("Waiting for downloads to finish")
+                history_status.setStyleSheet("color: gray;")
 
             # Get weekend option
             include_weekends = self.weekend_checkbox.isChecked() if self.weekend_checkbox else False

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from .pipeline_state import PipelineManifest, StageUpdate
 from .pipeline_telemetry import PipelineTelemetry
@@ -270,6 +270,23 @@ class HistoryBatchJournal:
             )
 
 
+def _publish_from_database(config: Any) -> bool:
+    """Whether symbol files come out of the EOD database this run."""
+
+    try:
+        from .settings import SettingsService
+
+        return bool(
+            SettingsService(config).get_download_option(
+                "publish_histories_from_database", False
+            )
+        )
+    except Exception:
+        # A preference that cannot be read is not a reason to change how
+        # publication works.
+        return False
+
+
 class HistoryBatchCoordinator:
     """Collect raw dates and publish derived symbol files after core outputs."""
 
@@ -295,6 +312,10 @@ class HistoryBatchCoordinator:
         self.telemetry = telemetry or PipelineTelemetry()
         self.batch_dates = self._resolve_batch_dates(config)
         self._action_windows: dict[tuple[str, str], HistoryActionWindow] = {}
+        # Phase 5 step 3.  When the EOD database publishes the histories, this
+        # batch still does everything else it does -- registry, renames,
+        # retirement, action windows -- and simply does not write the files.
+        self.publish_files = not _publish_from_database(config)
 
     @classmethod
     def _resolve_batch_dates(cls, config: Any) -> int:
@@ -396,11 +417,15 @@ class HistoryBatchCoordinator:
             summaries[identity] = f"Symbol history not published -- {summary}"
         return summaries
 
-    def finalize(self) -> tuple[HistoryBatchOutcome, ...]:
+    def finalize(
+        self, on_progress: Optional[Callable[[int, int], None]] = None
+    ) -> tuple[HistoryBatchOutcome, ...]:
         with self._lock:
-            return self._finalize_locked()
+            return self._finalize_locked(on_progress)
 
-    def _finalize_locked(self) -> tuple[HistoryBatchOutcome, ...]:
+    def _finalize_locked(
+        self, on_progress: Optional[Callable[[int, int], None]] = None
+    ) -> tuple[HistoryBatchOutcome, ...]:
         outcomes: list[HistoryBatchOutcome] = []
         while True:
             prepared = self.journal.prepare(self.batch_dates)
@@ -434,6 +459,8 @@ class HistoryBatchCoordinator:
                     on_symbol_written=lambda path: self.journal.complete_symbol(
                         batch_id, path
                     ),
+                    publish_files=self.publish_files,
+                    on_progress=on_progress,
                 )
                 held_back = self._held_back_dates(result)
                 updates: list[StageUpdate] = []

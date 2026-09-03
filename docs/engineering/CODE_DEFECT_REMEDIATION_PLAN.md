@@ -1465,7 +1465,11 @@ The per-segment earliest-available floor belongs to 4.2, so the head-gap check m
 against `base_start_date` for every segment. Until 4.2 lands, a segment the exchange
 simply did not publish that far back will report a head gap that no download can close.
 
-### 4.2 Missing fields and metadata — effort M
+4.2 has since landed (2026-08-20) and pinned four NSE floors, so this no longer applies
+to NSE. **BSE EQ remains unbounded on purpose** — its archive has holes rather than a
+floor — so a BSE head gap can still be reported that no download can close.
+
+### 4.2 Missing fields and metadata — effort M — **done 2026-08-20**
 
 - [x] `TURNOVER` and `PREV_CLOSE` — **done 2026-08-20**. Grepping all of `src/` for
       `TOTTRDVAL|TtlTrfVal|NET_TURNOV|PREVCLOSE|PrvsClsgPric` returned **zero hits**,
@@ -1488,9 +1492,13 @@ simply did not publish that far back will report a head gap that no download can
       matched nothing published a date with every delivery field empty and no
       complaint anywhere. The rate is now recorded against the stage and `--audit`
       judges it against the neighbouring sessions rather than a fixed threshold.
-- [ ] Add `'TS'` to `BSE_EQUITY_SERIES`. BSE Startup scrips are silently absent from
-      every era. Settle the naming decision (PENDING_TASKS §1) **before** release;
-      changing it later forces a migration of published files.
+- [x] Add `'TS'` to `BSE_EQUITY_SERIES` — **closed 2026-08-20 as "will not do".**
+      The owner decided to leave BSE group handling exactly as it is, so `TS` stays
+      out of the accepted set and BSE Startup scrips remain absent from every era.
+      That is now an accepted omission rather than an open box: sampling the
+      2026-08-07 BSE bhavcopy found one `TS` scrip dropped, and changing published
+      naming later would force an audited migration of files already on disk.
+      Recorded in [PENDING_TASKS.md](PENDING_TASKS.md) §1, which is closed.
 
 #### Sampled evidence, 2026-08-20
 
@@ -1655,6 +1663,51 @@ finish a backfill; this is the durable fix, and it should be built against a cod
 whose correctness defects are already closed. **That precondition was met on
 2026-08-08**, when 3.5 closed Phase 3.
 
+The migration is four independently shippable steps, from §7 of the review:
+
+- [x] **1. Dual-write — done 2026-08-20.** `src/services/eod_store.py` mirrors every
+      published frame into `.state/eod.sqlite3` from the canonical frames already in
+      memory. Nothing reads it, a write failure is logged rather than raised, and
+      `dual_write_eod_database` turns it off. Measuring the real tree before writing
+      the schema corrected the key proposed in the review — neither `SECURITY_ID` nor
+      `ISIN` alone identifies a security — and found that a clustered table without
+      statistics silently scans every date an exchange ever published. Evidence:
+      [PHASE_5_1_DUAL_WRITE_REPORT.md](PHASE_5_1_DUAL_WRITE_REPORT.md).
+- [x] **2. Prove parity — done 2026-08-21.**
+      `src/services/eod_export.py` regenerates a published daily file from the
+      database, and `--verify-eod-parity` diffs a whole data root read-only. Proven
+      for equity, index, futures and a three-component combined file. Measuring again
+      corrected the schema twice: row order is not recoverable from the values (index
+      reports are published in source order), and neither is a column's dtype (a
+      gapless whole-number column is `int64` in equity and `float64` in index).
+      **Proven on a real three-day download of all six segments: 18 of 18 published
+      files regenerate byte for byte**, including both combined shapes. That run also
+      corrected the exporter a third time — a combined file concatenates the
+      components' *text*, not their values.
+      **`export_symbol` done 2026-08-21.** A second download appended a fourth date to
+      exercise the re-read-and-merge path, and the whole tree regenerates: **24 daily
+      files and 8,124 symbol histories, byte for byte.** Two more findings came out of
+      it — a history carries corporate-action-adjusted rows the database does not, so
+      the recorded actions are replayed through the engine's own `adjust_rows`; and a
+      column's spelling is a property of the *row*, taken from the frame its own date
+      published, because a row appended later is merged against a stored file read
+      back as text.
+- [~] **3. Flip publication to export-from-DB, dirty-set only — engine done
+      2026-08-21, the run does not use it yet.** `src/services/eod_publish.py` extends
+      a history in place when its only missing rows come after its last stored date,
+      and `--republish-histories` runs it. Measured against the legacy path on the same
+      one-day change: 27.72 s and 3,625 KB written become 10.66 s and 700 KB, with all
+      8,124 files byte-identical. Generating from the database is *slower* than reading
+      the files (10.27 s against 5.48 s) — the saving is entirely in not rewriting.
+      **Wired into the run the same day**, behind `publish_histories_from_database`
+      (off by default). `upsert_batch(publish_files=False)` keeps the registry, rename
+      merges and retirement and simply stops writing the files. An A/B of two real
+      downloads into isolated roots — a first run and then an appending one — produced
+      **byte-identical trees**, with 7,479 files read and ~3,008 KB written by the
+      legacy path against 0 read and 742 KB by the database path.
+- [ ] **4. Retire the redundant copies.** Once parity holds for one release, make
+      `.state/raw` snapshots optional and drop `.state/backups/history`.
+
 ---
 
 ## Sequencing
@@ -1672,11 +1725,15 @@ Phase 2  make it finish          ← done.  2.1 memory ceiling gone; 2.2 write v
 Phase 3  stop writing wrong data ← done.  3.1 parser, 3.2 volume, 3.3 identity,
                                    3.4 size/value gates, 3.5 one writer per root
    ↓
-Phase 4  verifiability           ← 4.1 done: --audit answers "can I trust
-                                   this?" without changing the answer.  4.2
-                                   missing fields still open; 4.3 done
+Phase 4  verifiability           ← done.  4.1 --audit answers "can I trust
+                                   this?" without changing the answer; 4.2
+                                   turnover, previous close and the per-segment
+                                   floors landed, and its last box -- BSE `TS` --
+                                   was closed as "will not do"; 4.3 logging
    ↓
-Phase 5  storage model           ← the durable fix, built on a correct base
+Phase 5  storage model           ← the durable fix, built on a correct base.
+                                   The only phase still open.  Step 1 of 4
+                                   (dual-write) done 2026-08-20.
 ```
 
 Phases 1 and 3 can proceed in parallel if convenient — they touch disjoint files.

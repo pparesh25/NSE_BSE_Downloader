@@ -287,6 +287,21 @@ def _publish_from_database(config: Any) -> bool:
         return False
 
 
+def _read_snapshots_from_database(config: Any) -> bool:
+    """Whether queued snapshots are replayed from the EOD database this run."""
+
+    try:
+        from .settings import SettingsService
+
+        return bool(
+            SettingsService(config).get_download_option(
+                "read_snapshots_from_database", False
+            )
+        )
+    except Exception:
+        return False
+
+
 class HistoryBatchCoordinator:
     """Collect raw dates and publish derived symbol files after core outputs."""
 
@@ -316,6 +331,12 @@ class HistoryBatchCoordinator:
         # batch still does everything else it does -- registry, renames,
         # retirement, action windows -- and simply does not write the files.
         self.publish_files = not _publish_from_database(config)
+        # Phase 5 step 4.  When on, a queued snapshot is replayed from the EOD
+        # database instead of its file -- provided the database regenerates
+        # exactly the bytes the journal recorded.  The file is still written
+        # either way, and is what is read whenever the two disagree.
+        self.snapshots_from_database = _read_snapshots_from_database(config)
+        self.snapshot_divergences: list[str] = []
 
     @classmethod
     def _resolve_batch_dates(cls, config: Any) -> int:
@@ -369,6 +390,62 @@ class HistoryBatchCoordinator:
             rows=len(rows),
         )
         return snapshot
+
+    def _database_snapshot(self, entry: HistoryJournalEntry) -> Optional[Any]:
+        """The queued snapshot regenerated from the EOD database, or ``None``.
+
+        ``None`` means "replay the file", and it is what every doubtful case
+        returns: the setting is off, the run has no database, or the database
+        does not regenerate exactly the bytes the journal recorded.  That last
+        case is never silent -- it is the evidence this setting exists to
+        collect -- so it is logged, recorded in telemetry and kept on the
+        coordinator, and the file, which is still written, is replayed
+        instead.  A date whose dual-write failed lands here, because the
+        mirror would be missing its rows.
+        """
+
+        if not self.snapshots_from_database:
+            return None
+        store = getattr(self.config, "eod_store", None)
+        if store is None:
+            return None
+        from io import StringIO
+
+        import pandas as pd
+
+        from .eod_export import snapshot_text
+
+        try:
+            text = snapshot_text(
+                store, entry.exchange, entry.segment, entry.target_date
+            )
+        except Exception as error:
+            self._snapshot_diverged(entry, f"could not be regenerated: {error}")
+            return None
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != entry.sha256:
+            self._snapshot_diverged(entry, "differs from the journaled snapshot")
+            return None
+        return pd.read_csv(StringIO(text), dtype=str)
+
+    def _snapshot_diverged(
+        self, entry: HistoryJournalEntry, reason: str
+    ) -> None:
+        import logging
+
+        message = (
+            f"{entry.exchange}_{entry.segment} "
+            f"{entry.target_date.isoformat()}: database snapshot {reason}; "
+            "replaying the file instead"
+        )
+        self.snapshot_divergences.append(message)
+        logging.getLogger(__name__).error(message)
+        self.telemetry.record(
+            "snapshot_source_divergence",
+            exchange=entry.exchange,
+            segment=entry.segment,
+            target_date=entry.target_date.isoformat(),
+            reason=reason,
+        )
 
     def register_action_window(
         self,
@@ -442,15 +519,18 @@ class HistoryBatchCoordinator:
                             "History journal contains an unsafe snapshot path"
                         )
                     snapshot = self.base_path / relative
-                    if file_sha256(snapshot) != entry.sha256:
-                        raise StateStoreError(
-                            f"History snapshot checksum mismatch: {snapshot}"
-                        )
+                    frame = self._database_snapshot(entry)
+                    if frame is None:
+                        if file_sha256(snapshot) != entry.sha256:
+                            raise StateStoreError(
+                                f"History snapshot checksum mismatch: {snapshot}"
+                            )
+                        frame = self.histories.read_internal_snapshot(snapshot)
                     items.append(HistoryBatchItem(
                         entry.exchange,
                         entry.segment,
                         entry.target_date,
-                        self.histories.read_internal_snapshot(snapshot),
+                        frame,
                     ))
                 result = self.histories.upsert_batch(
                     items,

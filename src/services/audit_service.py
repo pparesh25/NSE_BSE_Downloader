@@ -344,9 +344,16 @@ class DatabaseAudit:
     """Verify a data root against its own pipeline records, writing nothing."""
 
     def __init__(
-        self, config: Config, segments: Optional[Sequence[str]] = None
+        self,
+        config: Config,
+        segments: Optional[Sequence[str]] = None,
+        snapshots_from_database: Optional[bool] = None,
     ):
         self.config = config
+        # Phase 5 step 4.  ``None`` reads the preference, and only when there
+        # is an EOD database to read -- so auditing a tree without one never
+        # consults the preferences at all.
+        self._read_snapshots_from_database = snapshots_from_database
         self.base_data_path = Path(config.base_data_path)
         available = list(config.get_available_exchanges())
         if segments:
@@ -1326,8 +1333,80 @@ class DatabaseAudit:
             )
         return payload
 
+    def _snapshots_from_database(self) -> bool:
+        if self._read_snapshots_from_database is None:
+            try:
+                from .settings import SettingsService
+
+                self._read_snapshots_from_database = bool(
+                    SettingsService(self.config).get_download_option(
+                        "read_snapshots_from_database", False
+                    )
+                )
+            except Exception:
+                self._read_snapshots_from_database = False
+        return self._read_snapshots_from_database
+
+    def _database_payloads(self, exchange: str) -> Optional[dict[Path, bytes]]:
+        """Snapshot bytes regenerated from the EOD database, or ``None``.
+
+        Only with ``read_snapshots_from_database`` on, and only when the
+        database holds every date ``.state/raw`` does: otherwise the coverage
+        it describes would silently omit dates, which is the one thing an
+        audit must never do.  Where the two sources disagree on a date's
+        bytes that is an error, because they would rebuild different
+        histories -- and it is the evidence the setting exists to collect.
+
+        Keyed by the snapshot's ``.state/raw`` path, whether or not that file
+        still exists, so every finding names the same place either way.
+        """
+
+        database_path = self.base_data_path / ".state" / "eod.sqlite3"
+        if not database_path.is_file() or not self._snapshots_from_database():
+            return None
+        from .eod_store import ReadOnlyEodStore
+        from .snapshot_source import (
+            DatabaseSnapshots,
+            RawFileSnapshots,
+            missing_from,
+        )
+
+        raw = RawFileSnapshots(self.base_data_path / ".state" / "raw")
+        store = ReadOnlyEodStore(database_path)
+        payloads: dict[Path, bytes] = {}
+        with store.session():
+            database = DatabaseSnapshots(store)
+            gap = missing_from(database, raw, exchange)
+            if gap:
+                self._add(
+                    WARNING,
+                    "database-snapshot-gap",
+                    f"the EOD database lacks {len(gap)} snapshot date(s) that "
+                    ".state/raw holds, so symbol coverage is checked against "
+                    f"the files instead: {_describe([e.target_date for e in gap])}",
+                    exchange_segment=exchange,
+                )
+                return None
+            for entry in database.entries(exchange):
+                payload = database.text(entry).encode("utf-8")
+                path = raw.path(entry)
+                payloads[path] = payload
+                if path.is_file() and path.read_bytes() != payload:
+                    self._add(
+                        ERROR,
+                        "database-snapshot-divergence",
+                        "the EOD database regenerates this snapshot with "
+                        "different bytes than .state/raw holds, so the two "
+                        "sources would rebuild different histories",
+                        path=path,
+                    )
+        return payloads
+
     def _expected_symbol_coverage(
-        self, exchange: str, snapshots: list[Path]
+        self,
+        exchange: str,
+        snapshots: list[Path],
+        payloads: Optional[dict[Path, bytes]] = None,
     ) -> tuple[dict[str, int], list[date]]:
         """Which dates each symbol file owes, as one bit per snapshot date.
 
@@ -1362,7 +1441,10 @@ class DatabaseAudit:
                 snapshot_date = date.fromisoformat(path.stem)
             except ValueError:
                 continue
-            payload = self._verify_snapshot(path)
+            payload = (
+                payloads.get(path) if payloads is not None
+                else self._verify_snapshot(path)
+            )
             if payload is None:
                 continue
             bit = 1 << index[snapshot_date]
@@ -1484,7 +1566,12 @@ class DatabaseAudit:
         if not snapshots and not folder.is_dir():
             return None
 
-        expected, ordered = self._expected_symbol_coverage(exchange, snapshots)
+        payloads = self._database_payloads(exchange)
+        if payloads is not None:
+            snapshots = sorted(payloads, key=lambda path: path.stem)
+        expected, ordered = self._expected_symbol_coverage(
+            exchange, snapshots, payloads
+        )
         index = {value: position for position, value in enumerate(ordered)}
         summary = SymbolSummary(
             exchange,

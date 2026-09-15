@@ -307,6 +307,21 @@ def run_eod_parity_mode(config_path: str, segments) -> int:
     return 1 if report.mismatches else 0
 
 
+def _snapshots_from_database(config) -> bool:
+    """Whether the repair commands read snapshots from the EOD database."""
+
+    try:
+        from src.services.settings import SettingsService
+
+        return bool(
+            SettingsService(config).get_download_option(
+                "read_snapshots_from_database", False
+            )
+        )
+    except Exception:
+        return False
+
+
 def run_rebuild_mode(config_path: str, args) -> int:
     """Run an explicit fail-closed symbol-history repair command."""
 
@@ -356,7 +371,10 @@ def run_rebuild_mode(config_path: str, args) -> int:
 
         from src.services.rebuild_service import SymbolHistoryRebuilder
 
-        rebuilder = SymbolHistoryRebuilder(config.base_data_path)
+        rebuilder = SymbolHistoryRebuilder(
+            config.base_data_path,
+            snapshots_from_database=_snapshots_from_database(config),
+        )
         if args.rebuild_symbol:
             exchange, symbol = args.rebuild_symbol
             path = rebuilder.rebuild_symbol(exchange, symbol)
@@ -376,7 +394,10 @@ def run_rebuild_mode(config_path: str, args) -> int:
 
         from src.services.history_revision import HistoryRevisionStore
 
-        notice = HistoryRevisionStore(config.base_data_path).notice()
+        notice = HistoryRevisionStore(
+            config.base_data_path,
+            snapshots_from_database=_snapshots_from_database(config),
+        ).notice()
         if notice:
             print(notice)
         return 0

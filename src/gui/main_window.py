@@ -2022,7 +2022,15 @@ class MainWindow(QMainWindow):
         try:
             from ..services.history_revision import HistoryRevisionStore
 
-            notice = HistoryRevisionStore(self.config.base_data_path).notice()
+            from ..services.settings import SettingsService
+            notice = HistoryRevisionStore(
+                self.config.base_data_path,
+                snapshots_from_database=bool(
+                    SettingsService(self.config).get_download_option(
+                        "read_snapshots_from_database", False
+                    )
+                ),
+            ).notice()
         except Exception as error:
             # A rebuild hint must never be the reason the window fails to open.
             self.logger.warning(f"History revision check skipped: {error}")

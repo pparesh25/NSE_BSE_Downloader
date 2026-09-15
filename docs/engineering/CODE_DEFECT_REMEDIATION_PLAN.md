@@ -1705,17 +1705,18 @@ The migration is four independently shippable steps, from §7 of the review:
       downloads into isolated roots — a first run and then an appending one — produced
       **byte-identical trees**, with 7,479 files read and ~3,008 KB written by the
       legacy path against 0 read and 742 KB by the database path.
-- [ ] **4. Retire the redundant copies — foundation done 2026-09-15, two decisions
-      pending.** `.state/backups/history` was already retired in Phase 2.2.
-      `.state/raw` is read in five places — the history batch journal, `--rebuild-*`,
-      the rebuild prompt, `--audit` and the republish forensics — so it cannot simply
-      be deleted. `snapshot_frame`/`snapshot_text` regenerate all twelve of the owner's
-      snapshots byte for byte with matching sha256, which is what a checksum-verifying
-      journal needs. Retiring raw reclaims ~107 B/row (~3.3 GB at 33M rows) against
-      the database's ~222 B/row. The plan's own gate — parity holding for one release
-      — is not yet met. Pending: whether republish forensics move into the database
-      or are dropped, and whether the reader switches are built now behind a
-      default-off setting or after a release.
+- [~] **4. Retire the redundant copies — every reader can use the database,
+      behind `read_snapshots_from_database` (off); the files are still written.**
+      `.state/backups/history` was already retired in Phase 2.2. The five readers of
+      `.state/raw` each have a database source, proven on real data: the journal
+      replayed 6/6 snapshots from the database across real downloads with identical
+      trees; the audit reported identical coverage on the owner's tree; 50 sampled
+      rebuilds from a copy with no `.state/raw` matched byte for byte; and republish
+      forensics moved into a `snapshot_revisions` table, as the owner chose. Building
+      that found the mirror merged a date instead of replacing it, so a row a corrected
+      bhavcopy withdrew lingered (file 2 rows, mirror 3) — fixed. **Still owed:** stop
+      writing `.state/raw` once a release has run with the setting on, which also means
+      journaling a database-derived digest and making a dual-write failure hard.
 
 ---
 
@@ -1743,7 +1744,7 @@ Phase 4  verifiability           ← done.  4.1 --audit answers "can I trust
 Phase 5  storage model           ← the durable fix, built on a correct base.
                                    The only phase still open.  Steps 1-3
                                    done (3 behind a default-off setting);
-                                   step 4's foundation done 2026-09-15.
+                                   step 4's readers done 2026-09-15 (off).
 ```
 
 Phases 1 and 3 can proceed in parallel if convenient — they touch disjoint files.

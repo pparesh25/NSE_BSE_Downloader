@@ -37,6 +37,21 @@ UNREPAIRABLE_NOTICE = (
     "cannot repair those bars. Re-downloading the affected date range is the "
     "only way to recover them."
 )
+DATABASE_REVISION_NOTICE = (
+    "Symbol histories for {exchanges} were built before the corporate-action "
+    "volume fix, so bars before an old split or bonus still carry unadjusted "
+    "volume and grid-snapped prices. Run `--rebuild-exchange` for those "
+    "exchanges to adopt the corrected arithmetic; it replays the snapshots "
+    "kept in the EOD database, falling back to .state/raw for any date the "
+    "database never received, so only dates this application downloaded can "
+    "be repaired."
+)
+DATABASE_UNREPAIRABLE_NOTICE = (
+    "Symbol histories for {exchanges} also predate the corporate-action "
+    "volume fix, but neither .state/raw nor the EOD database holds snapshots "
+    "for them, so a rebuild cannot repair those bars. Re-downloading the "
+    "affected date range is the only way to recover them."
+)
 
 
 def default_history_revision() -> Dict[str, Any]:
@@ -61,7 +76,9 @@ def validate_history_revision(data: Dict[str, Any]) -> None:
 class HistoryRevisionStore:
     """Read and update the per-exchange symbol-adjustment revision."""
 
-    def __init__(self, base_data_path: Path):
+    def __init__(
+        self, base_data_path: Path, snapshots_from_database: bool = False
+    ):
         self.base_path = Path(base_data_path)
         self.state_path = self.base_path / ".state"
         self._store = VersionedJSONStore(
@@ -71,6 +88,9 @@ class HistoryRevisionStore:
             quarantine_root=self.state_path / "quarantine",
             category="history_revision",
         )
+        # Phase 5 step 4.  With snapshots readable from the EOD database, an
+        # exchange whose .state/raw is gone can still be repaired.
+        self.snapshots_from_database = snapshots_from_database
 
     def read(self) -> Dict[str, Any]:
         return self._store.read()
@@ -98,6 +118,35 @@ class HistoryRevisionStore:
         if not directory.is_dir():
             return False
         return any(directory.glob("*/*.csv"))
+
+    def _has_database_snapshots(self, exchange: str) -> bool:
+        database = self.base_path / ".state" / "eod.sqlite3"
+        if not database.is_file():
+            return False
+        from .eod_store import ReadOnlyEodStore
+        from .snapshot_source import SNAPSHOT_SEGMENTS
+
+        store = ReadOnlyEodStore(database)
+        with store.session():
+            return any(
+                store.published_dates(exchange.upper(), segment)
+                for segment in SNAPSHOT_SEGMENTS
+            )
+
+    def _repairable(self, exchange: str) -> bool:
+        """Whether ``--rebuild-exchange`` has anything to replay.
+
+        The files are checked first because they are cheap and, while they
+        are still written, present: the database is only consulted for an
+        exchange whose ``.state/raw`` is gone, which keeps a copy of a large
+        database out of every application start.
+        """
+
+        if self._has_raw_snapshots(exchange):
+            return True
+        return self.snapshots_from_database and self._has_database_snapshots(
+            exchange
+        )
 
     def claim_new_history(self, exchange: str) -> None:
         """Record the current revision for an exchange starting from nothing.
@@ -146,18 +195,24 @@ class HistoryRevisionStore:
         unrepairable: List[str] = []
         for exchange in self.stale_exchanges():
             target = (
-                repairable if self._has_raw_snapshots(exchange)
+                repairable if self._repairable(exchange)
                 else unrepairable
             )
             target.append(exchange)
+        if self.snapshots_from_database:
+            repairable_text = DATABASE_REVISION_NOTICE
+            unrepairable_text = DATABASE_UNREPAIRABLE_NOTICE
+        else:
+            repairable_text = REVISION_NOTICE
+            unrepairable_text = UNREPAIRABLE_NOTICE
         lines = []
         if repairable:
             lines.append(
-                REVISION_NOTICE.format(exchanges=" and ".join(repairable))
+                repairable_text.format(exchanges=" and ".join(repairable))
             )
         if unrepairable:
             lines.append(
-                UNREPAIRABLE_NOTICE.format(
+                unrepairable_text.format(
                     exchanges=" and ".join(unrepairable)
                 )
             )

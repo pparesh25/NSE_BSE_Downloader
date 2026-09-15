@@ -90,7 +90,7 @@ def test_a_repair_command_refuses_to_run_beside_the_application(
     rebuilt = []
 
     class Rebuilder:
-        def __init__(self, base):
+        def __init__(self, base, snapshots_from_database=False):
             rebuilt.append(base)
 
         def rebuild_registry(self):

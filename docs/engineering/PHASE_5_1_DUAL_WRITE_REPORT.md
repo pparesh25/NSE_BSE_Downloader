@@ -513,3 +513,79 @@ the database's cost — but it does not make Phase 5 free.
 - **When.** The plan's own gate for step 4 is parity holding for one release. PR #21 is
   not merged and nothing has shipped. Steps 1–3 were built behind default-off settings
   for exactly this reason; step 4 can follow the same pattern, or wait.
+
+
+## Decided, built, and what building it found
+
+The owner settled both questions the same day: republish forensics move into the
+database rather than being dropped, and the readers are built now behind a default-off
+setting, `read_snapshots_from_database`, while `.state/raw` keeps being written.
+
+### The seam
+
+`src/services/snapshot_source.py` gives every reader one interface, backed by the files
+(`RawFileSnapshots`) or regenerated from the database (`DatabaseSnapshots`). Against the
+owner's tree: the same 12 entries in the same order, 12/12 identical frames, 12/12
+digests equal to the recorded sha256. `missing_from` names any date `.state/raw` holds
+that the database does not — it fills forward from the day dual-write was switched on —
+and every database-backed reader checks it first and falls back to the files.
+
+### Each reader, and its evidence
+
+| Reader | How it uses the database | Evidence |
+| --- | --- | --- |
+| History journal | Replays a queued snapshot from the database only when its bytes match the sha256 the journal recorded. A mismatch is logged, recorded as `snapshot_source_divergence`, and the file is replayed. | Two real downloads, files against database: 6/6 replays from the database, 0 divergences, 7,865 histories byte-identical — repeated after the upsert fix below, and after a forced republish. |
+| `--rebuild-*` | From the database only when it covers every date `.state/raw` holds. | 50 sampled symbols rebuilt on copies of the owner's tree, the database copy with no `.state/raw` at all: 50/50 byte-identical. |
+| Rebuild prompt | An exchange with no `.state/raw` is still repairable when the database has its snapshots, and the wording says so. The files are checked first so no start copies a large database. | Tests; the owner's tree has no stale exchange to prompt about. |
+| `--audit` | Symbol coverage from the database when it covers the files; new findings `database-snapshot-gap` (warning) and `database-snapshot-divergence` (error). | The owner's tree: identical summaries and coverage from either source, no gap, no divergence, and the tree untouched by both runs. |
+| Republish forensics | `snapshot_revisions`, below. | Below. |
+
+### A defect the revisions work exposed
+
+`upsert_frame` merged a date's rows into the mirror and never removed one the new frame
+lacked. Measured with a corrected bhavcopy that withdrew a row: the published file held
+two rows, the mirror three, the recorded row count said two, and the regenerated snapshot
+no longer matched the file.
+
+The journal and the audit would have caught it, because both compare bytes. A rebuild
+from the database has no checksum and neither does step 3's publisher, so either would
+have kept the withdrawn row. A frame is every row the exchange published for its date, so
+it now replaces that date. On a real root, after forcing a date to download again: 6/6
+snapshots regenerate byte for byte, every component's table row count equals its recorded
+one, and parity holds for 6 daily files and 7,865 histories.
+
+### Republish forensics in the database
+
+`snapshot_revisions` keeps the previous bytes of a date's snapshot whenever a re-download
+changes them, keyed by their sha256 as `.state/raw_revisions` names its files, and
+compressed. Same scope — EQ and SME, the segments `.state/raw` holds — and the same
+retention settings: `raw_revision_days` and `raw_revision_max_per_date`, **90 days and
+five per date** by default. (The question put to the owner said three; that number was
+the policy's grouping depth, not its count.) Pruning runs only through a store the run
+already opened, so no run pays a large database's integrity check just to prune it.
+
+Measured on a real 4,468-row BSE day: a first write 59 ms, an identical re-download
+170 ms, a changed one 188 ms; one revision is 457 KB of text stored in 196 KB. Forward
+runs pay nothing — two real forward runs and an identical republish recorded no
+revisions.
+
+### Rebuild cost, stated honestly
+
+A rebuild read every snapshot again for every symbol, twice: 42–78 ms a call from files,
+223–475 ms from the database. Snapshots are now loaded once per rebuilder. That took the
+50-symbol A/B from 204 s to 163 s with the output unchanged — less than the per-call
+numbers suggest, because the remaining ~1.6 s a symbol is the per-symbol scan over every
+snapshot row, which predates this work and still projects a full rebuild of 8,124
+symbols near four hours.
+
+### What step 4 still owes
+
+Stopping the `.state/raw` writes, once a release has run with the setting on. That is
+more than deleting a directory: the journal must then record a database-derived digest,
+a dual-write failure must become a hard failure rather than a logged one, and there is no
+command yet for a person to read a stored revision.
+
+### Gates
+
+`pytest` in both interpreters — **589 passed**, coverage 78.97% (floor 70%). `ruff` and
+`mypy` (62 files) clean. `--smoke-gui` exit 0.

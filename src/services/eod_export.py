@@ -31,6 +31,7 @@ from .canonical_data import (
     EQUITY_DAILY_COLUMNS,
     FO_DAILY_COLUMNS,
     INDEX_DAILY_COLUMNS,
+    INTERNAL_EQUITY_COLUMNS,
     SYMBOL_HISTORY_COLUMNS,
 )
 from .eod_store import EodReader, ReadOnlyEodStore
@@ -62,6 +63,7 @@ _STORED = {
     "TOTAL_TRADES": "total_trades",
     "QTY_PER_TRADE": "qty_per_trade",
     "ISIN": "isin",
+    "SECURITY_ID": "security_id",
 }
 
 #: Columns the sources publish as whole numbers.  They reach the frame through
@@ -74,7 +76,7 @@ _COUNT_COLUMNS = frozenset({
     "VOLUME", "TOTAL_TRADES", "DELIVERY_QTY", "OPEN_INTEREST", "CHANGE_IN_OI",
 })
 
-_TEXT_COLUMNS = frozenset({"SYMBOL", "DATE", "SERIES", "ISIN"})
+_TEXT_COLUMNS = frozenset({"SYMBOL", "DATE", "SERIES", "ISIN", "SECURITY_ID"})
 
 
 def _column(
@@ -133,6 +135,56 @@ def segment_frame(
         )
         for name in columns
     }, columns=list(columns))
+
+
+def snapshot_frame(
+    store: EodReader, exchange: str, segment: str, target_date: date
+) -> pd.DataFrame:
+    """Rebuild one ``.state/raw`` snapshot frame from the database.
+
+    Phase 5 step 4's foundation.  Five things read ``.state/raw`` today -- the
+    history batch journal, the ``--rebuild-*`` commands, the rebuild prompt,
+    ``--audit`` and the republish forensics -- so the snapshots cannot simply
+    be deleted; each reader needs a source that yields the same thing.
+
+    Measured before this was written: all twelve of the owner's snapshots --
+    four dates of NSE EQ, NSE SME and BSE EQ, 30,820 rows -- regenerate from
+    the database **byte for byte, with sha256 matching their recorded
+    metadata**.  Byte-level matters, not merely value-level, because the
+    journal verifies every snapshot it replays by checksum.
+
+    Shared columns take the dtype recorded from the published frame, which is
+    a column selection of this one and so carries identical dtypes.  The five
+    snapshot-only columns follow rules already measured in step 2:
+    ``TOTAL_TRADES`` is gap-inferred, ``QTY_PER_TRADE`` is always float, and
+    the identity columns are text.
+    """
+
+    exchange, segment = exchange.upper(), segment.upper()
+    stamp = int(target_date.strftime("%Y%m%d"))
+    recorded = store.published_frame(exchange, segment, stamp)
+    dtypes = (
+        dict(zip(recorded["columns"], recorded["dtypes"])) if recorded else {}
+    )
+    rows = store.daily_rows(exchange, segment, stamp)
+    return pd.DataFrame({
+        name: _column(
+            name, [row[_STORED[name]] for row in rows], dtypes.get(name)
+        )
+        for name in INTERNAL_EQUITY_COLUMNS
+    }, columns=list(INTERNAL_EQUITY_COLUMNS))
+
+
+def snapshot_text(
+    store: EodReader, exchange: str, segment: str, target_date: date
+) -> str:
+    """The exact text ``save_internal_snapshot`` wrote for one date."""
+
+    buffer = StringIO()
+    snapshot_frame(store, exchange, segment, target_date).to_csv(
+        buffer, index=False, lineterminator="\n"
+    )
+    return buffer.getvalue()
 
 
 def daily_text(

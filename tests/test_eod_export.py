@@ -473,3 +473,38 @@ def test_reading_the_database_leaves_no_shm_or_wal_behind(tmp_path):
         for path in sorted(state.rglob("*")) if path.is_file()
     }
     assert after == before
+
+
+def test_a_raw_snapshot_regenerates_byte_for_byte_with_its_checksum(tmp_path):
+    """Phase 5 step 4's foundation: the database can stand in for .state/raw.
+
+    Measured first against the owner's twelve real snapshots -- four dates of
+    NSE EQ, NSE SME and BSE EQ, 30,820 rows -- all byte-identical with their
+    recorded sha256.  Pinned here through the real snapshot writer, because the
+    history journal verifies every snapshot by checksum: a value-equal file
+    that differs by one character would fail that check.
+    """
+
+    import hashlib
+    import json
+
+    from src.services.eod_export import snapshot_text
+    from src.services.symbol_history import SymbolHistoryStore
+
+    internal = normalize_nse_equity(_source(_ROWS), DAY)
+    # One matched delivery among gaps, as a partial join leaves it: the whole
+    # column is float and must print that way.
+    internal.loc[1, "DELIVERY_QTY"] = 50.0
+    path = SymbolHistoryStore(tmp_path).save_internal_snapshot(
+        "NSE", "EQ", DAY, internal
+    )
+    store = EodStore(
+        tmp_path / ".state" / "eod.sqlite3", tmp_path / ".state" / "quarantine"
+    )
+    store.upsert_frame("NSE", "EQ", internal, published=public_equity(internal))
+
+    text = snapshot_text(store, "NSE", "EQ", DAY)
+
+    assert text == path.read_text(encoding="utf-8")
+    metadata = json.loads(path.with_suffix(".csv.meta.json").read_text())
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == metadata["sha256"]

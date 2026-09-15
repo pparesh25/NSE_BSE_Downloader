@@ -447,3 +447,69 @@ starts with moving the registry.
 - `pytest` both interpreters — **564 passed**, coverage 78.72% (floor 70%).
 - `ruff check .` passed. `mypy` over 61 source files — no issues.
 - `--smoke-gui` exit 0; `--verify-eod-parity` still clean on the real tree.
+
+
+---
+
+# Step 4 — retiring the redundant copies: what has to be true first
+
+Date: 2026-09-15 (Asia/Kolkata)
+
+The plan gives step 4 one sentence: make `.state/raw` optional and drop
+`.state/backups/history`. Measuring what that means turned up more.
+
+## Half of it was already done
+
+Nothing has written `.state/backups/history` since Phase 2.2 — `symbol_history` says so
+where the copy used to be made, and `state_retention` clears what an older build left.
+The owner's current tree has no `backups` directory at all.
+
+## The other half cannot be a deletion
+
+`.state/raw` is read in five places, and each needs a source that yields the same thing
+before the files can become optional:
+
+| Reader | What it takes from `.state/raw` |
+| --- | --- |
+| History batch journal | `offer` writes a snapshot and journals its path and sha256; `finalize` replays it and refuses one whose checksum moved. Crash-resume depends on it. |
+| `--rebuild-*` | Every snapshot, read as text, to rebuild the registry and each symbol. Fails if there are none. |
+| Rebuild prompt | A stale exchange is called *repairable* only if snapshots exist, and the prompt names `.state/raw`. Shown in the GUI and on the CLI. |
+| `--audit` | Cross-checks every symbol file against snapshot rows as per-date bitmasks, and flags orphaned, widowed or interrupted snapshot files. |
+| `raw_revisions` | When an exchange republishes a date, the previous snapshot is copied aside. Nothing reads it; it exists for a human asking what changed. |
+
+The ordering a database-backed journal needs is already right: `save_processed_data`
+dual-writes the database before it offers the snapshot. But dual-write failures are
+logged and swallowed today, so such a journal must turn that into a hard failure —
+otherwise it would journal a date the database never received.
+
+## What every reader needs, done first
+
+`snapshot_frame` and `snapshot_text` rebuild a snapshot from the database. Against the
+owner's twelve real snapshots — four dates of NSE EQ, NSE SME and BSE EQ, 30,820 rows —
+all twelve regenerate **byte for byte, with sha256 matching their recorded metadata**.
+Byte-level rather than value-level: the journal verifies by checksum, and a value-equal
+file that differs by one character would fail it.
+
+Nothing reads this yet, and no behaviour has changed.
+
+## The disk arithmetic, stated before anyone plans around it
+
+The review expected step 4 to reclaim "roughly a third of the disk footprint". Measured
+on the current tree:
+
+| | bytes per row | at ~33M rows |
+| --- | --- | --- |
+| `.state/raw` snapshots | 106.9 | ~3.3 GB — what step 4 reclaims |
+| `eod.sqlite3` | 221.7 | ~6.8 GB — what Phase 5 adds |
+
+The backups third was already banked in Phase 2.2. What remains is real — about half of
+the database's cost — but it does not make Phase 5 free.
+
+## Waiting on two decisions
+
+- **Republish forensics.** A database upsert overwrites a date, so once `.state/raw` is
+  optional the previous version of a republished bhavcopy would simply vanish. Either a
+  small revisions table keeps it, or the capability is dropped on purpose.
+- **When.** The plan's own gate for step 4 is parity holding for one release. PR #21 is
+  not merged and nothing has shipped. Steps 1–3 were built behind default-off settings
+  for exactly this reason; step 4 can follow the same pattern, or wait.

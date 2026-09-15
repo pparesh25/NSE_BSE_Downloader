@@ -612,3 +612,17 @@ It only reads, through the same copy-and-open store `--audit` uses, and a test
 fingerprints the data root around it. A database written before revisions existed has no
 such table and the read-only store never creates one, so it reports none kept instead of
 failing.
+
+
+### Addendum — the mirror ships off (decided 2026-09-15)
+
+For v1.2.0 the owner chose not to ship dual-write on for everyone. Measured on his own
+tree it costs about 450 MB a year across all six segments — 229 MB for BSE equity alone,
+151 MB for NSE equity — and it gives a user nothing until the database-backed settings
+are turned on, which they are not by default. Nothing leaves a user's machine, so their
+copies would not even be evidence; the evidence for the later steps comes from the
+owner's own runs with the setting on.
+
+It is turned off in all three places that decide it: `config.yaml`, the built-in
+preferences, and the call site's own fallback, which answers whenever the preferences do
+not carry the key. Turning off only one would have left another in charge.

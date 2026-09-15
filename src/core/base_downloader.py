@@ -439,7 +439,7 @@ class BaseDownloader(ABC):
         them.
         """
 
-        if not self.get_download_option("dual_write_eod_database", True):
+        if not self.get_download_option("dual_write_eod_database", False):
             return None
         store = getattr(self.config, "eod_store", None)
         if store is None:

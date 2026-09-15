@@ -67,10 +67,11 @@ download_options:
   apply_corporate_actions: true
 
   # Phase 5 step 1: write every published frame into .state/eod.sqlite3 as
-  # well as to the text files.  Nothing reads that database yet -- the text
-  # files remain the system of record -- so this can be turned off at any
-  # time and the only loss is the mirror.
-  dual_write_eod_database: true
+  # well as to the text files.  The text files remain the system of record.
+  # Off by default since 2026-09-15: it costs about 450 MB a year for all six
+  # segments and gives nothing until the database-backed settings below are
+  # turned on -- and they only read what this has written, so turn it on first.
+  dual_write_eod_database: false
 
   # Phase 5 step 3: write symbol histories out of .state/eod.sqlite3, extending
   # each one in place instead of rewriting it.  Measured on a one-day change:

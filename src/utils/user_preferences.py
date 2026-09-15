@@ -59,6 +59,20 @@ class UserPreferences:
                 "include_fo_open_interest": True,
                 "generate_symbol_files": True,
                 "apply_corporate_actions": True,
+                # Phase 5 step 1.  Mirrors every published frame into
+                # ``.state/eod.sqlite3``.  Off by default: it costs about
+                # 450 MB a year, and nothing reads it unless the settings below
+                # are turned on, which they are not by default either.
+                "dual_write_eod_database": False,
+                # Phase 5 step 3.  Off by default: it changes which code
+                # writes the published files, and that earns a release of
+                # parity evidence before it becomes the default.
+                "publish_histories_from_database": False,
+                # Phase 5 step 4.  Off by default: when on, the readers of
+                # .state/raw -- the history journal, --rebuild-*, the rebuild
+                # prompt and --audit -- take their snapshots from the EOD
+                # database.  The files are still written either way.
+                "read_snapshots_from_database": False,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,

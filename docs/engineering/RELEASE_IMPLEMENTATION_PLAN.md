@@ -252,9 +252,10 @@ Done as part of [CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.m
 
 Tracked in `PENDING_TASKS.md`; not scheduled.
 
-- BSE SME/Startup naming: `TS` group is still dropped. Inherited from v1.0.1, so not a
-  regression, but it is silent data loss. Needs the product decision recorded in
-  `PENDING_TASKS.md` §1 before implementation.
+- BSE SME/Startup naming: **decided 2026-08-20 — no change.** The `TS` group stays
+  dropped by choice, and no suffix is applied to any BSE group. Inherited from v1.0.1,
+  so not a regression; the omission is now accepted rather than deferred.
+  `PENDING_TASKS.md` §1 is closed and no implementation is pending.
 - pandas → Polars: correctly deferred. The measured bottleneck is history-file
   publication, not DataFrame computation, so this would not pay off yet.
 - Engineering documents in Gujarati (`DOWNLOAD_PIPELINE_ARCHITECTURE_PLAN.md` and

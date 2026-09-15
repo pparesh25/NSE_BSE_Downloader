@@ -109,6 +109,9 @@ class Config:
         self.stage_executors: Dict[str, Any] = {}
         self.date_join_coordinator: Any = None
         self.history_batch_coordinator: Any = None
+        # Phase 5 step 1.  Built on demand by the first downloader that
+        # publishes, so the CLI repair paths get it without the GUI wiring it.
+        self.eod_store: Any = None
 
         self.load_config()
         self._validate_config()

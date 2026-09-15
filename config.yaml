@@ -66,6 +66,24 @@ download_options:
   generate_symbol_files: true
   apply_corporate_actions: true
 
+  # Phase 5 step 1: write every published frame into .state/eod.sqlite3 as
+  # well as to the text files.  The text files remain the system of record.
+  # Off by default since 2026-09-15: it costs about 450 MB a year for all six
+  # segments and gives nothing until the database-backed settings below are
+  # turned on -- and they only read what this has written, so turn it on first.
+  dual_write_eod_database: false
+
+  # Phase 5 step 3: write symbol histories out of .state/eod.sqlite3, extending
+  # each one in place instead of rewriting it.  Measured on a one-day change:
+  # 27.72s and 3,625 KB become 10.66s and 700 KB, byte-identical output.  Off
+  # by default -- it changes which code writes the published files.
+  publish_histories_from_database: false
+
+  # Phase 5 step 4: take .state/raw snapshots from .state/eod.sqlite3 instead of
+  # the files, for the history journal, --rebuild-*, the rebuild prompt and
+  # --audit.  The files are still written either way.  Off by default.
+  read_snapshots_from_database: false
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 

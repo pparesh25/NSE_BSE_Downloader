@@ -23,21 +23,55 @@ from .symbol_history import HistoryCorruptionError, SymbolHistoryStore
 class SymbolHistoryRebuilder:
     """Deterministically rebuild symbol histories/registry from raw snapshots."""
 
-    def __init__(self, base_data_path: Path):
+    def __init__(
+        self, base_data_path: Path, snapshots_from_database: bool = False
+    ):
         self.base_path = Path(base_data_path)
         self.histories = SymbolHistoryStore(self.base_path)
+        # Phase 5 step 4.  Rebuild from snapshots regenerated out of the EOD
+        # database when it holds every date .state/raw does, and from the
+        # files otherwise.
+        self.snapshots_from_database = snapshots_from_database
+        self._snapshot_cache: Optional[
+            list[tuple[str, str, Path, pd.DataFrame]]
+        ] = None
 
     def _read_snapshots(
         self, exchange: Optional[str] = None
     ) -> list[tuple[str, str, Path, pd.DataFrame]]:
+        """Every validated snapshot for one exchange, or for all of them.
+
+        Loaded once per rebuilder and filtered per call.  Every rebuild path
+        already reads the whole set at least once -- ``rebuild_symbol`` asks
+        for it to keep other exchanges' registry entries -- and a rebuild
+        writes histories and the registry, never snapshots, so nothing one
+        call could see changes before the next.  Re-reading them for every
+        symbol was measured on copies of the owner's tree at 42-78 ms a call
+        from files and 223-475 ms from the database, twice per symbol.
+        """
+
+        if self._snapshot_cache is None:
+            self._snapshot_cache = self._load_snapshots()
         wanted = exchange.upper() if exchange else None
+        snapshots = [
+            item for item in self._snapshot_cache
+            if wanted is None or item[0] == wanted
+        ]
+        if not snapshots:
+            scope = wanted or "all exchanges"
+            raise StateStoreError(f"No raw snapshots are available for {scope}")
+        return snapshots
+
+    def _load_snapshots(self) -> list[tuple[str, str, Path, pd.DataFrame]]:
+        if self.snapshots_from_database:
+            regenerated = self._database_snapshots(None)
+            if regenerated is not None:
+                return regenerated
         snapshots: list[tuple[str, str, Path, pd.DataFrame]] = []
         for path in sorted(self.histories.raw_path.rglob("*.csv")):
             try:
                 relative = path.relative_to(self.histories.raw_path)
                 snapshot_exchange, segment, _ = relative.parts
-                if wanted and snapshot_exchange.upper() != wanted:
-                    continue
                 frame = pd.read_csv(path, dtype=str)
                 if list(frame.columns) != INTERNAL_EQUITY_COLUMNS:
                     raise ValueError("raw snapshot schema mismatch")
@@ -80,10 +114,59 @@ class SymbolHistoryRebuilder:
                 raise StateCorruptionError(
                     path, quarantine_path, error
                 ) from error
-        if not snapshots:
-            scope = wanted or "all exchanges"
-            raise StateStoreError(f"No raw snapshots are available for {scope}")
         return snapshots
+
+    def _database_snapshots(
+        self, exchange: Optional[str]
+    ) -> Optional[list[tuple[str, str, Path, pd.DataFrame]]]:
+        """Every snapshot a rebuild needs, regenerated from the EOD database.
+
+        Returns ``None`` -- rebuild from the files -- unless the database holds
+        every date ``.state/raw`` does.  It fills forward from the day
+        dual-write was switched on, so an older tree has snapshots the
+        database never saw, and rebuilding from the database alone would
+        silently drop those dates from the rebuilt history.  A rebuild is the
+        repair; it must not be the thing that loses data.
+        """
+
+        import logging
+
+        from .eod_store import ReadOnlyEodStore
+        from .snapshot_source import (
+            DatabaseSnapshots,
+            RawFileSnapshots,
+            missing_from,
+        )
+
+        database_path = self.histories.state_path / "eod.sqlite3"
+        if not database_path.is_file():
+            return None
+        wanted = exchange.upper() if exchange else None
+        store = ReadOnlyEodStore(database_path)
+        raw = RawFileSnapshots(self.histories.raw_path)
+        with store.session():
+            database = DatabaseSnapshots(store)
+            gap = missing_from(database, raw, wanted)
+            if gap:
+                logging.getLogger(__name__).warning(
+                    "Rebuilding from .state/raw: the EOD database lacks %d "
+                    "snapshot date(s), the first being %s",
+                    len(gap),
+                    gap[0].relative_path,
+                )
+                return None
+            entries = database.entries(wanted)
+            if not entries:
+                return None
+            return [
+                (
+                    entry.exchange,
+                    entry.segment,
+                    raw.path(entry),
+                    database.frame(entry),
+                )
+                for entry in entries
+            ]
 
     def _build_registry(
         self,

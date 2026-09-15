@@ -42,8 +42,8 @@ def test_rebuild_service_modes_report_completed_work(
     calls = []
 
     class Rebuilder:
-        def __init__(self, base):
-            calls.append(("init", base))
+        def __init__(self, base, snapshots_from_database=False):
+            calls.append(("init", base, snapshots_from_database))
 
         def rebuild_symbol(self, exchange, symbol):
             calls.append(("symbol", exchange, symbol))
@@ -76,6 +76,9 @@ def test_rebuild_service_modes_report_completed_work(
     assert "5 stable identifiers" in output
     assert "2 symbol histories across all exchanges" in output
     assert ("symbol", "NSE", "RELIANCE") in calls
+    # Phase 5 step 4: the repair commands pass the snapshot-source preference
+    # through, and it is off unless someone turned it on.
+    assert ("init", tmp_path, False) in calls
 
 
 def test_combined_rebuild_and_fail_closed_error(tmp_path, monkeypatch, capsys):

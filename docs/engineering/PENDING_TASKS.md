@@ -1,6 +1,6 @@
 # Pending engineering tasks
 
-Last reviewed: 2026-08-18 (Asia/Kolkata)
+Last reviewed: 2026-08-20 (Asia/Kolkata)
 Repository branch at review: `main`
 
 ## Working convention
@@ -97,12 +97,44 @@ database. Publishing first would have meant notifying every existing user to upg
 to a build that could not complete a historical backfill. Phases 1–3 closed those
 defects first, which is what made this release publishable.
 
-## 1. BSE SME/Startup classification and symbol naming
+## 1. BSE SME/Startup classification and symbol naming — closed 2026-08-20, no change
 
-Status: Research complete; product decisions and implementation pending.
+Status: **Closed. The owner decided on 2026-08-20 to leave the current behaviour
+exactly as it is.** The research below is preserved because it is correct and would be
+the starting point if this is ever reopened, but no implementation is approved and none
+is pending.
 
 Detailed record:
 [BSE_SME_STARTUP_SUFFIX_FINDINGS.md](BSE_SME_STARTUP_SUFFIX_FINDINGS.md)
+
+### What "no change" means, stated precisely
+
+- `BSE_EQUITY_SERIES` (`src/services/canonical_data.py:90-92`) stays
+  `{A, B, M, MS, MT, P, R, T, W, X, XT, Z, ZP}`. **`TS` is deliberately not added**, so
+  BSE Startup `TS` scrips remain absent from published BSE Equity output in every
+  source era. That is an accepted omission, not an open defect.
+- No suffix is applied to any BSE group. `M`, `MT` and `MS` keep their plain symbols,
+  and no `_SME` or `_STARTUP` naming is introduced.
+- No separate SME/Startup selector or separate output is added. BSE Equity remains one
+  download and one segment.
+- No migration of already published files, because nothing about their content changes.
+
+### Why this is a reasonable place to stop
+
+- The measured cost is small: sampling the 2026-08-07 BSE bhavcopy found **one** `TS`
+  scrip dropped. The owner judged that low-stakes against the work and the migration
+  risk of changing published naming.
+- The omission is inherited from v1.0.1, so no existing user's data becomes wrong; it
+  simply stays as complete as it has always been.
+- Leaving it alone keeps published symbol files stable. Adding `TS` or a suffix later
+  is the change that would force an audited migration of files already on disk — which
+  is precisely why it should not be done casually mid-backfill.
+
+### What this unblocks
+
+This item no longer gates anything. In particular it does **not** gate the large BSE
+backfill, and it does not gate Phase 5 of
+[CODE_DEFECT_REMEDIATION_PLAN.md](CODE_DEFECT_REMEDIATION_PLAN.md).
 
 ### Preserved findings
 
@@ -116,58 +148,26 @@ Detailed record:
 - The reference `Mark Python` project appends `_SME` only for `M` and `MT`. This is
   an application naming convention, not an official BSE ticker format.
 - The current downloader accepts `M`, `MT`, and `MS` without applying a suffix. `TS`
-  is missing from the accepted group set and can therefore be dropped.
+  is missing from the accepted group set and is therefore dropped.
 - Delivery matching uses BSE security code, so display-name suffixing must remain
   separate from delivery identity.
 - Price bands and old settlement-cycle wording must not be used as classification
   keys. Group/series is the authority.
 
-### Decisions still required
+### If this is ever reopened
 
-1. Choose the public symbol policy for Startup groups:
-   - keep `MS` and `TS` symbols unchanged;
-   - append `_STARTUP`; or
-   - deliberately append `_SME` to all four groups and coordinate every downstream
-     consumer.
-2. Decide whether users need a separate SME/Startup selector and output, or only
-   correct inclusion and classification within BSE Equity.
-3. Decide whether existing unsuffixed BSE SME history should remain unchanged for
-   historical dates or be migrated through an audited rebuild.
-
-### Approved implementation direction
-
-- Add explicit constants for regular SME groups, Startup groups, and their union.
-- Add `TS` to accepted BSE cash groups.
-- Unless the Startup naming decision changes it, preserve `Mark Python` compatibility
-  by applying `_SME` only to `M` and `MT`.
-- Apply naming after source-era mapping and before canonical validation; make the
-  transformation idempotent.
-- Preserve one BSE cash download and the existing security-code delivery join.
-- Use the same normalized identity in public files, component checkpoints, combined
-  outputs, raw snapshots, symbol histories, retries, and rebuilds.
-- Clarify the GUI label/help text to state that BSE Equity includes regular SME and
-  Startup securities.
-- Do not add a suffix checkbox unless an explicit compatibility requirement is
-  approved.
-
-### Required evidence before release
-
-- Cover `M`, `MT`, `MS`, `TS`, and a main-board control across all three BSE source
-  eras.
-- Test suffix idempotence, mutual-fund exclusion, delivery matching, corporate-action
-  lookup, stable-ID history migration, restart recovery, and duplicate prevention.
-- Re-run 1/20/101-day single-segment and Select-All parity benchmarks. Explain every
-  intentional SHA change caused by naming or newly included `TS` rows.
-- Run the full suite in `opentrader313` and `mark_screener` with isolated temporary
-  data roots.
-- Never modify `/Users/paresh/NSE_BSE_Data` during development or testing. Produce a
-  read-only migration inventory and dry-run report before any approved user-data
-  migration, and stop on ambiguous identities.
+Three product decisions would have to be answered first — the public symbol policy for
+`MS`/`TS`, whether a separate SME/Startup selector is wanted, and whether existing
+unsuffixed history is migrated or left historical. The implementation direction and the
+evidence bar that were drafted for this work are in
+[BSE_SME_STARTUP_SUFFIX_FINDINGS.md](BSE_SME_STARTUP_SUFFIX_FINDINGS.md). Reopening
+after a multi-year backfill is materially more expensive than reopening now, because
+the migration would then span years of published files rather than weeks.
 
 ### Separate scope
 
-BSE FO remains a separate research and implementation task. It is not part of the
-cash-market SME/Startup naming work.
+BSE FO remains a separate research and implementation task. It was never part of the
+cash-market SME/Startup naming work and is unaffected by this decision.
 
 ## 2. Deferred pandas-to-Polars evaluation
 

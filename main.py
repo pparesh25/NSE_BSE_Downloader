@@ -89,6 +89,11 @@ Examples:
     python main.py --rebuild-combined NSE 2026-07-31
     python main.py --audit                # verify the database, change nothing
     python main.py --audit NSE_EQ BSE_EQ  # verify only these segments
+    python main.py --verify-eod-parity    # regenerate every daily file from
+                                          # the database and diff it
+    python main.py --snapshot-revisions NSE EQ 2026-08-18
+                                          # what the exchange changed each
+                                          # time it republished that day
         """
     )
 
@@ -137,6 +142,38 @@ Examples:
         metavar=("EXCHANGE", "YYYY-MM-DD"),
         help="Rebuild one deterministic EQ+SME/Index output from components",
     )
+    repair.add_argument(
+        "--republish-histories",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE",
+        help=(
+            "Rewrite symbol histories from the EOD database, extending them "
+            "in place where only newer rows are missing"
+        ),
+    )
+    # Read-only like ``--audit``, and in the same group for the same reason.
+    repair.add_argument(
+        "--verify-eod-parity",
+        nargs="*",
+        default=None,
+        metavar="EXCHANGE_SEGMENT",
+        help=(
+            "Regenerate published daily files from the EOD database and "
+            "report any that do not match byte for byte"
+        ),
+    )
+    repair.add_argument(
+        "--snapshot-revisions",
+        nargs="+",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Show what an exchange changed each time it republished a day: "
+            "EXCHANGE SEGMENT YYYY-MM-DD [OUTPUT_DIR].  Read-only; with a "
+            "directory, each kept revision is also written there as CSV"
+        ),
+    )
     # In the same mutually exclusive group as the repairs even though it
     # repairs nothing: asking a question about the database while rewriting it
     # would not answer the question.  ``default=None`` distinguishes "not
@@ -174,6 +211,169 @@ def run_audit_mode(config_path: str, segments) -> int:
 
     print(report.render())
     return 1 if report.failed else 0
+
+
+def run_republish_mode(config_path: str, exchanges) -> int:
+    """Publish symbol histories out of the EOD database.
+
+    Phase 5 step 3.  A history whose only missing rows come after its last
+    stored date is extended rather than rewritten, which is the difference
+    between writing the new rows and writing the whole archive: on the owner's
+    four-date tree, 700 KB against 3,625 KB for the same change, and the ratio
+    is the number of dates.
+
+    It takes the same lock a download does, because it rewrites the same files.
+    """
+
+    import json
+
+    from src.services.eod_export import applied_actions
+    from src.services.eod_publish import publish_histories
+    from src.services.eod_store import ReadOnlyEodStore
+    from src.services.instance_lock import InstanceLockError, SingleInstanceLock
+
+    try:
+        config = Config(config_path)
+        base = config.base_data_path
+    except Exception as error:
+        print(f"Republish could not run: {error}")
+        return 2
+
+    try:
+        lock = SingleInstanceLock(base).acquire()
+    except InstanceLockError as error:
+        print(f"Republish not started: {error}")
+        return 1
+
+    try:
+        state = base / ".state"
+        database = state / "eod.sqlite3"
+        if not database.is_file():
+            print(
+                "No EOD database yet, so there is nothing to publish from. "
+                "It fills as dates are downloaded."
+            )
+            return 2
+        registry_path = state / "symbol_registry.json"
+        registry = (
+            json.loads(registry_path.read_text(encoding="utf-8"))
+            if registry_path.is_file() else {}
+        )
+        store = ReadOnlyEodStore(database)
+        wanted = (
+            [value.upper() for value in exchanges] if exchanges
+            else sorted({
+                name.partition("_")[0]
+                for name in config.get_available_exchanges()
+            })
+        )
+        with store.session():
+            touched = {
+                exchange: {
+                    key for key in registry.get("exchanges", {})
+                    .get(exchange, {})
+                }
+                for exchange in wanted
+            }
+            for exchange in wanted:
+                touched[exchange].update(
+                    f"SYM:{symbol.upper()}"
+                    for symbol in registry.get("files", {})
+                    .get(exchange, {})
+                )
+            result = publish_histories(
+                store, base, registry, applied_actions(state), touched
+            )
+    except Exception as error:
+        print(f"Republish failed; existing histories were left in place: {error}")
+        return 2
+    finally:
+        lock.release()
+
+    print(result.render())
+    if result.failures:
+        print(f"\n{len(result.failures)} history/histories were not published:")
+        for failure in result.failures[:20]:
+            print(f"  {failure}")
+        return 1
+    return 0
+
+
+def run_snapshot_revisions_mode(config_path: str, values) -> int:
+    """Report what an exchange changed each time it republished one day.
+
+    Phase 5 step 4.  The owner chose to keep republish forensics in the EOD
+    database, and a revision nobody can read is not a kept capability.  Exit
+    codes: 0 the report ran (whether or not anything was kept), 2 it could
+    not -- a wrong argument, a segment that keeps no snapshots, no database.
+    """
+
+    from datetime import date
+
+    from src.services.snapshot_forensics import report_revisions
+
+    if len(values) not in (3, 4):
+        print(
+            "Usage: --snapshot-revisions EXCHANGE SEGMENT YYYY-MM-DD "
+            "[OUTPUT_DIR]"
+        )
+        return 2
+    try:
+        target_date = date.fromisoformat(values[2])
+    except ValueError:
+        print(f"Not a date: {values[2]} (expected YYYY-MM-DD)")
+        return 2
+    try:
+        config = Config(config_path)
+        report = report_revisions(
+            config.base_data_path,
+            values[0],
+            values[1],
+            target_date,
+            Path(values[3]) if len(values) == 4 else None,
+        )
+    except Exception as error:
+        print(f"Snapshot revisions could not be read: {error}")
+        return 2
+    print(report.render())
+    return 0
+
+
+def run_eod_parity_mode(config_path: str, segments) -> int:
+    """Diff every published daily file against the database it was mirrored to.
+
+    Phase 5 step 2.  This changes nothing and is the evidence that has to hold
+    before step 3 lets the database publish.  Exit codes match ``--audit``:
+    0 clean, 1 a mismatch was found, 2 the check could not run -- because "no
+    differences" and "could not look" must not be the same answer.
+    """
+
+    from src.services.eod_export import verify_parity
+
+    try:
+        config = Config(config_path)
+        report = verify_parity(config, segments)
+    except Exception as error:
+        print(f"Parity check could not run: {error}")
+        return 2
+
+    print(report.render())
+    return 1 if report.mismatches else 0
+
+
+def _snapshots_from_database(config) -> bool:
+    """Whether the repair commands read snapshots from the EOD database."""
+
+    try:
+        from src.services.settings import SettingsService
+
+        return bool(
+            SettingsService(config).get_download_option(
+                "read_snapshots_from_database", False
+            )
+        )
+    except Exception:
+        return False
 
 
 def run_rebuild_mode(config_path: str, args) -> int:
@@ -225,7 +425,10 @@ def run_rebuild_mode(config_path: str, args) -> int:
 
         from src.services.rebuild_service import SymbolHistoryRebuilder
 
-        rebuilder = SymbolHistoryRebuilder(config.base_data_path)
+        rebuilder = SymbolHistoryRebuilder(
+            config.base_data_path,
+            snapshots_from_database=_snapshots_from_database(config),
+        )
         if args.rebuild_symbol:
             exchange, symbol = args.rebuild_symbol
             path = rebuilder.rebuild_symbol(exchange, symbol)
@@ -245,7 +448,10 @@ def run_rebuild_mode(config_path: str, args) -> int:
 
         from src.services.history_revision import HistoryRevisionStore
 
-        notice = HistoryRevisionStore(config.base_data_path).notice()
+        notice = HistoryRevisionStore(
+            config.base_data_path,
+            snapshots_from_database=_snapshots_from_database(config),
+        ).notice()
         if notice:
             print(notice)
         return 0
@@ -421,6 +627,21 @@ def main():
     try:
         if args.audit is not None:
             return run_audit_mode(str(config_path), args.audit)
+
+        if args.verify_eod_parity is not None:
+            return run_eod_parity_mode(
+                str(config_path), args.verify_eod_parity
+            )
+
+        if args.republish_histories is not None:
+            return run_republish_mode(
+                str(config_path), args.republish_histories
+            )
+
+        if args.snapshot_revisions is not None:
+            return run_snapshot_revisions_mode(
+                str(config_path), args.snapshot_revisions
+            )
 
         if (
             args.rebuild_symbol

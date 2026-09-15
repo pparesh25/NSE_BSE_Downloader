@@ -1,19 +1,22 @@
 # NSE/BSE Data Downloader Configuration
 
 app_settings:
-  release_date: "2026-08-04"
+  release_date: "2026-09-15"
   features:
     - "Date-aware legacy/current NSE and BSE downloads"
     - "Delivery volume and percentage for NSE/BSE cash data"
+    - "Turnover and previous close for every segment and era"
     - "Open interest and change in OI for NSE futures"
     - "Corporate-action-adjusted symbol-wise text histories"
+    - "Read-only --audit of checksums, coverage and histories"
     - "Strict source validation and resumable per-date repair"
     - "Deterministic restart-safe EQ, SME and Index reconciliation"
-    - "Custom calendar ranges and collapsible GUI sections"
+    - "Calendar ranges limited to dates the exchanges published"
     - "Official NSE holiday refresh with IST-aware trading dates"
-    - "Cooperative cancellation and typed GUI outcomes"
+    - "Cooperative cancellation, typed outcomes and stage progress"
+    - "Rotating diagnostic logs kept outside the data folder"
+    - "Optional SQLite mirror with byte-for-byte parity checks"
     - "Nuitka-safe bundled resources and stable packaged-app identity"
-    - "Responsive default GUI layout and source-mode process identity"
     - "Python 3.10/3.13 CI gates with enforced test coverage"
     - "Automatic update notifications"
 

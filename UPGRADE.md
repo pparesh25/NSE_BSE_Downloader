@@ -1,4 +1,18 @@
-# Upgrading from v1.0.1 to v1.1.1 — read this first
+# Upgrading to v1.2.0 — read this first
+
+> ### Already on v1.1.1?
+> Nothing has to be migrated and nothing new has to be installed: `requirements.txt` is
+> unchanged. Replace the application, or copy the new source over the old, and start it.
+> Two things are worth knowing:
+>
+> - **Files gain two columns, `TURNOVER` and `PREV_CLOSE`.** Existing files keep their
+>   width until those dates are downloaded again, and every data folder now has a
+>   `SCHEMA.json` naming the columns of each width. The new values cannot be recovered
+>   for dates downloaded earlier; re-download a range to fill them.
+> - **Nothing new is written unless you ask for it.** The optional SQLite database this
+>   release adds is off by default.
+>
+> The rest of this page is for people upgrading from **v1.0.1**.
 
 **If you arrived here from the "New version available" popup inside the app, this file
 is the one you need.** The download you just received is application source code, not a
@@ -6,7 +20,7 @@ ready-to-run installer, and v1.1 needs a different set of libraries than v1.0.1 
 
 Two ways forward. Pick one.
 
-> **If you already installed a v1.1.0 prebuilt application, replace it with v1.1.1.**
+> **If you already installed a v1.1.0 prebuilt application, replace it with v1.2.0.**
 > Those builds shipped without a certificate store, so every download failed with an
 > "SSL certificate issue" no matter which dates you chose. They were withdrawn. Nothing
 > you downloaded with them is wrong -- they could not write anything at all -- and your
@@ -22,9 +36,9 @@ Go to the releases page and download the file for your system:
 
 | Your system | File to download |
 |---|---|
-| Windows 10/11, 64-bit | `NSE_BSE_Downloader-1.1.1-windows-x64.zip` |
-| Mac with Apple Silicon (M1/M2/M3/M4) | `NSE_BSE_Downloader-1.1.1-darwin-arm64.zip` |
-| Linux, 64-bit | `NSE_BSE_Downloader-1.1.1-linux-x64.zip` |
+| Windows 10/11, 64-bit | `NSE_BSE_Downloader-1.2.0-windows-x64.zip` |
+| Mac with Apple Silicon (M1/M2/M3/M4) | `NSE_BSE_Downloader-1.2.0-darwin-arm64.zip` |
+| Linux, 64-bit | `NSE_BSE_Downloader-1.2.0-linux-x64.zip` |
 
 Each file has a matching `.sha256` file next to it if you want to verify the download.
 
@@ -106,16 +120,18 @@ There are three things worth knowing.
 
 **1. New files have more columns than old ones.**
 
-v1.0.1 wrote 7 columns per row. v1.1.0 writes 9 for equity, SME and futures files:
+v1.0.1 wrote 7 columns per row. v1.2.0 writes 11 for equity, SME and futures files, and 9
+for index files:
 
 ```
-Equity / SME : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,DELIVERY_QTY,DELIVERY_PERCENT
-Futures      : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,OPEN_INTEREST,CHANGE_IN_OI
-Index        : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME          (unchanged, 7 columns)
+Equity / SME : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,DELIVERY_QTY,DELIVERY_PERCENT,TURNOVER,PREV_CLOSE
+Futures      : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,OPEN_INTEREST,CHANGE_IN_OI,TURNOVER,PREV_CLOSE
+Index        : SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,TURNOVER,PREV_CLOSE
 ```
 
 Files you already have keep their old 7-column shape until you download that date again.
-So your folder will contain a mix of both formats.
+So your folder will contain a mix of widths; the `SCHEMA.json` in each folder names the
+columns of every width it can hold.
 
 If you have your own scripts reading these files, either handle both widths, or
 re-download the dates you care about to convert them.
@@ -151,8 +167,8 @@ date range shown before clicking Start, and narrow it if it is larger than you e
 v1.0.1 still runs and still reads your data folder. Download its source from the
 [v1.0.1 tag](https://github.com/pparesh25/NSE_BSE_Downloader/releases/tag/v1.0.1).
 
-Be aware this is not a clean round trip: 9-column files written by v1.1.0 stay
-9-column, and v1.0.1 does not understand the `.state` folder v1.1.0 creates. It will
+Be aware this is not a clean round trip: wider files written by newer versions keep
+their width, and v1.0.1 does not understand the `.state` folder they create. It will
 ignore both rather than break, but your folder will not return to a pure v1.0.1 state.
 
 ---

@@ -4,9 +4,9 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.1.1"
-__build_date__ = "2026-08-18"
-__build_number__ = 28
+__version__ = "1.2.0"
+__build_date__ = "2026-09-15"
+__build_number__ = 29
 
 # Verified update artifacts, keyed by "<platform>-<architecture>" exactly as
 # package_release_artifact.py names each release archive.  Release automation
@@ -22,7 +22,7 @@ __build_number__ = 28
 # v1.0.1 clients parse those three by regular expression to discover this
 # release, and tests/test_index_and_version.py fails if that contract breaks.
 __update_artifacts__: dict[str, dict[str, str]] = {
-    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.1.1-darwin-arm64.zip",
+    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.2.0-darwin-arm64.zip",
     #                  "sha256": "<64 hex characters>"},
     # "windows-x64": {...},
     # "linux-x64": {...},
@@ -30,6 +30,24 @@ __update_artifacts__: dict[str, dict[str, str]] = {
 
 # Version history
 VERSION_HISTORY = {
+
+    "1.2.0": {
+        "release_date": "2026-09-15",
+        "features": [
+            "Read-only --audit command that checks checksums, coverage, row counts and symbol histories",
+            "Turnover and previous close in every daily file and symbol history, from every report era",
+            "SCHEMA.json in every data folder naming the columns of each file width",
+            "Date picker limited to the dates each NSE segment was actually published",
+            "Rotating diagnostic log, opened from Help, Open Log Folder",
+            "Progress bar and count for the symbol-history stage after downloads finish",
+            "Optional SQLite mirror with parity, republish and revision commands, off by default"
+        ],
+        "bug_fixes": [
+            "Measured delivery joins, so a report that matched nothing no longer publishes silently",
+            "Fixed the symbol-history stage showing no progress after downloads finished",
+            "Stopped offering dates older than the exchanges' own archives"
+        ]
+    },
 
     "1.1.1": {
         "release_date": "2026-08-18",

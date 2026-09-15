@@ -355,3 +355,35 @@ through Gatekeeper. Only a signature fixes either, which is what this item is fo
 - `BUILD-METADATA.json` records `trust_status: signed`, and the release evidence file
   states which artifacts are signed and which are not. A release where only some
   platforms are signed must say so plainly.
+
+## 5. Symbol-history progress: its own section, and progress that tells the truth
+
+Status: **Approved, deferred to the next build.** The owner tested the published v1.2.0
+macOS app on 2026-09-15 with a fresh download of 2026-01-01 to 2026-09-15 (173 dates, all
+six segments) and asked for the first item below, to be done when a build is needed
+anyway. The other two came out of the same run and belong in the same change. None of
+them affects data: the run published all 173 daily files in every segment.
+
+1. **Give the "Symbol histories" row its own section.** It sits in *Download Progress*
+   beside the six segment rows, although it is a separate stage that starts only after
+   every download has finished.
+2. **Show progress for the whole stage, not for each batch.** Finalization runs in
+   journal batches of at most `history_batch_dates` entries (`config.yaml`: 50). There is
+   one entry per exchange, segment and date, so a Select-All run fits about 17 dates in a
+   batch, and 173 dates take eleven batches. Each batch drives the bar from 0 to 100 %
+   again, with no sign of how many remain. The owner saw it "run twice" and could
+   reasonably have taken it for a loop, or closed the app while histories were still
+   being written. Either carry the batch number and total in the label, or make the bar
+   track entries across the whole stage.
+3. **Say "pending" as soon as a segment is pending.** NSE had not published its delivery
+   report for 2026-09-15 when that date downloaded (log: `NSE_EQ delivery pending for
+   2026-09-15`, and the same for `NSE_SME`). So NSE EQ and NSE SME correctly carry that
+   day with empty delivery fields, to be filled by *Retry Failed/Pending*. While the
+   symbol stage ran, though, both rows read "100% - Completed 2026-09-15" in red, which
+   says two contradictory things. The row should read pending, in the pending colour,
+   from the moment that is known.
+
+Related, and not part of this item: on the legacy write path every batch rewrites each
+history it touches in full, so a long range spends most of its time in this stage.
+Phase 5 step 3 (`publish_histories_from_database`) is the change that removes that cost.
+

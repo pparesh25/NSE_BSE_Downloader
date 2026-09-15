@@ -78,6 +78,11 @@ download_options:
   # by default -- it changes which code writes the published files.
   publish_histories_from_database: false
 
+  # Phase 5 step 4: take .state/raw snapshots from .state/eod.sqlite3 instead of
+  # the files, for the history journal, --rebuild-*, the rebuild prompt and
+  # --audit.  The files are still written either way.  Off by default.
+  read_snapshots_from_database: false
+
   # SME Symbol Processing
   sme_add_suffix: true  # Add '_SME' suffix to NSE SME symbol names
 

@@ -67,6 +67,11 @@ class UserPreferences:
                 # writes the published files, and that earns a release of
                 # parity evidence before it becomes the default.
                 "publish_histories_from_database": False,
+                # Phase 5 step 4.  Off by default: when on, the readers of
+                # .state/raw -- the history journal, --rebuild-*, the rebuild
+                # prompt and --audit -- take their snapshots from the EOD
+                # database.  The files are still written either way.
+                "read_snapshots_from_database": False,
                 # Append options
                 "sme_add_suffix": False,
                 "sme_append_to_eq": False,

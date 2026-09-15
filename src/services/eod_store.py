@@ -23,10 +23,14 @@ Why a separate database file from ``pipeline_state.sqlite3``:
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sqlite3
 import tempfile
+import time
+import zlib
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import (
     Any, Iterable, Iterator, NoReturn, Optional, Protocol, Sequence,
@@ -66,6 +70,68 @@ class EodReader(Protocol):
 
     def published_dates(self, exchange: str, segment: str) -> list[int]:
         ...
+
+
+#: Segments whose superseded snapshots are kept: the ones ``.state/raw`` holds,
+#: and so the ones ``.state/raw_revisions`` has always covered.  Mirrors
+#: ``snapshot_source.SNAPSHOT_SEGMENTS``, which cannot be imported here without
+#: a cycle.
+_REVISIONED_SEGMENTS = frozenset({"EQ", "SME"})
+
+
+def _stamp_date(stamp: int) -> date:
+    return date(stamp // 10000, stamp // 100 % 100, stamp % 100)
+
+
+class _ConnectionReader:
+    """An ``EodReader`` over one open connection.
+
+    A transaction cannot see its own uncommitted rows through a second
+    connection, and the revision check has to compare a date's snapshot before
+    and after the write inside the same transaction that makes it.
+    """
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.connection = connection
+
+    def published_frame(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> Optional[dict[str, Any]]:
+        row = self.connection.execute(
+            "SELECT columns, dtypes, rows FROM published_frames "
+            "WHERE exchange = ? AND segment = ? AND trade_date = ?",
+            (exchange, segment, int(trade_date)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "columns": row["columns"].split(","),
+            "dtypes": row["dtypes"].split(","),
+            "rows": int(row["rows"]),
+        }
+
+    def daily_rows(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM eod WHERE exchange = ? AND segment = ? "
+            "AND trade_date = ? ORDER BY source_order",
+            (exchange, segment, int(trade_date)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def security_rows(
+        self, exchange: str, keys: Iterable[str], since: Optional[int] = None
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError("not needed inside a write transaction")
+
+    def published_dates(self, exchange: str, segment: str) -> list[int]:
+        rows = self.connection.execute(
+            "SELECT trade_date FROM published_frames "
+            "WHERE exchange = ? AND segment = ? ORDER BY trade_date",
+            (exchange, segment),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
 
 
 def security_key(symbol: Any, isin: Any, security_id: Any) -> str:
@@ -182,6 +248,8 @@ class EodStore:
         #: describes one run, and a run that died has nothing to publish.
         self.touched_keys: dict[str, set[str]] = {}
         self.touched_dates: set[tuple[str, str, int]] = set()
+        #: When a revision is superseded; replaceable so retention can be tested.
+        self._clock = time.time
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._initialize()
@@ -297,6 +365,24 @@ class EodStore:
                 ) WITHOUT ROWID
                 """
             )
+            # Republish forensics, which the owner chose to keep rather than
+            # drop once .state/raw is optional: the previous bytes of a date's
+            # snapshot whenever a re-download changes them.  Keyed by that
+            # snapshot's sha256, as .state/raw_revisions names its files, and
+            # compressed, because a whole day is kept for every revision.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snapshot_revisions (
+                    exchange      TEXT    NOT NULL,
+                    segment       TEXT    NOT NULL,
+                    trade_date    INTEGER NOT NULL,
+                    sha256        TEXT    NOT NULL,
+                    superseded_at REAL    NOT NULL,
+                    payload       BLOB    NOT NULL,
+                    PRIMARY KEY (exchange, segment, trade_date, sha256)
+                ) WITHOUT ROWID
+                """
+            )
             # ``WHERE trade_date = ?`` is the daily bhavcopy; the primary key
             # already serves ``WHERE security_key = ? ORDER BY trade_date``.
             connection.execute(
@@ -409,10 +495,23 @@ class EodStore:
                 "exchange", "segment", "security_key", "trade_date",
             }
         )
+        dates = sorted({row[3] for row in values})
         try:
             with self._connect() as connection:
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute("BEGIN IMMEDIATE")
+                previous = self._snapshot_in(connection, exchange, segment, dates)
+                # A frame is every row the exchange published for its date, so
+                # it replaces that date rather than merging into it.  Merging
+                # never removed a row the new frame lacked: after a corrected
+                # bhavcopy withdrew one, the published file held two rows and
+                # the mirror three, and a rebuild from the mirror -- which has
+                # no checksum to catch it -- would have kept the withdrawn row.
+                connection.executemany(
+                    "DELETE FROM eod WHERE exchange = ? AND segment = ? "
+                    "AND trade_date = ?",
+                    [(exchange, segment, stamp) for stamp in dates],
+                )
                 connection.executemany(
                     f"""
                     INSERT INTO eod ({", ".join(self._COLUMNS)})
@@ -440,6 +539,10 @@ class EodStore:
                             ",".join(columns), ",".join(dtypes), len(values),
                         ),
                     )
+                if previous is not None:
+                    self._keep_revision(
+                        connection, exchange, segment, dates[0], previous
+                    )
                 written = self._counter(connection, "rows_written") + len(values)
                 self._set_counter(connection, "rows_written", written)
                 analyzed = self._counter(connection, "rows_at_analyze")
@@ -451,6 +554,146 @@ class EodStore:
         if written >= max(self.ANALYZE_FLOOR, analyzed * self.ANALYZE_GROWTH):
             self._refresh_statistics(written)
         return len(values)
+
+    def _snapshot_in(
+        self,
+        connection: sqlite3.Connection,
+        exchange: str,
+        segment: str,
+        dates: Sequence[int],
+    ) -> Optional[str]:
+        """A date's snapshot text as the open transaction sees it, or ``None``.
+
+        ``None`` for anything that has no snapshot to supersede: a segment
+        ``.state/raw`` never held, a frame spanning more than one date, or a
+        date written for the first time -- which is every date of an ordinary
+        forward run, so that run pays nothing for this.
+        """
+
+        if segment not in _REVISIONED_SEGMENTS or len(dates) != 1:
+            return None
+        exists = connection.execute(
+            "SELECT 1 FROM eod WHERE exchange = ? AND segment = ? "
+            "AND trade_date = ? LIMIT 1",
+            (exchange, segment, dates[0]),
+        ).fetchone()
+        if exists is None:
+            return None
+        from .eod_export import snapshot_text
+
+        return snapshot_text(
+            _ConnectionReader(connection), exchange, segment,
+            _stamp_date(dates[0]),
+        )
+
+    def _keep_revision(
+        self,
+        connection: sqlite3.Connection,
+        exchange: str,
+        segment: str,
+        stamp: int,
+        previous: str,
+    ) -> None:
+        """Keep the superseded snapshot if the write actually changed it."""
+
+        current = self._snapshot_in(connection, exchange, segment, [stamp])
+        digest = hashlib.sha256(previous.encode("utf-8")).hexdigest()
+        if current is not None and hashlib.sha256(
+            current.encode("utf-8")
+        ).hexdigest() == digest:
+            return
+        connection.execute(
+            "INSERT OR IGNORE INTO snapshot_revisions("
+            "exchange, segment, trade_date, sha256, superseded_at, payload"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                exchange, segment, stamp, digest, float(self._clock()),
+                zlib.compress(previous.encode("utf-8")),
+            ),
+        )
+
+    def snapshot_revisions(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> list[dict[str, Any]]:
+        """Every superseded snapshot of one date, newest first, as its text."""
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT sha256, superseded_at, payload "
+                    "FROM snapshot_revisions WHERE exchange = ? "
+                    "AND segment = ? AND trade_date = ? "
+                    "ORDER BY superseded_at DESC, sha256",
+                    (exchange, segment, int(trade_date)),
+                ).fetchall()
+        except sqlite3.DatabaseError as error:
+            self._raise_corruption(error)
+        return [
+            {
+                "sha256": row["sha256"],
+                "superseded_at": float(row["superseded_at"]),
+                "text": zlib.decompress(row["payload"]).decode("utf-8"),
+            }
+            for row in rows
+        ]
+
+    def prune_snapshot_revisions(
+        self,
+        max_age_days: int,
+        max_per_date: Optional[int],
+        now: Optional[float] = None,
+    ) -> tuple[int, int, int]:
+        """Keep superseded snapshots bounded, by the rules the files follow.
+
+        The same semantics as ``state_retention.prune_state_tree`` applies to
+        ``.state/raw_revisions``: ``max_age_days`` of 0 removes every revision
+        and a negative value disables the age rule; ``max_per_date`` keeps the
+        newest per exchange, segment and date, and ``None`` disables it.
+        Returns ``(removed, removed_bytes, kept)``.
+        """
+
+        moment = float(self._clock()) if now is None else now
+        doomed: list[Any] = []
+        kept = 0
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    "SELECT exchange, segment, trade_date, sha256, "
+                    "superseded_at, LENGTH(payload) AS size "
+                    "FROM snapshot_revisions"
+                ).fetchall()
+                groups: dict[tuple[str, str, int], list[Any]] = {}
+                for row in rows:
+                    if max_age_days >= 0 and (
+                        moment - float(row["superseded_at"])
+                        >= max_age_days * 86400
+                    ):
+                        doomed.append(row)
+                        continue
+                    groups.setdefault(
+                        (row["exchange"], row["segment"], row["trade_date"]),
+                        [],
+                    ).append(row)
+                for group in groups.values():
+                    group.sort(
+                        key=lambda row: (-float(row["superseded_at"]), row["sha256"])
+                    )
+                    limit = len(group) if max_per_date is None else max_per_date
+                    kept += min(len(group), limit)
+                    doomed.extend(group[limit:])
+                connection.executemany(
+                    "DELETE FROM snapshot_revisions WHERE exchange = ? "
+                    "AND segment = ? AND trade_date = ? AND sha256 = ?",
+                    [
+                        (row["exchange"], row["segment"], row["trade_date"],
+                         row["sha256"])
+                        for row in doomed
+                    ],
+                )
+        except sqlite3.DatabaseError as error:
+            self._raise_corruption(error)
+        return len(doomed), sum(int(row["size"]) for row in doomed), kept
 
     #: Rows written before the first ANALYZE, and the growth factor that earns
     #: another one.  Doubling means ANALYZE runs about a dozen times on the way

@@ -322,6 +322,49 @@ class DownloadWorker(QThread):
                 update.exchange_segment, update.message
             )
 
+    def _prune_snapshot_revisions(self) -> None:
+        """Keep superseded snapshots in the EOD database bounded.
+
+        The same rules and settings as ``.state/raw_revisions``: the owner
+        chose to keep republish forensics when the files become optional, so
+        they are kept the same way.  Only a store this run already opened is
+        pruned -- opening a large database just to find nothing to do would add
+        its integrity check to every run.  Housekeeping, so a failure is logged
+        and dropped.
+        """
+
+        store = getattr(self.config, "eod_store", None)
+        if store is None:
+            return
+        policy = next(
+            (
+                policy for policy in policies_from_settings(
+                    getattr(self.config, "retention_settings", None)
+                )
+                if policy.directory == "raw_revisions"
+            ),
+            None,
+        )
+        if policy is None or policy.prunes_nothing:
+            return
+        try:
+            removed, removed_bytes, kept = store.prune_snapshot_revisions(
+                policy.max_age_days, policy.max_entries
+            )
+        except Exception as error:
+            self.logger.warning("Snapshot revision retention failed: %s", error)
+            return
+        telemetry = getattr(self.config, "pipeline_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(
+                "state_retention",
+                directory="eod.sqlite3:snapshot_revisions",
+                removed_files=removed,
+                removed_bytes=removed_bytes,
+                kept_files=kept,
+                errors=0,
+            )
+
     def _prune_state_directories(self) -> None:
         """Keep the diagnostic copies under ``.state`` bounded.
 
@@ -494,6 +537,7 @@ class DownloadWorker(QThread):
             # Before the telemetry export below, so the sweep's own events are
             # part of the file this run leaves behind.
             self._prune_state_directories()
+            self._prune_snapshot_revisions()
             base_data_path = getattr(self.config, "base_data_path", None)
             if base_data_path is not None:
                 try:

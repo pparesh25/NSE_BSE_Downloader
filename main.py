@@ -91,6 +91,9 @@ Examples:
     python main.py --audit NSE_EQ BSE_EQ  # verify only these segments
     python main.py --verify-eod-parity    # regenerate every daily file from
                                           # the database and diff it
+    python main.py --snapshot-revisions NSE EQ 2026-08-18
+                                          # what the exchange changed each
+                                          # time it republished that day
         """
     )
 
@@ -158,6 +161,17 @@ Examples:
         help=(
             "Regenerate published daily files from the EOD database and "
             "report any that do not match byte for byte"
+        ),
+    )
+    repair.add_argument(
+        "--snapshot-revisions",
+        nargs="+",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Show what an exchange changed each time it republished a day: "
+            "EXCHANGE SEGMENT YYYY-MM-DD [OUTPUT_DIR].  Read-only; with a "
+            "directory, each kept revision is also written there as CSV"
         ),
     )
     # In the same mutually exclusive group as the repairs even though it
@@ -282,6 +296,46 @@ def run_republish_mode(config_path: str, exchanges) -> int:
         for failure in result.failures[:20]:
             print(f"  {failure}")
         return 1
+    return 0
+
+
+def run_snapshot_revisions_mode(config_path: str, values) -> int:
+    """Report what an exchange changed each time it republished one day.
+
+    Phase 5 step 4.  The owner chose to keep republish forensics in the EOD
+    database, and a revision nobody can read is not a kept capability.  Exit
+    codes: 0 the report ran (whether or not anything was kept), 2 it could
+    not -- a wrong argument, a segment that keeps no snapshots, no database.
+    """
+
+    from datetime import date
+
+    from src.services.snapshot_forensics import report_revisions
+
+    if len(values) not in (3, 4):
+        print(
+            "Usage: --snapshot-revisions EXCHANGE SEGMENT YYYY-MM-DD "
+            "[OUTPUT_DIR]"
+        )
+        return 2
+    try:
+        target_date = date.fromisoformat(values[2])
+    except ValueError:
+        print(f"Not a date: {values[2]} (expected YYYY-MM-DD)")
+        return 2
+    try:
+        config = Config(config_path)
+        report = report_revisions(
+            config.base_data_path,
+            values[0],
+            values[1],
+            target_date,
+            Path(values[3]) if len(values) == 4 else None,
+        )
+    except Exception as error:
+        print(f"Snapshot revisions could not be read: {error}")
+        return 2
+    print(report.render())
     return 0
 
 
@@ -582,6 +636,11 @@ def main():
         if args.republish_histories is not None:
             return run_republish_mode(
                 str(config_path), args.republish_histories
+            )
+
+        if args.snapshot_revisions is not None:
+            return run_snapshot_revisions_mode(
+                str(config_path), args.snapshot_revisions
             )
 
         if (

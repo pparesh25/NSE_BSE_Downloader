@@ -582,10 +582,33 @@ symbols near four hours.
 
 Stopping the `.state/raw` writes, once a release has run with the setting on. That is
 more than deleting a directory: the journal must then record a database-derived digest,
-a dual-write failure must become a hard failure rather than a logged one, and there is no
-command yet for a person to read a stored revision.
+and a dual-write failure must become a hard failure rather than a logged one. (Reading a
+stored revision back was also owed here; `--snapshot-revisions`, below, now does it.)
 
 ### Gates
 
 `pytest` in both interpreters — **589 passed**, coverage 78.97% (floor 70%). `ruff` and
 `mypy` (62 files) clean. `--smoke-gui` exit 0.
+
+
+### Addendum — reading revisions back (`--snapshot-revisions`)
+
+A kept revision nobody can read is not a kept capability, so the owner's decision to
+keep republish forensics was not finished until this existed.
+
+```
+python main.py --snapshot-revisions NSE EQ 2026-08-18
+python main.py --snapshot-revisions NSE EQ 2026-08-18 ~/Desktop/republish
+```
+
+It says what changed rather than printing two files to diff by eye: rows withdrawn, rows
+added, and for each changed row the columns that differ, old value to new —
+`AAA: CLOSE 11.0 -> 99.5`. Each revision is compared with the version that replaced it:
+the newest with the current snapshot, each older one with the next newer revision still
+kept. With a directory, every kept revision is also written there, byte for byte what
+`.state/raw_revisions` holds; a directory inside `.state` is refused.
+
+It only reads, through the same copy-and-open store `--audit` uses, and a test
+fingerprints the data root around it. A database written before revisions existed has no
+such table and the read-only store never creates one, so it reports none kept instead of
+failing.

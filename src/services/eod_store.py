@@ -984,6 +984,39 @@ class ReadOnlyEodStore:
             finally:
                 connection.close()
 
+    def snapshot_revisions(
+        self, exchange: str, segment: str, trade_date: int
+    ) -> list[dict[str, Any]]:
+        """Every superseded snapshot of one date, newest first, as its text.
+
+        A database written before revisions existed has no such table, and
+        this store never creates one -- so its absence reads as "none kept".
+        """
+
+        if not self.exists():
+            return []
+        with self._connect() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'snapshot_revisions'"
+            ).fetchone()
+            if table is None:
+                return []
+            rows = connection.execute(
+                "SELECT sha256, superseded_at, payload FROM snapshot_revisions "
+                "WHERE exchange = ? AND segment = ? AND trade_date = ? "
+                "ORDER BY superseded_at DESC, sha256",
+                (exchange, segment, int(trade_date)),
+            ).fetchall()
+        return [
+            {
+                "sha256": row["sha256"],
+                "superseded_at": float(row["superseded_at"]),
+                "text": zlib.decompress(row["payload"]).decode("utf-8"),
+            }
+            for row in rows
+        ]
+
     def published_dates(self, exchange: str, segment: str) -> list[int]:
         if not self.exists():
             return []

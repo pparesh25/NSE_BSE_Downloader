@@ -109,6 +109,23 @@ class UpdateCheckWorker(QThread):
 #: rather than as work in progress.
 HISTORY_PROGRESS_KEY = "Symbol histories"
 
+#: Colours a segment's status carries while its run is still going.  A notice --
+#: a delivery report the exchange has not published yet -- used to be rendered as
+#: an error, which left the row reading "Completed" in red until the run ended.
+RUNNING_COLOR = "blue"
+NOTICE_COLOR = "#d97706"
+ERROR_COLOR = "red"
+
+
+def running_label_color(has_error: bool, has_notice: bool) -> str:
+    """The colour a segment's status carries while its run is still going."""
+
+    if has_error:
+        return ERROR_COLOR
+    if has_notice:
+        return NOTICE_COLOR
+    return RUNNING_COLOR
+
 
 class DownloadWorker(QThread):
     """Background worker thread for downloads"""
@@ -121,6 +138,7 @@ class DownloadWorker(QThread):
     segment_outcome = Signal(str, str)        # exchange, GUIOutcome value
     overall_outcome = Signal(str)             # GUIOutcome value
     retry_candidates_ready = Signal(object)   # segment -> ISO date list
+    notice_occurred = Signal(str, str)        # exchange, a notice, not a failure
 
     def __init__(
         self,
@@ -313,7 +331,10 @@ class DownloadWorker(QThread):
         def on_error(_reported_exchange: str, error: str) -> None:
             self.error_occurred.emit(exchange, error)
 
-        return ProgressCallback(on_progress, on_status, on_error)
+        def on_notice(_reported_exchange: str, notice: str) -> None:
+            self.notice_occurred.emit(exchange, notice)
+
+        return ProgressCallback(on_progress, on_status, on_error, on_notice)
 
     def _handle_pipeline_event(self, event: PipelineEvent) -> None:
         update = self._status_presenter.present(event)
@@ -607,13 +628,15 @@ class DownloadWorker(QThread):
 
         last = {"percent": -1}
 
-        def report(done: int, total: int) -> None:
+        def report(
+            done: int, total: int, note: Optional[str] = None
+        ) -> None:
             percent = int(done * 100 / total) if total else 100
             if percent == last["percent"]:
                 return
             last["percent"] = percent
             self.progress_updated.emit(
-                HISTORY_PROGRESS_KEY, percent, f"{label} {done}/{total}"
+                HISTORY_PROGRESS_KEY, percent, note or f"{label} {done}/{total}"
             )
 
         return report
@@ -1220,6 +1243,10 @@ class MainWindow(QMainWindow):
         # Status tracking
         self.download_status: Dict[str, str] = {}
         self.segment_outcomes: Dict[str, GUIOutcome] = {}
+        # Segments carrying a notice -- a delivery report not published yet --
+        # or an error, so every later repaint keeps saying the same thing.
+        self.segment_notices: set[str] = set()
+        self.segment_errors: set[str] = set()
         self.successful_downloads: List[str] = []
         self.selected_exchanges_for_download: List[str] = []
         self._retry_candidates: Dict[str, List[str]] = {}
@@ -1318,6 +1345,15 @@ class MainWindow(QMainWindow):
             progress_group = self.create_progress_tracking()
             self._add_collapsible_section(
                 main_layout, "progress", "Download Progress", progress_group
+            )
+
+            # The stage after the downloads, in a section of its own.
+            history_group = self.create_history_progress_tracking()
+            self._add_collapsible_section(
+                main_layout,
+                "symbol_histories",
+                "Symbol Histories",
+                history_group,
             )
 
             # Create control buttons
@@ -1848,27 +1884,43 @@ class MainWindow(QMainWindow):
             self.status_labels[exchange] = status_label
             layout.addWidget(status_label, i, 2)
 
-        # The stage that runs after all of them, in the same shape so it reads
-        # as part of the same list rather than as a different kind of thing.
-        row = len(available_exchanges)
+        return group
+
+    def create_history_progress_tracking(self) -> QGroupBox:
+        """The symbol-history stage, in a section of its own.
+
+        It shares nothing with a download: it starts only once every download
+        has finished, and it settles in batches of its own.  Sitting in the
+        download list made it read as a seventh exchange.
+        """
+
+        group = QGroupBox("Symbol Histories")
+        layout = QGridLayout(group)
+        layout.setColumnMinimumWidth(0, 100)
+        layout.setColumnMinimumWidth(1, 200)
+        layout.setColumnMinimumWidth(2, 300)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 0)
+        layout.setColumnStretch(2, 1)
+
         history_label = QLabel(HISTORY_PROGRESS_KEY)
         history_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         history_label.setMinimumWidth(100)
-        layout.addWidget(history_label, row, 0)
+        layout.addWidget(history_label, 0, 0)
 
         history_bar = QProgressBar()
         history_bar.setVisible(False)
         history_bar.setMinimumWidth(200)
         history_bar.setMaximumHeight(20)
         self.progress_bars[HISTORY_PROGRESS_KEY] = history_bar
-        layout.addWidget(history_bar, row, 1)
+        layout.addWidget(history_bar, 0, 1)
 
         history_status = QLabel("Ready")
         history_status.setStyleSheet("color: gray;")
         history_status.setMinimumWidth(300)
         history_status.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.status_labels[HISTORY_PROGRESS_KEY] = history_status
-        layout.addWidget(history_status, row, 2)
+        layout.addWidget(history_status, 0, 2)
 
         return group
 
@@ -2104,6 +2156,8 @@ class MainWindow(QMainWindow):
             self.selected_exchanges_for_download = selected_exchanges.copy()
             self.successful_downloads = []
             self.segment_outcomes = {}
+            self.segment_notices = set()
+            self.segment_errors = set()
 
             # Disable download button and enable stop button
             self.download_button.setEnabled(False)
@@ -2114,6 +2168,9 @@ class MainWindow(QMainWindow):
             progress_section = self.collapsible_sections.get("progress")
             if progress_section:
                 progress_section.set_expanded(True)
+            history_section = self.collapsible_sections.get("symbol_histories")
+            if history_section:
+                history_section.set_expanded(True)
 
             # Show progress bars for selected exchanges with stable layout
             for exchange in selected_exchanges:
@@ -2164,6 +2221,7 @@ class MainWindow(QMainWindow):
             self.download_worker.progress_updated.connect(self.update_progress)
             self.download_worker.status_updated.connect(self.update_status)
             self.download_worker.error_occurred.connect(self.handle_error)
+            self.download_worker.notice_occurred.connect(self.handle_notice)
             self.download_worker.segment_outcome.connect(
                 self.handle_segment_outcome
             )
@@ -2497,11 +2555,29 @@ class MainWindow(QMainWindow):
 
     def handle_error(self, exchange: str, error: str):
         """Handle error for specific exchange"""
+        self.segment_errors.add(exchange)
         if exchange in self.status_labels:
             self.status_labels[exchange].setText(f"Error: {error}")
-            self.status_labels[exchange].setStyleSheet("color: red;")
+            self.status_labels[exchange].setStyleSheet(f"color: {ERROR_COLOR};")
 
         self.append_status_message(f"[{exchange}] ERROR: {error}")
+
+    def handle_notice(self, exchange: str, notice: str) -> None:
+        """Show what is not a failure without painting it as one.
+
+        A delivery report the exchange has not published yet is the ordinary
+        case: the day downloaded, and Retry Failed/Pending fills its delivery
+        columns in once the report appears.  Reported as an error it turned the
+        row red and left it that way behind a "Completed" message for the rest
+        of the run.
+        """
+
+        self.segment_notices.add(exchange)
+        if exchange in self.status_labels:
+            color = running_label_color(exchange in self.segment_errors, True)
+            self.status_labels[exchange].setStyleSheet(f"color: {color};")
+
+        self.append_status_message(f"[{exchange}] Pending: {notice}")
 
     def handle_download_completed(self, exchange: str, success: bool):
         """Handle completion of download for specific exchange"""
@@ -2666,17 +2742,28 @@ class MainWindow(QMainWindow):
 
     def _update_progress_immediate(self, exchange: str, percentage: int, message: str):
         """Immediate progress update without throttling"""
+        # The symbol stage has a row to itself and no six siblings to stay
+        # aligned with, so its message gets the width it needs: which batch it
+        # is on was the part being cut off.
+        history = exchange == HISTORY_PROGRESS_KEY
+        bar_width = 40 if history else 20
+        label_width = 60 if history else 30
         if exchange in self.progress_bars:
             progress_bar = self.progress_bars[exchange]
             progress_bar.setValue(percentage)
             # Set fixed format to prevent size changes
-            progress_bar.setFormat(f"%p% - {message[:20]:<20}")  # Truncate and pad message
+            progress_bar.setFormat(f"%p% - {message[:bar_width]:<{bar_width}}")
 
         if exchange in self.status_labels:
             # Use fixed-width formatting to prevent text jumping
-            truncated_message = message[:30] if len(message) > 30 else message
-            status_text = f"{percentage:3d}% - {truncated_message:<30}"
+            truncated_message = message[:label_width]
+            status_text = f"{percentage:3d}% - {truncated_message:<{label_width}}"
             self.status_labels[exchange].setText(status_text)
+            color = running_label_color(
+                exchange in self.segment_errors,
+                exchange in self.segment_notices,
+            )
+            self.status_labels[exchange].setStyleSheet(f"color: {color};")
 
     def _update_status_immediate(self, exchange: str, status: str):
         """Immediate status update without throttling"""
@@ -2685,7 +2772,11 @@ class MainWindow(QMainWindow):
             truncated_status = status[:40] if len(status) > 40 else status
             padded_status = f"{truncated_status:<40}"  # Left-align with padding
             self.status_labels[exchange].setText(padded_status)
-            self.status_labels[exchange].setStyleSheet("color: blue;")
+            color = running_label_color(
+                exchange in self.segment_errors,
+                exchange in self.segment_notices,
+            )
+            self.status_labels[exchange].setStyleSheet(f"color: {color};")
 
     def append_status_message(self, message: str):
         """Append message to status text area"""

@@ -4,9 +4,9 @@ Version Information
 Contains application version and build information.
 """
 
-__version__ = "1.2.0"
-__build_date__ = "2026-09-15"
-__build_number__ = 29
+__version__ = "1.2.1"
+__build_date__ = "2026-09-16"
+__build_number__ = 30
 
 # Verified update artifacts, keyed by "<platform>-<architecture>" exactly as
 # package_release_artifact.py names each release archive.  Release automation
@@ -22,7 +22,7 @@ __build_number__ = 29
 # v1.0.1 clients parse those three by regular expression to discover this
 # release, and tests/test_index_and_version.py fails if that contract breaks.
 __update_artifacts__: dict[str, dict[str, str]] = {
-    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.2.0-darwin-arm64.zip",
+    # "darwin-arm64": {"url": "https://github.com/.../NSE_BSE_Downloader-1.2.1-darwin-arm64.zip",
     #                  "sha256": "<64 hex characters>"},
     # "windows-x64": {...},
     # "linux-x64": {...},
@@ -30,6 +30,17 @@ __update_artifacts__: dict[str, dict[str, str]] = {
 
 # Version history
 VERSION_HISTORY = {
+
+    "1.2.1": {
+        "release_date": "2026-09-16",
+        "features": [
+            "The SQLite mirror is on by default, so a new data folder collects the database from its first download",
+            "Symbol histories have a section of their own, with progress across the whole stage and the batch it is on"
+        ],
+        "bug_fixes": [
+            "A delivery report the exchange has not published yet is shown as pending, not as an error"
+        ]
+    },
 
     "1.2.0": {
         "release_date": "2026-09-15",

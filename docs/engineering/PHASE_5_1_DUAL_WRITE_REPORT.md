@@ -626,3 +626,12 @@ owner's own runs with the setting on.
 It is turned off in all three places that decide it: `config.yaml`, the built-in
 preferences, and the call site's own fallback, which answers whenever the preferences do
 not carry the key. Turning off only one would have left another in charge.
+
+## Addendum — what the default became, 2026-09-16
+
+The mirror shipped **off** in v1.2.0 and **on** from v1.2.1. The owner turned it on after
+testing v1.2.0 on a fresh install: a setting that reads the database can only read what
+the mirror has already written, so a user who turns one on months later finds nothing
+there. The cost stands at about 450 MB a year for all six segments, and
+`dual_write_eod_database: false` still stops it without touching anything already written.
+

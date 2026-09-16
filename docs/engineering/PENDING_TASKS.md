@@ -358,11 +358,12 @@ through Gatekeeper. Only a signature fixes either, which is what this item is fo
 
 ## 5. Symbol-history progress: its own section, and progress that tells the truth
 
-Status: **Approved, deferred to the next build.** The owner tested the published v1.2.0
-macOS app on 2026-09-15 with a fresh download of 2026-01-01 to 2026-09-15 (173 dates, all
-six segments) and asked for the first item below, to be done when a build is needed
-anyway. The other two came out of the same run and belong in the same change. None of
-them affects data: the run published all 173 daily files in every segment.
+Status: **Done in v1.2.1 (2026-09-16).** The owner tested the published v1.2.0 macOS app
+on 2026-09-15 with a fresh download of 2026-01-01 to 2026-09-15 (173 dates, all six
+segments) and asked for the first item below, to be done when a build was needed anyway.
+The other two came out of the same run. A build was needed the next day, to turn the
+database mirror on by default, so all three went into it. None of them affected data: the
+run published all 173 daily files in every segment.
 
 1. **Give the "Symbol histories" row its own section.** It sits in *Download Progress*
    beside the six segment rows, although it is a separate stage that starts only after

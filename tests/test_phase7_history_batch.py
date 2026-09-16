@@ -905,3 +905,43 @@ def test_the_symbol_stage_reports_progress_while_it_runs(tmp_path):
     assert percents == sorted(percents), "progress must not go backwards"
     assert len(set(percents)) == len(percents), "one emission per percent"
     assert "1/1" in progress[-1][2] or "/" in progress[-1][2]
+
+
+def test_the_symbol_stage_counts_batches_instead_of_restarting(tmp_path):
+    """The bar used to run 0-100 % once per batch, with nothing saying how many.
+
+    The batch limit is what keeps a long backfill inside memory, so a 173-date
+    Select-All run settles in eleven of them.  The owner read the second pass as
+    the same work running twice, which is exactly what it looked like.  Progress
+    is counted in entries across the whole stage now, and each report names the
+    batch it is on.
+    """
+
+    days = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
+    manifest = PipelineManifest(tmp_path)
+    config = SimpleNamespace(
+        base_data_path=tmp_path,
+        download_settings=SimpleNamespace(
+            timeout_seconds=5, history_batch_dates=1
+        ),
+        stage_executors={},
+    )
+    coordinator = HistoryBatchCoordinator(config)
+    for day in days:
+        manifest.begin("NSE", "EQ", day, ("daily", "symbols"))
+        manifest.mark("NSE", "EQ", day, "daily", "complete")
+        coordinator.offer("NSE", "EQ", day, _rows(day))
+    config.history_batch_coordinator = coordinator
+
+    worker = DownloadWorker(config, [])
+    progress: list[tuple[str, int, str]] = []
+    worker.progress_updated.connect(lambda *args: progress.append(args))
+
+    asyncio.run(worker._finalize_staged_histories())
+
+    percents = [percent for _name, percent, _message in progress]
+    assert percents == sorted(percents), "the bar must not restart for each batch"
+    assert percents[0] == 0 and percents[-1] == 100
+    messages = [message for _name, _percent, message in progress]
+    for batch in ("Batch 1/3", "Batch 2/3", "Batch 3/3"):
+        assert any(batch in message for message in messages), batch

@@ -60,10 +60,12 @@ class UserPreferences:
                 "generate_symbol_files": True,
                 "apply_corporate_actions": True,
                 # Phase 5 step 1.  Mirrors every published frame into
-                # ``.state/eod.sqlite3``.  Off by default: it costs about
-                # 450 MB a year, and nothing reads it unless the settings below
-                # are turned on, which they are not by default either.
-                "dual_write_eod_database": False,
+                # ``.state/eod.sqlite3``.  On by default since 2026-09-16, so a
+                # settings file written on a fresh install starts collecting the
+                # database from the first download; the settings below can only
+                # read what this has already written.  It costs about 450 MB a
+                # year for all six segments.
+                "dual_write_eod_database": True,
                 # Phase 5 step 3.  Off by default: it changes which code
                 # writes the published files, and that earns a release of
                 # parity evidence before it becomes the default.

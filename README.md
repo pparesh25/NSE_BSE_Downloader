@@ -40,8 +40,8 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
 - Only dates each NSE segment was actually published are offered, from NSE equity's
   first trading day on 1994-11-03.
 - A rotating diagnostic log outside the data folder, opened from **Help → Open Log Folder**.
-- An optional SQLite mirror of every download, with commands that prove it regenerates
-  your files byte for byte — off by default.
+- A SQLite mirror of every download, with commands that prove it regenerates your
+  files byte for byte. On by default; the two settings that read it are not.
 - Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
@@ -275,14 +275,17 @@ database, a tail you have not downloaded yet, the older symbol-file column set
 
 ## The optional EOD database
 
-This version can also keep every download in a SQLite database, `.state/eod.sqlite3`, as
-the first steps towards making it the archive's system of record. **It is off by default,
-and with the default settings nothing new is written.** Each step was proven byte for byte
-against real downloads, and each has its own setting under `download_options`:
+This version also keeps every download in a SQLite database, `.state/eod.sqlite3`, as
+the first steps towards making it the archive's system of record. **The mirror is on by
+default from v1.2.1**, because the settings that read the database can only read what it
+has already written. It costs about 450 MB a year for all six segments, and
+`dual_write_eod_database: false` stops it without touching anything already written.
+Nothing reads it yet: the two settings that do are off. Each step was proven byte for
+byte against real downloads, and each has its own setting under `download_options`:
 
 | Setting | What it does |
 |---|---|
-| `dual_write_eod_database` | Mirrors every download into the database. About 450 MB a year for all six segments. The other two only read what this writes, so turn it on first. |
+| `dual_write_eod_database` | Mirrors every download into the database. **On by default.** About 450 MB a year for all six segments. The other two only read what this writes. |
 | `publish_histories_from_database` | Brings symbol histories up to date by extending each file rather than rewriting it. |
 | `read_snapshots_from_database` | Lets the history journal, the rebuild commands, the rebuild prompt and `--audit` read snapshots from the database. `.state/raw` is still written. |
 
@@ -394,6 +397,16 @@ platform-specific Nuitka command generation and the default no-build guard. The
 strict project mypy configuration currently passes all 63 source files.
 
 ## Version history
+
+### v1.2.1 (2026-09-16)
+
+- Turned the SQLite mirror on by default, so a new data folder starts collecting
+  `.state/eod.sqlite3` with its first download. The two settings that read the database
+  stay off.
+- Gave symbol histories a section of their own, and made their progress run once across
+  the whole stage, naming the batch it is on instead of restarting at zero for each.
+- A delivery report the exchange has not published yet is shown as pending rather than as
+  an error, so a day that did download no longer reads "Completed" in red.
 
 ### v1.2.0 (2026-09-15)
 

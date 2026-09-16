@@ -1,7 +1,7 @@
 # NSE/BSE Data Downloader Configuration
 
 app_settings:
-  release_date: "2026-09-15"
+  release_date: "2026-09-16"
   features:
     - "Date-aware legacy/current NSE and BSE downloads"
     - "Delivery volume and percentage for NSE/BSE cash data"
@@ -15,7 +15,7 @@ app_settings:
     - "Official NSE holiday refresh with IST-aware trading dates"
     - "Cooperative cancellation, typed outcomes and stage progress"
     - "Rotating diagnostic logs kept outside the data folder"
-    - "Optional SQLite mirror with byte-for-byte parity checks"
+    - "SQLite mirror of every download, with byte-for-byte parity checks"
     - "Nuitka-safe bundled resources and stable packaged-app identity"
     - "Python 3.10/3.13 CI gates with enforced test coverage"
     - "Automatic update notifications"
@@ -71,10 +71,12 @@ download_options:
 
   # Phase 5 step 1: write every published frame into .state/eod.sqlite3 as
   # well as to the text files.  The text files remain the system of record.
-  # Off by default since 2026-09-15: it costs about 450 MB a year for all six
-  # segments and gives nothing until the database-backed settings below are
-  # turned on -- and they only read what this has written, so turn it on first.
-  dual_write_eod_database: false
+  # On by default since 2026-09-16 (the owner's decision): a fresh install
+  # should start collecting the database from its first download, because the
+  # settings below can only read what this has already written.  It costs
+  # about 450 MB a year for all six segments, and turning it off stops the
+  # mirror without touching anything already written.
+  dual_write_eod_database: true
 
   # Phase 5 step 3: write symbol histories out of .state/eod.sqlite3, extending
   # each one in place instead of rewriting it.  Measured on a one-day change:

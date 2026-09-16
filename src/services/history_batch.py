@@ -174,6 +174,23 @@ class HistoryBatchJournal:
             ).fetchone()
         return row is not None
 
+    def pending_total(self) -> int:
+        """How many entries the whole stage still has to settle.
+
+        Entries move out of the pending table into a prepared batch, so a run
+        resuming after a crash has to count both, or it would report progress
+        against a total that shrinks under it.
+        """
+
+        with self._connect() as connection:
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM history_pending_entries"
+            ).fetchone()[0]
+            active = connection.execute(
+                "SELECT COUNT(*) FROM history_batch_entries"
+            ).fetchone()[0]
+        return int(pending) + int(active)
+
     def prepare(
         self, limit: Optional[int] = None
     ) -> Optional[tuple[str, tuple[HistoryJournalEntry, ...]]]:
@@ -494,21 +511,69 @@ class HistoryBatchCoordinator:
             summaries[identity] = f"Symbol history not published -- {summary}"
         return summaries
 
+    @staticmethod
+    def _batch_progress(
+        report: Callable[..., None],
+        done_entries: int,
+        batch_entries: int,
+        total_entries: int,
+        index: int,
+        count: int,
+    ) -> Callable[[int, int], None]:
+        """Turn one batch's symbol counter into progress over the whole stage."""
+
+        def progress(done: int, total: int) -> None:
+            settled = done_entries + batch_entries * (done / total if total else 1.0)
+            report(
+                min(int(settled), total_entries),
+                total_entries,
+                f"Batch {index}/{count} · {done}/{total} symbols",
+            )
+
+        return progress
+
     def finalize(
-        self, on_progress: Optional[Callable[[int, int], None]] = None
+        self, on_progress: Optional[Callable[..., None]] = None
     ) -> tuple[HistoryBatchOutcome, ...]:
         with self._lock:
             return self._finalize_locked(on_progress)
 
     def _finalize_locked(
-        self, on_progress: Optional[Callable[[int, int], None]] = None
+        self, on_progress: Optional[Callable[..., None]] = None
     ) -> tuple[HistoryBatchOutcome, ...]:
         outcomes: list[HistoryBatchOutcome] = []
+        # The stage settles in batches so that a long backfill stays inside
+        # memory, and the bar used to restart at zero for every one of them --
+        # eleven times for a 173-date run, with nothing on screen to say how
+        # many were left.  Progress is counted in entries across the whole
+        # stage instead, and every report names the batch it is on.
+        total_entries = self.journal.pending_total() if on_progress else 0
+        batch_count = -(-total_entries // self.batch_dates) if total_entries else 0
+        done_entries = 0
+        batch_index = 0
         while True:
             prepared = self.journal.prepare(self.batch_dates)
             if prepared is None:
+                if on_progress and total_entries:
+                    on_progress(
+                        total_entries,
+                        total_entries,
+                        f"Batch {batch_count}/{batch_count} · finished",
+                    )
                 return tuple(outcomes)
             batch_id, entries = prepared
+            batch_index += 1
+            batch_progress = (
+                self._batch_progress(
+                    on_progress,
+                    done_entries,
+                    len(entries),
+                    total_entries,
+                    batch_index,
+                    max(batch_count, batch_index),
+                )
+                if on_progress else None
+            )
             started = time.monotonic_ns()
             try:
                 items = []
@@ -540,7 +605,7 @@ class HistoryBatchCoordinator:
                         batch_id, path
                     ),
                     publish_files=self.publish_files,
-                    on_progress=on_progress,
+                    on_progress=batch_progress,
                 )
                 held_back = self._held_back_dates(result)
                 updates: list[StageUpdate] = []
@@ -613,3 +678,4 @@ class HistoryBatchCoordinator:
                 duration_ms=(time.monotonic_ns() - started) / 1_000_000,
             )
             outcomes.append(HistoryBatchOutcome(batch_id, entries, result))
+            done_entries += len(entries)

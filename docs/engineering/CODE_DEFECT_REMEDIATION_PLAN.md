@@ -1668,7 +1668,9 @@ The migration is four independently shippable steps, from §7 of the review:
 - [x] **1. Dual-write — done 2026-08-20.** `src/services/eod_store.py` mirrors every
       published frame into `.state/eod.sqlite3` from the canonical frames already in
       memory. Nothing reads it, a write failure is logged rather than raised, and
-      `dual_write_eod_database` controls it; it ships off (the owner's decision, 2026-09-15), because it costs about 450 MB a year before anything reads it. Measuring the real tree before writing
+      `dual_write_eod_database` controls it. It shipped off in v1.2.0 (the owner's
+      decision, 2026-09-15) and on from v1.2.1 (2026-09-16), because a setting that reads
+      the database can only read what the mirror has already written. Measuring the real tree before writing
       the schema corrected the key proposed in the review — neither `SECURITY_ID` nor
       `ISIN` alone identifies a security — and found that a clustered table without
       statistics silently scans every date an exchange ever published. Evidence:

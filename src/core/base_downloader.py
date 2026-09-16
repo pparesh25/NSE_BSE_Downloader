@@ -72,7 +72,8 @@ class ProgressCallback:
     def __init__(self,
                  on_progress: Optional[Callable[[str, int, str], None]] = None,
                  on_status: Optional[Callable[[str, str], None]] = None,
-                 on_error: Optional[Callable[[str, str], None]] = None):
+                 on_error: Optional[Callable[[str, str], None]] = None,
+                 on_notice: Optional[Callable[[str, str], None]] = None):
         """
         Initialize progress callback
 
@@ -80,10 +81,13 @@ class ProgressCallback:
             on_progress: Callback for progress updates (exchange_segment, percentage, message)
             on_status: Callback for status updates (exchange_segment, status_message)
             on_error: Callback for error notifications (exchange_segment, error_message)
+            on_notice: Callback for notices that are not failures
+                (exchange_segment, notice_message)
         """
         self.on_progress = on_progress or self._default_progress
         self.on_status = on_status or self._default_status
         self.on_error = on_error or self._default_error
+        self.on_notice = on_notice or self._default_notice
 
     def _default_progress(self, exchange_segment: str, percentage: int, message: str):
         print(f"[{exchange_segment}] {percentage}% - {message}")
@@ -93,6 +97,9 @@ class ProgressCallback:
 
     def _default_error(self, exchange_segment: str, error: str):
         print(f"[{exchange_segment}] ERROR: {error}")
+
+    def _default_notice(self, exchange_segment: str, notice: str):
+        print(f"[{exchange_segment}] NOTICE: {notice}")
 
 
 class BaseDownloader(ABC):
@@ -190,10 +197,20 @@ class BaseDownloader(ABC):
         self.logger.error(error)
 
     def _report_notice(self, notice: str) -> None:
-        """Report notice message to both application console and IDE console"""
-        # Send to application console (GUI) as error (for visibility)
+        """Report something the user should see that is not a failure.
+
+        A delivery report the exchange has not published yet is the ordinary
+        case: the day downloaded, and Retry Failed/Pending fills the delivery
+        columns in once it appears.  This used to be reported through
+        ``on_error``, which painted the segment red and left it reading
+        "Completed" in red for the rest of the run.
+        """
         if self.progress_callback:
-            self.progress_callback.on_error(self.exchange_segment, notice)
+            # Older callbacks carry only on_error; a notice is still better
+            # seen than lost.
+            report = getattr(self.progress_callback, "on_notice", None)
+            report = report or self.progress_callback.on_error
+            report(self.exchange_segment, notice)
 
         # Send to IDE console as warning (appropriate level for notices)
         self.logger.warning(notice)
@@ -439,7 +456,7 @@ class BaseDownloader(ABC):
         them.
         """
 
-        if not self.get_download_option("dual_write_eod_database", False):
+        if not self.get_download_option("dual_write_eod_database", True):
             return None
         store = getattr(self.config, "eod_store", None)
         if store is None:

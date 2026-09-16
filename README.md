@@ -1,4 +1,4 @@
-# NSE/BSE Data Downloader v1.1.1 (PySide6)
+# NSE/BSE Data Downloader v1.2.0 (PySide6)
 
 > ### Upgrading from v1.0.1? Read **[UPGRADE.md](UPGRADE.md)** first.
 > v1.1.0 replaced PyQt6 with PySide6 and requires Python 3.10 or newer. Copying these
@@ -9,15 +9,18 @@
 > [releases page](https://github.com/pparesh25/NSE_BSE_Downloader/releases/latest).
 >
 > **Using a v1.1.0 prebuilt application?** Replace it. Those builds shipped without a
-> certificate store and could not download anything; they were withdrawn and v1.1.1
-> fixes it. Source installs were never affected.
+> certificate store and could not download anything; they were withdrawn, and v1.1.1
+> and later fix it. Source installs were never affected.
+>
+> **Coming from v1.1.1?** Nothing to migrate or install — the top of
+> **[UPGRADE.md](UPGRADE.md)** covers the two new columns and the optional database.
 
 A desktop downloader that turns legacy and current NSE/BSE reports into one stable daily-file format.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
 ![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.1-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)
 
 ## Features
 
@@ -34,6 +37,11 @@ A desktop downloader that turns legacy and current NSE/BSE reports into one stab
   symbol histories without changing a single byte of the data folder.
 - Turnover and previous close from every supported report era, normalised to rupees,
   with a per-segment schema marker beside the data.
+- Only dates each NSE segment was actually published are offered, from NSE equity's
+  first trading day on 1994-11-03.
+- A rotating diagnostic log outside the data folder, opened from **Help → Open Log Folder**.
+- A SQLite mirror of every download, with commands that prove it regenerates your
+  files byte for byte. On by default; the two settings that read it are not.
 - Staged per-date publication with deterministic SME/Index combination.
 - Calendar-based historical/custom date ranges with automatic mode retained.
 - Individually collapsible Exchange, Date, Options, Progress and Status panels.
@@ -71,13 +79,13 @@ packaged releases use the same native product and bundle identity.
 
 ### Upgrading from v1.0.1
 
-Version 1.1 keeps the existing `~/NSE_BSE_Data/` data root and
+Every version since 1.1 keeps the existing `~/NSE_BSE_Data/` data root and
 `~/.nse_bse_downloader/` preference directory. Existing seven-column daily files
 remain readable and are not rewritten merely by launching the application. A date
-downloaded again is published under the current stable nine-column EQ/SME/FO
-contract. Back up important user data before a major upgrade and use the official
-GitHub Release assets, or the immutable `v1.1.1` tag, rather than an archive from a
-mutable branch.
+downloaded again is published under the current eleven-column EQ/SME/FO contract.
+Back up important user data before a major upgrade and use the official GitHub
+Release assets, or the immutable `v1.2.0` tag, rather than an archive from a mutable
+branch.
 
 ## Nuitka packaging and release trust
 
@@ -119,6 +127,10 @@ work is active follows the same safe shutdown path.
 
 Files are stored under `~/NSE_BSE_Data/` by default.
 
+After the downloads finish, symbol histories are brought up to date. That stage has its
+own **Symbol histories** row in the progress panel, with a bar and a count, so a large
+update never looks like a frozen window.
+
 If something goes wrong, **Help → Open Log Folder** opens
 `~/.nse_bse_downloader/logs/`. Each run records the application version,
 platform and certificate status at the top, so attaching the log to an issue is
@@ -130,24 +142,27 @@ nothing is written into your data folder.
 NSE/BSE Equity and SME:
 
 ```text
-SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,DELIVERY_QTY,DELIVERY_PERCENT
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,DELIVERY_QTY,DELIVERY_PERCENT,TURNOVER,PREV_CLOSE
 ```
 
 NSE Futures:
 
 ```text
-SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,OPEN_INTEREST,CHANGE_IN_OI
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,OPEN_INTEREST,CHANGE_IN_OI,TURNOVER,PREV_CLOSE
 ```
 
-Index files keep seven columns:
+Index files:
 
 ```text
-SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME
+SYMBOL,DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,TURNOVER,PREV_CLOSE
 ```
 
-Equity, SME and FO files always retain their stable nine-column shape. If delivery
-or FO open interest is disabled or unavailable, the corresponding optional fields
-are blank rather than removed. NSE delivery is matched by `SYMBOL + SERIES`; BSE
+Equity, SME and FO files always retain their stable eleven-column shape, and index
+files their nine. If delivery or FO open interest is disabled or unavailable, the
+corresponding optional fields are blank rather than removed. Files written by earlier
+versions keep the width they were written with; the `SCHEMA.json` in each segment
+folder names the columns of every width, so a reader tells the generations apart by
+counting. NSE delivery is matched by `SYMBOL + SERIES`; BSE
 delivery is matched by security code.
 
 When the append options are enabled, the app always assembles combined cash
@@ -167,7 +182,8 @@ aligned by column name, so the two delivery fields remain blank.
 ```text
 ~/NSE_BSE_Data/
 ├── .state/                 # Internal pending/action/raw rebuild state
-│   └── components/         # Validated inputs for combined-file restart/rebuild
+│   ├── components/         # Validated inputs for combined-file restart/rebuild
+│   └── eod.sqlite3         # Optional database mirror, only if you turn it on
 ├── NSE/
 │   ├── EQ/
 │   ├── FO/
@@ -184,8 +200,11 @@ aligned by column name, so the two delivery fields remain blank.
 Each symbol file has one header and one row per date:
 
 ```text
-DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,DELIVERY_PERCENT
+DATE,OPEN,HIGH,LOW,CLOSE,VOLUME,SERIES,TOTAL_TRADES,QTY_PER_TRADE,DELIVERY_QTY,DELIVERY_PERCENT,ISIN,TURNOVER,PREV_CLOSE
 ```
+
+`ISIN` identifies the security; `TURNOVER` and `PREV_CLOSE` come last, so a tool that
+reads the earlier columns by position keeps working.
 
 Symbol files are sorted, idempotently updated and renamed/merged using ISIN or exchange security code when available. Split, consolidation and equity-bonus actions adjust pre-ex-date rows only: `OPEN`, `HIGH`, `LOW` and `CLOSE` are divided by the factor, and `VOLUME`, `DELIVERY_QTY` and `QTY_PER_TRADE` are multiplied by it, so price x volume is unchanged across the ex-date. `TOTAL_TRADES` counts transactions rather than shares and `DELIVERY_PERCENT` is a ratio of two columns that both scale, so neither is touched. FO open interest is not adjusted.
 
@@ -253,6 +272,35 @@ Exit codes are `0` for a clean database, `1` when there are findings, and `2`
 when the audit itself could not run. Notices — data older than the pipeline
 database, a tail you have not downloaded yet, the older symbol-file column set
 — are shown but do not fail the command.
+
+## The optional EOD database
+
+This version also keeps every download in a SQLite database, `.state/eod.sqlite3`, as
+the first steps towards making it the archive's system of record. **The mirror is on by
+default from v1.2.1**, because the settings that read the database can only read what it
+has already written. It costs about 450 MB a year for all six segments, and
+`dual_write_eod_database: false` stops it without touching anything already written.
+Nothing reads it yet: the two settings that do are off. Each step was proven byte for
+byte against real downloads, and each has its own setting under `download_options`:
+
+| Setting | What it does |
+|---|---|
+| `dual_write_eod_database` | Mirrors every download into the database. **On by default.** About 450 MB a year for all six segments. The other two only read what this writes. |
+| `publish_histories_from_database` | Brings symbol histories up to date by extending each file rather than rewriting it. |
+| `read_snapshots_from_database` | Lets the history journal, the rebuild commands, the rebuild prompt and `--audit` read snapshots from the database. `.state/raw` is still written. |
+
+Three commands work with it:
+
+```bash
+python main.py --verify-eod-parity                     # regenerate every file from the database and diff it
+python main.py --republish-histories                   # write symbol histories out of the database
+python main.py --snapshot-revisions NSE EQ 2026-08-18  # what the exchange changed when it republished a day
+```
+
+`--verify-eod-parity` and `--snapshot-revisions` only read. `--republish-histories`
+writes symbol files and takes the same lock a download does. The measurements behind
+each step are in
+[PHASE_5_1_DUAL_WRITE_REPORT.md](docs/engineering/PHASE_5_1_DUAL_WRITE_REPORT.md).
 
 ## Date-aware report support
 
@@ -330,21 +378,48 @@ promise that it reports them without writing: one test fingerprints every path,
 mtime, size and content digest under a data root around a full run and requires
 them to be identical afterwards.
 
+The EOD database tests regenerate daily files, symbol histories and raw snapshots
+through the real writers and compare them byte for byte, and fingerprint the data root
+around every command that promises only to read.
+
 GitHub Actions runs the suite on Python 3.10 and 3.13 and fails below 70%
 coverage. Ruff, mypy and a no-build Nuitka command validation are separate
 release gates. The equivalent local commands are:
 
 ```bash
 python -m ruff check .
-python -m mypy src main.py app_metadata.py runtime_paths.py runtime_identity.py build_nuitka_cross_platform.py
+python -m mypy src main.py app_metadata.py runtime_paths.py runtime_identity.py build_nuitka_cross_platform.py package_release_artifact.py
 python -m pytest --cov=src --cov=main --cov=runtime_paths --cov=runtime_identity --cov=app_metadata --cov=version --cov-fail-under=70
 python build_nuitka_cross_platform.py --target linux
 ```
 They also verify bundle-root config/QR lookup, compiled-module version detection,
 platform-specific Nuitka command generation and the default no-build guard. The
-strict project mypy configuration currently passes all 56 source files.
+strict project mypy configuration currently passes all 63 source files.
 
 ## Version history
+
+### v1.2.1 (2026-09-16)
+
+- Turned the SQLite mirror on by default, so a new data folder starts collecting
+  `.state/eod.sqlite3` with its first download. The two settings that read the database
+  stay off.
+- Gave symbol histories a section of their own, and made their progress run once across
+  the whole stage, naming the batch it is on instead of restarting at zero for each.
+- A delivery report the exchange has not published yet is shown as pending rather than as
+  an error, so a day that did download no longer reads "Completed" in red.
+
+### v1.2.0 (2026-09-15)
+
+- Added a read-only `--audit` command that checks every recorded checksum, coverage,
+  row counts and symbol histories without writing anything.
+- Added turnover and previous close to every daily file and symbol history, from every
+  report era, with a `SCHEMA.json` in each folder naming the columns of every width.
+- Limited the date picker to dates each NSE segment was actually published.
+- Added a rotating diagnostic log outside the data folder and **Help → Open Log Folder**.
+- Gave the symbol-history stage its own progress row after downloads finish.
+- Measured delivery joins, so a report that matched nothing no longer publishes silently.
+- Added an optional SQLite mirror with `--verify-eod-parity`, `--republish-histories`
+  and `--snapshot-revisions`; off by default.
 
 ### v1.1.1 (2026-08-18)
 
